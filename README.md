@@ -86,22 +86,6 @@ If you don't want to remember flags, launch the arrow-key menu:
 cswap --tui
 ```
 
-### Add an account from a raw OAuth token
-
-If you only have a long-lived setup-token (e.g., produced by `claude setup-token`)
-and you don't want to log in via the browser flow first — useful on headless
-servers or when receiving a token from another machine — register it directly:
-
-```bash
-cswap --add-token sk-ant-oat01-... --email user@example.com
-cswap --add-token sk-ant-oat01-... --email user@example.com --slot 3
-cswap --add-token - --email user@example.com           # read token from stdin
-cswap --add-token --email user@example.com             # prompt securely (no echo)
-```
-
-`--email` is required so cswap's metadata stays aligned with the rest of the
-accounts. No Anthropic API calls are made.
-
 ### Other commands
 
 ```bash
@@ -132,7 +116,9 @@ cswap --purge                   # Remove all claude-swap data
 
 On Linux/WSL the location follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html). Set `XDG_DATA_HOME` to override; otherwise it defaults to `~/.local/share/claude-swap/`. Existing installs with data under `~/.claude-swap-backup/` are migrated automatically on the first run. If both the legacy and new paths exist, `cswap` refuses to start and asks you to remove the stale one manually.
 
-## Backup and migration
+## Advanced
+
+### Backup and migration
 
 Move account data between machines or back it up:
 
@@ -145,6 +131,22 @@ cswap --import backup.cswap --force          # Overwrite existing
 ```
 
 The export file is plaintext JSON. If you need encryption, pipe through your tool of choice (e.g. `cswap --export - | gpg -c > backup.gpg`).
+
+### Add an account from a raw OAuth token
+
+If you only have a long-lived setup-token (e.g., produced by `claude setup-token`)
+and you don't want to log in via the browser flow first — useful on headless
+servers or when receiving a token from another machine — register it directly:
+
+```bash
+cswap --add-token sk-ant-oat01-... --email user@example.com
+cswap --add-token sk-ant-oat01-... --email user@example.com --slot 3
+cswap --add-token - --email user@example.com           # read token from stdin
+cswap --add-token --email user@example.com             # prompt securely (no echo)
+```
+
+`--email` is required so cswap's metadata stays aligned with the rest of the
+accounts. No Anthropic API calls are made.
 
 ## Uninstall
 
