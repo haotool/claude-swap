@@ -78,14 +78,6 @@ cswap --add-account
 
 This will update the stored credentials without creating a duplicate.
 
-### Interactive TUI
-
-If you don't want to remember flags, launch the arrow-key menu:
-
-```bash
-cswap --tui
-```
-
 ### Other commands
 
 ```bash
@@ -93,6 +85,7 @@ cswap --list                    # Show all accounts with 5h/7d usage and reset t
 cswap --status                  # Show current account
 cswap --add-account --slot 3    # Add account to a specific slot (prompts before overwrite)
 cswap --remove-account 2        # Remove an account
+cswap --tui                     # Launch the interactive arrow-key menu
 cswap --purge                   # Remove all claude-swap data
 ```
 
@@ -114,7 +107,7 @@ cswap --purge                   # Remove all claude-swap data
 | macOS | macOS Keychain | `~/.claude-swap-backup/` |
 | Linux / WSL | File-based (inside the backup directory, under `credentials/`) | `${XDG_DATA_HOME:-~/.local/share}/claude-swap/` |
 
-On Linux/WSL the location follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html). Set `XDG_DATA_HOME` to override; otherwise it defaults to `~/.local/share/claude-swap/`. Existing installs with data under `~/.claude-swap-backup/` are migrated automatically on the first run. If both the legacy and new paths exist, `cswap` refuses to start and asks you to remove the stale one manually.
+On Linux/WSL, set `XDG_DATA_HOME` to override the default location. Data from older installs under `~/.claude-swap-backup/` is migrated automatically on first run.
 
 ## Advanced
 
