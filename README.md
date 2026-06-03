@@ -103,7 +103,7 @@ cswap --purge                   # Remove all claude-swap data
 
 | Platform | Credentials | Config backups |
 |----------|-------------|----------------|
-| Windows | Windows Credential Manager | `~/.claude-swap-backup/` |
+| Windows | File-based (inside the backup directory, under `credentials/`) | `~/.claude-swap-backup/` |
 | macOS | macOS Keychain | `~/.claude-swap-backup/` |
 | Linux / WSL | File-based (inside the backup directory, under `credentials/`) | `${XDG_DATA_HOME:-~/.local/share}/claude-swap/` |
 

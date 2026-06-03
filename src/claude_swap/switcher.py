@@ -117,6 +117,14 @@ class ClaudeAccountSwitcher:
         self.lock_file = self.backup_dir / ".lock"
         self._logger = setup_logging(self.backup_dir, debug=debug)
 
+        # Run any pending one-time data migrations (e.g. relocating Windows
+        # backup credentials out of Credential Manager into files). Imported
+        # lazily to avoid a circular import, and self-contained so it never
+        # aborts construction. No-op on fresh installs / once recorded.
+        from claude_swap.migrations import run_migrations
+
+        run_migrations(self)
+
     def _is_running_in_container(self) -> bool:
         """Check if running inside a container."""
         # Check environment variables (works on all platforms)
@@ -302,13 +310,23 @@ class ClaudeAccountSwitcher:
             except Exception as e:
                 raise CredentialWriteError(f"Failed to write credentials: {e}")
 
+    def _uses_file_backup_backend(self) -> bool:
+        """Whether per-account backup credentials live in files vs. the keyring.
+
+        Linux/WSL/Windows store them as base64 files under ``credentials_dir``;
+        macOS (and any UNKNOWN platform) use the system keyring. Windows moved
+        to files because the Windows Credential Manager rejects entries over
+        ~2,500 bytes, which Claude Code session credentials can exceed (#45).
+        """
+        return self.platform in (Platform.LINUX, Platform.WSL, Platform.WINDOWS)
+
     def _read_account_credentials(self, account_num: str, email: str) -> str:
         """Read account credentials from backup.
 
-        On Linux/WSL: Uses file-based storage to avoid keyring backend issues.
-        On macOS/Windows: Uses system keyring.
+        On Linux/WSL/Windows: Uses file-based storage (base64 files under
+        ``credentials_dir``). On macOS: Uses the system keyring.
         """
-        if self.platform in (Platform.LINUX, Platform.WSL):
+        if self._uses_file_backup_backend():
             cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
             if cred_file.exists():
                 try:
@@ -319,7 +337,7 @@ class ClaudeAccountSwitcher:
                     return ""
             return ""
         else:
-            # Use keyring for macOS/Windows
+            # Use keyring for macOS
             username = f"account-{account_num}-{email}"
             try:
                 creds = keyring.get_password(KEYRING_SERVICE, username)
@@ -333,20 +351,21 @@ class ClaudeAccountSwitcher:
     ) -> None:
         """Write account credentials to backup.
 
-        On Linux/WSL: Uses file-based storage to avoid keyring backend issues.
-        On macOS/Windows: Uses system keyring.
+        On Linux/WSL/Windows: Uses file-based storage (base64 files under
+        ``credentials_dir``). On macOS: Uses the system keyring.
         """
-        if self.platform in (Platform.LINUX, Platform.WSL):
+        if self._uses_file_backup_backend():
             cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
             try:
                 encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
                 cred_file.write_text(encoded, encoding="utf-8")
-                os.chmod(cred_file, 0o600)
+                if sys.platform != "win32":
+                    os.chmod(cred_file, 0o600)
             except Exception as e:
                 self._logger.warning(f"Failed to write credentials file: {e}")
                 raise
         else:
-            # Use keyring for macOS/Windows
+            # Use keyring for macOS
             username = f"account-{account_num}-{email}"
             try:
                 keyring.set_password(KEYRING_SERVICE, username, credentials)
@@ -357,10 +376,10 @@ class ClaudeAccountSwitcher:
     def _delete_account_credentials(self, account_num: str, email: str) -> None:
         """Delete account credentials from backup.
 
-        On Linux/WSL: Deletes file-based credential storage.
-        On macOS/Windows: Removes from system keyring.
+        On Linux/WSL/Windows: Deletes file-based credential storage.
+        On macOS: Removes from system keyring.
         """
-        if self.platform in (Platform.LINUX, Platform.WSL):
+        if self._uses_file_backup_backend():
             cred_files = [self.credentials_dir / f".creds-{account_num}-{email}.enc"]
             if str(account_num) != "None":
                 cred_files.append(self.credentials_dir / f".creds-None-{email}.enc")
@@ -371,7 +390,7 @@ class ClaudeAccountSwitcher:
                 except Exception as e:
                     self._logger.warning(f"Failed to delete credentials file: {e}")
         else:
-            # Use keyring for macOS/Windows
+            # Use keyring for macOS
             usernames = [f"account-{account_num}-{email}"]
             if str(account_num) != "None":
                 usernames.append(f"account-None-{email}")
@@ -1611,7 +1630,9 @@ class ClaudeAccountSwitcher:
         """Remove all traces of claude-swap from the system.
 
         This removes:
-        - All stored account credentials (files on Linux, keyring on macOS/Windows)
+        - All stored account credentials (files on Linux/WSL/Windows, keyring on
+          macOS), plus a best-effort sweep of any pre-migration Windows
+          Credential Manager entries left behind
         - The active backup directory (XDG path on Linux/WSL, ~/.claude-swap-backup elsewhere)
         - Any stale legacy ~/.claude-swap-backup directory left around from
           before the XDG migration
@@ -1623,7 +1644,7 @@ class ClaudeAccountSwitcher:
         print(f"  - Backup directory: {self.backup_dir}")
         if legacy_distinct and legacy.exists():
             print(f"  - Legacy backup directory: {legacy}")
-        if self.platform in (Platform.LINUX, Platform.WSL):
+        if self._uses_file_backup_backend():
             print("  - All stored account credential files")
         else:
             print("  - All stored account credentials from the system keyring")
@@ -1643,8 +1664,8 @@ class ClaudeAccountSwitcher:
         if data:
             for account_num, account_info in data.get("accounts", {}).items():
                 email = account_info.get("email", "")
-                if self.platform in (Platform.LINUX, Platform.WSL):
-                    # Remove credential files on Linux
+                if self._uses_file_backup_backend():
+                    # Remove credential files (Linux/WSL/Windows)
                     cred_files = [
                         self.credentials_dir / f".creds-{account_num}-{email}.enc"
                     ]
@@ -1659,8 +1680,26 @@ class ClaudeAccountSwitcher:
                                 removed_items.append(f"Credential file: {cred_file.name}")
                         except Exception:
                             pass  # Ignore errors during purge
+                    if self.platform == Platform.WINDOWS:
+                        # Best-effort cleanup of any pre-migration Credential
+                        # Manager entries left behind if the keyring → file
+                        # migration never completed. Files are authoritative
+                        # now; these are just stale cruft.
+                        usernames = [f"account-{account_num}-{email}"]
+                        if str(account_num) != "None":
+                            usernames.append(f"account-None-{email}")
+                        for username in usernames:
+                            try:
+                                keyring.delete_password(KEYRING_SERVICE, username)
+                                removed_items.append(
+                                    f"Legacy keyring credential: {username}"
+                                )
+                            except keyring.errors.PasswordDeleteError:
+                                pass  # Entry doesn't exist
+                            except Exception:
+                                pass  # Ignore other errors during purge
                 else:
-                    # Remove from keyring on macOS/Windows
+                    # Remove from keyring on macOS
                     usernames = [f"account-{account_num}-{email}"]
                     if str(account_num) != "None":
                         usernames.append(f"account-None-{email}")

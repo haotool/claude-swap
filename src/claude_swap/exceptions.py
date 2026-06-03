@@ -65,3 +65,15 @@ class MigrationError(ClaudeSwitchError):
     """Error migrating the backup directory between layouts (e.g. legacy → XDG)."""
 
     pass
+
+
+class MigrationIncomplete(ClaudeSwitchError):
+    """A one-time data migration could not finish for every record.
+
+    Raised by run-once migrations (see ``migrations.py``) when some entries
+    failed or the source backend was inaccessible. The migration runner treats
+    this as "not applied" so the migration is retried on the next run rather
+    than being recorded as done with records left behind.
+    """
+
+    pass
