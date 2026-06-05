@@ -66,7 +66,7 @@ cswap --switch-to 2
 cswap --switch-to user@example.com
 ```
 
-**Note:** Restart Claude Code (or close and reopen the VS Code extension tab) after switching for the new account to take effect.
+**Note:** You usually don't need to restart — on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
 
 ### Refresh expired tokens
 
@@ -91,7 +91,8 @@ cswap --purge                   # Remove all claude-swap data
 
 ## Tips
 
-- **Continuing sessions after switching:** You can resume the same Claude Code session after switching accounts. Close Claude Code or the VS Code extension tab, run `cswap --switch` in any terminal, then reopen and select your previous session. Note that the first message on the new account may use extra usage as the conversation cache rebuilds for that account.
+- **Do you need to restart after switching?** Usually not. On **Linux and Windows**, credentials are stored in a file and Claude Code re-reads them whenever that file changes, so the new account takes effect on your next message — no restart needed. On **macOS**, credentials live in the Keychain, which Claude Code caches for about 30 seconds; a running session picks up the switch once that cache expires. Restart Claude Code (or close and reopen the VS Code extension tab) only if you want the change to apply instantly.
+- **Continuing sessions after switching:** You can keep using the same Claude Code session after switching — run `cswap --switch` in any terminal and carry on. If you'd prefer a clean start, close and reopen Claude Code (or the VS Code extension tab) and use `--resume` to pick your previous session. Either way, the first message on the new account may use extra usage as its conversation cache rebuilds.
 
 ## How it works
 
