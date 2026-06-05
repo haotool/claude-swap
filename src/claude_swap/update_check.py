@@ -95,7 +95,7 @@ def run_self_upgrade() -> int:
     Returns the subprocess exit code, or 1 if detection failed or the package
     manager is missing from PATH.
     """
-    from claude_swap.printer import error
+    from claude_swap.printer import accent, error
 
     method = _detect_install_method()
     commands = {
@@ -118,14 +118,10 @@ def run_self_upgrade() -> int:
 
     # Windows: the running cswap.exe launcher is locked, so an in-process
     # uv/pipx upgrade fails when it tries to replace the executable even
-    # though the package itself updates. Tell the user to run it in a fresh
-    # shell instead of executing it ourselves.
+    # though the package itself updates. cswap exits right after this, which
+    # releases the lock, so the user can just run the command themselves.
     if sys.platform == "win32":
-        error(
-            "claude-swap can't upgrade itself while running on Windows.\n"
-            "Close this process, then run in a new terminal:\n"
-            f"  {' '.join(cmd)}"
-        )
+        print(f"To upgrade claude-swap on Windows, run:\n  {accent(' '.join(cmd))}")
         return 1
 
     try:
