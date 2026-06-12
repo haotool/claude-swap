@@ -27,6 +27,9 @@ class _KeychainStore:
     def get_password(self, service: str, account: str) -> str | None:
         return self.data.get((service, account))
 
+    def item_exists(self, service: str, account: str) -> bool:
+        return (service, account) in self.data
+
     def set_password(self, service: str, account: str, password: str) -> None:
         self.data[(service, account)] = password
 
@@ -124,6 +127,7 @@ def block_real_keychain(request, monkeypatch):
         return
     store = _KeychainStore()
     monkeypatch.setattr(_macos_keychain, "get_password", store.get_password)
+    monkeypatch.setattr(_macos_keychain, "item_exists", store.item_exists)
     monkeypatch.setattr(_macos_keychain, "set_password", store.set_password)
     monkeypatch.setattr(_macos_keychain, "delete_password", store.delete_password)
     monkeypatch.setitem(sys.modules, "keyring", _make_fake_keyring())

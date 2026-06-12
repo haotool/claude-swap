@@ -105,12 +105,19 @@ def _mark_applied(switcher: "ClaudeAccountSwitcher", migration_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _delete_keyring_quietly(keyring, switcher, username: str) -> None:
+def _delete_keyring_quietly(
+    keyring, switcher, username: str, context: str = "windows_keyring_to_files"
+) -> None:
     """Best-effort delete of a keyring entry; never raises.
 
     Used for cleanup *after* data has been safely relocated to a file, so a
     failure here is cosmetic (the entry is no longer read, and ``purge`` mops
     up any leftovers).
+
+    Note: ``PasswordDeleteError`` is deliberately silent, but it covers more
+    than "entry doesn't exist" — keyring's macOS backend also raises it when
+    the user *denies* the delete in a Keychain prompt. The macOS migration
+    therefore verifies removal separately (see ``item_exists``).
     """
     try:
         keyring.delete_password(KEYRING_SERVICE, username)
@@ -118,7 +125,7 @@ def _delete_keyring_quietly(keyring, switcher, username: str) -> None:
         pass  # Entry doesn't exist — fine.
     except Exception as e:  # noqa: BLE001 - best effort
         switcher._logger.warning(
-            f"windows_keyring_to_files: best-effort delete of {username} failed: {e}"
+            f"{context}: best-effort delete of {username} failed: {e}"
         )
 
 
@@ -377,7 +384,9 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
         (the item was created by a different app), and the data is already safely
         in the new service. The orphan is harmless cruft (``purge`` mops it up)."""
         if keyring is not None:
-            _delete_keyring_quietly(keyring, switcher, username)
+            _delete_keyring_quietly(
+                keyring, switcher, username, context="macos_keyring_to_security"
+            )
 
     migrated = 0
     failed = 0
@@ -442,6 +451,16 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
         _delete_old(source_username)
         if str(account_num) != "None" and source_username != none_user:
             _delete_old(none_user)
+        # Verify the removal: keyring masks a *denied* delete as the same
+        # PasswordDeleteError a missing entry raises, so a leftover would
+        # otherwise be invisible. The check is attribute-only (never decrypts,
+        # never prompts). The orphan is harmless — log it, don't fail.
+        if macos_keychain.item_exists(KEYRING_SERVICE, source_username):
+            switcher._logger.warning(
+                f"macos_keyring_to_security: legacy keyring entry {source_username} "
+                "was left behind (delete failed or was denied); harmless — "
+                "remove manually or via purge"
+            )
         migrated += 1
 
     if migrated:

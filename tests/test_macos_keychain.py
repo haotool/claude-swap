@@ -57,6 +57,27 @@ def test_get_password_raises_on_other_nonzero():
 
 
 # ---------------------------------------------------------------------------
+# item_exists
+# ---------------------------------------------------------------------------
+
+
+def test_item_exists_true_on_rc0_and_never_requests_secret():
+    with patch("claude_swap.macos_keychain.subprocess.run") as run:
+        run.return_value = _completed(0)
+        assert macos_keychain.item_exists("svc", "acct") is True
+        args = run.call_args.args[0]
+        # Attribute-only lookup: must never pass -w (decrypting could prompt).
+        assert "-w" not in args
+
+
+def test_item_exists_false_on_rc44_and_errors():
+    for rc in (44, 51):
+        with patch("claude_swap.macos_keychain.subprocess.run") as run:
+            run.return_value = _completed(rc)
+            assert macos_keychain.item_exists("svc", "acct") is False
+
+
+# ---------------------------------------------------------------------------
 # set_password — stdin (security -i) vs argv fallback
 # ---------------------------------------------------------------------------
 

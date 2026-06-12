@@ -90,6 +90,22 @@ def get_password(service: str, account: str) -> str | None:
     )
 
 
+def item_exists(service: str, account: str) -> bool:
+    """Whether a generic-password item exists, without touching its secret.
+
+    Attribute-only lookup (no ``-w``): nothing is decrypted, so this can never
+    trigger a Keychain prompt, even for items owned by another app. Returns
+    ``True`` only on rc 0; "not found" (rc 44) and error exits both return
+    ``False`` — callers use this for cleanup verification, not access decisions.
+    """
+    result = subprocess.run(
+        [_SECURITY, "find-generic-password", "-a", account, "-s", service],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def set_password(service: str, account: str, password: str) -> None:
     """Create or update a generic-password item (``-U``).
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -43,6 +43,9 @@ class FakeKeyring:
         self.get_calls: list[tuple[str, str]] = []
         self.deleted: list[tuple[str, str]] = []
         self.raise_get_for: set[str] = set()
+        # keyring's macOS backend raises PasswordDeleteError when the user
+        # denies the delete prompt — same class as "entry doesn't exist".
+        self.deny_delete_for: set[str] = set()
 
     def get_password(self, service, username):
         self.get_calls.append((service, username))
@@ -55,6 +58,8 @@ class FakeKeyring:
 
     def delete_password(self, service, username):
         self.deleted.append((service, username))
+        if username in self.deny_delete_for:
+            raise self.errors.PasswordDeleteError(f"denied: {username}")
         if (service, username) in self.store:
             del self.store[(service, username)]
         else:
@@ -456,6 +461,33 @@ class TestMacosKeyringToSecurity:
         assert switcher._read_account_credentials("1", "a@example.com") == "sekret"
         # …and the old keyring entry was deleted only after a verified write.
         assert (KEYRING_SERVICE, "account-1-a@example.com") in fake.deleted
+
+    def test_denied_legacy_delete_warns_but_completes(
+        self, temp_home, block_real_keychain
+    ):
+        """A denied legacy-entry delete leaves a harmless orphan: the migration
+        still completes (the copy is verified), but the leftover is logged —
+        keyring masks the denial as PasswordDeleteError, so without the
+        item_exists check it would be invisible."""
+        switcher = _make_macos_switcher(temp_home)
+        switcher._logger = MagicMock()
+        _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
+        username = "account-1-a@example.com"
+        fake = FakeKeyring({(KEYRING_SERVICE, username): "sekret"})
+        fake.deny_delete_for = {username}
+        # In production keyring and `security` see the same Keychain; mirror the
+        # legacy entry into the security fake so item_exists finds the leftover.
+        block_real_keychain.set_password(KEYRING_SERVICE, username, "sekret")
+
+        with _patch_keyring(fake):
+            assert migrations.migrate_macos_keyring_to_security(switcher) is True
+
+        # Copy succeeded and is authoritative; the orphan was logged.
+        assert switcher._read_account_credentials("1", "a@example.com") == "sekret"
+        warnings = " ".join(
+            str(c.args[0]) for c in switcher._logger.warning.call_args_list
+        )
+        assert "left behind" in warnings and username in warnings
 
     def test_precheck_skips_keyring_when_already_migrated(self, temp_home):
         switcher = _make_macos_switcher(temp_home)
