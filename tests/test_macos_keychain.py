@@ -154,16 +154,25 @@ def test_wrapper_roundtrip_real_keychain(tmp_path):
     kc = str(tmp_path / "wrap.keychain")
     sp.run(["security", "create-keychain", "-p", "", kc], check=True)
     sp.run(["security", "unlock-keychain", "-p", "", kc], check=True)
+    # CI runners don't reliably have a default keychain configured (rc 1,
+    # "A default keychain could not be found") — and an earlier swap/restore
+    # cycle in this job may have cleared it. Capture it only if present and
+    # skip the restore otherwise, rather than failing setup.
+    default_proc = sp.run(
+        ["security", "default-keychain"], capture_output=True, text=True
+    )
     orig_default = (
-        sp.run(["security", "default-keychain"], capture_output=True, text=True, check=True)
-        .stdout.strip().strip('"')
+        default_proc.stdout.strip().strip('"')
+        if default_proc.returncode == 0
+        else None
+    )
+    list_proc = sp.run(
+        ["security", "list-keychains", "-d", "user"],
+        capture_output=True, text=True,
     )
     orig_list = [
         line.strip().strip('"')
-        for line in sp.run(
-            ["security", "list-keychains", "-d", "user"],
-            capture_output=True, text=True, check=True,
-        ).stdout.splitlines()
+        for line in (list_proc.stdout if list_proc.returncode == 0 else "").splitlines()
         if line.strip()
     ]
     try:
@@ -175,7 +184,11 @@ def test_wrapper_roundtrip_real_keychain(tmp_path):
         macos_keychain.delete_password("claude-swap-test", "acct-1")
         assert macos_keychain.get_password("claude-swap-test", "acct-1") is None
     finally:
-        sp.run(["security", "default-keychain", "-s", orig_default], check=False)
+        # Restore the search list BEFORE the default: macOS won't report a
+        # default keychain that isn't in the search list, so the reverse order
+        # leaves the default dangling for whatever runs next in this job.
         if orig_list:
             sp.run(["security", "list-keychains", "-d", "user", "-s", *orig_list], check=False)
+        if orig_default:
+            sp.run(["security", "default-keychain", "-s", orig_default], check=False)
         sp.run(["security", "delete-keychain", kc], check=False)

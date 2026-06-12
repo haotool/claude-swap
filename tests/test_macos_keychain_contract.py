@@ -122,25 +122,28 @@ def tmp_keychain(tmp_path: Path):
         ["security", "unlock-keychain", "-p", "", test_keychain], check=True
     )
 
-    original_default = (
-        subprocess.run(
-            ["security", "default-keychain"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        .stdout.strip()
-        .strip('"')
+    # CI runners don't reliably have a default keychain configured (rc 1,
+    # "A default keychain could not be found") — and an earlier swap/restore
+    # cycle in this job may have cleared it. Capture it only if present and
+    # skip the restore otherwise, rather than failing setup.
+    default_proc = subprocess.run(
+        ["security", "default-keychain"],
+        capture_output=True,
+        text=True,
     )
-    original_list_raw = subprocess.run(
+    original_default = (
+        default_proc.stdout.strip().strip('"')
+        if default_proc.returncode == 0
+        else None
+    )
+    list_proc = subprocess.run(
         ["security", "list-keychains", "-d", "user"],
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout
+    )
     original_list = [
         line.strip().strip('"')
-        for line in original_list_raw.splitlines()
+        for line in (list_proc.stdout if list_proc.returncode == 0 else "").splitlines()
         if line.strip()
     ]
 
@@ -154,13 +157,17 @@ def tmp_keychain(tmp_path: Path):
         )
         yield test_keychain
     finally:
-        subprocess.run(
-            ["security", "default-keychain", "-s", original_default], check=False
-        )
+        # Restore the search list BEFORE the default: macOS won't report a
+        # default keychain that isn't in the search list, so the reverse order
+        # leaves the default dangling for whatever runs next in this job.
         if original_list:
             subprocess.run(
                 ["security", "list-keychains", "-d", "user", "-s", *original_list],
                 check=False,
+            )
+        if original_default:
+            subprocess.run(
+                ["security", "default-keychain", "-s", original_default], check=False
             )
         subprocess.run(["security", "delete-keychain", test_keychain], check=False)
 
