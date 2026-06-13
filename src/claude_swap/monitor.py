@@ -127,6 +127,17 @@ def run_cli_monitor(
     signal.signal(signal.SIGTERM, stop_monitor)
     try:
         while True:
+            # Re-read config each cycle so TUI changes (threshold, disable)
+            # take effect within one poll interval without a service restart.
+            cfg = switcher.get_auto_switch_config()
+            if not cfg["enabled"]:
+                log.info("monitor poll: auto-switch disabled — sleeping")
+                if once:
+                    return 0
+                time.sleep(poll_seconds)
+                continue
+            threshold = int(cfg["threshold"])
+
             pct = switcher.get_active_usage_pct()
             pct_text = "unavailable" if pct is None else f"{pct:.0f}%"
             print(f"  {muted('active usage:')} {pct_text}", file=out, flush=True)

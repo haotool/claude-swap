@@ -388,3 +388,41 @@ class TestCliAutoMonitor:
         ]
         assert any("monitor switch failed" in r.getMessage() for r in warnings)
         assert any("boom" in r.getMessage() for r in warnings)
+
+    def test_monitor_respects_disable_at_poll_time(self, temp_home: Path):
+        """Config is re-read each cycle: disabling via TUI stops switching."""
+        switcher = ClaudeAccountSwitcher()
+        # First call (startup): enabled → monitor starts.
+        # Second call (in-loop): disabled → bail without switching.
+        with patch.object(
+            switcher,
+            "get_auto_switch_config",
+            side_effect=[
+                {"enabled": True, "threshold": 98},
+                {"enabled": False, "threshold": 98},
+            ],
+        ), patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
+           patch.object(switcher, "switch") as mock_switch:
+            code = monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
+
+        assert code == 0
+        mock_switch.assert_not_called()
+
+    def test_monitor_picks_up_threshold_change_at_poll_time(self, temp_home: Path):
+        """Config is re-read each cycle: lowering threshold takes effect immediately."""
+        switcher = ClaudeAccountSwitcher()
+        # Startup: threshold=98; in-loop: threshold lowered to 50.
+        # Usage=60% → below 98 (no switch), but above 50 (switch).
+        with patch.object(
+            switcher,
+            "get_auto_switch_config",
+            side_effect=[
+                {"enabled": True, "threshold": 98},
+                {"enabled": True, "threshold": 50},
+            ],
+        ), patch.object(switcher, "get_active_usage_pct", return_value=60.0), \
+           patch.object(switcher, "switch") as mock_switch:
+            code = monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
+
+        assert code == 0
+        mock_switch.assert_called_once()
