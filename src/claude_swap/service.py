@@ -25,12 +25,15 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 
 SERVICE_LABEL = "com.claude-swap.monitor"
 
-# Pin the absolute path to Apple's system binary rather than resolving via PATH,
-# matching the supply-chain hygiene used for ``/usr/bin/security`` in
-# ``macos_keychain.py``: a PATH-injected ``launchctl`` could bootstrap the agent
-# against an attacker-controlled label. ``/usr/bin/launchctl`` is present on
-# every macOS.
-_LAUNCHCTL = "/usr/bin/launchctl"
+# Resolve the absolute path to Apple's launchctl at import time rather than
+# trusting PATH (same supply-chain hygiene used for /usr/bin/security in
+# macos_keychain.py).  macOS 26 (Tahoe) moved the binary from /usr/bin to /bin,
+# so we probe both known Apple system locations.
+_LAUNCHCTL = (
+    "/bin/launchctl"
+    if os.path.exists("/bin/launchctl")
+    else "/usr/bin/launchctl"
+)
 
 # HOME, CLAUDE_CONFIG_DIR, XDG_DATA_HOME determine WHERE the supervised
 # ``cswap --monitor`` process reads state, so the launchd agent must see
