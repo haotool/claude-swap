@@ -865,10 +865,17 @@ class TestListAccountsUsage:
 
         with patch.object(switcher, "_read_credentials", return_value=active_creds), \
              patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
-             patch("claude_swap.oauth.fetch_usage_for_account", side_effect=[None, {
-                 "five_hour": {"pct": 10, "clock": "Jan 1 03:00", "countdown": "0m"},
-                 "seven_day": {"pct": 50, "clock": "Jan 2 03:00", "countdown": "0m"},
-             }]):
+             patch(
+                 "claude_swap.oauth.fetch_usage_for_account",
+                 side_effect=lambda num, *args, **kwargs: (
+                     None
+                     if str(num) == "1"
+                     else {
+                         "five_hour": {"pct": 10, "clock": "Jan 1 03:00", "countdown": "0m"},
+                         "seven_day": {"pct": 50, "clock": "Jan 2 03:00", "countdown": "0m"},
+                     }
+                 ),
+             ):
             switcher.list_accounts()
 
         output = capsys.readouterr().out
@@ -949,10 +956,11 @@ class TestListAccountsUsage:
              patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
              patch(
                  "claude_swap.oauth.fetch_usage_for_account",
-                 side_effect=[
-                     oauth.UsageFetchError(reason="rate_limited", status_code=429),
-                     {"five_hour": {"pct": 10, "clock": "Jan 1 03:00", "countdown": "0m"}},
-                 ],
+                 side_effect=lambda num, *args, **kwargs: (
+                     oauth.UsageFetchError(reason="rate_limited", status_code=429)
+                     if str(num) == "1"
+                     else {"five_hour": {"pct": 10, "clock": "Jan 1 03:00", "countdown": "0m"}}
+                 ),
              ):
             switcher.list_accounts()
 
