@@ -487,7 +487,8 @@ class TestFetchUsageForAccount:
                 is_active=False,
             )
 
-        assert result is None
+        assert isinstance(result, oauth.UsageFetchError)
+        assert result.reason == "unauthorized"
 
     def test_refreshes_when_scopes_are_missing(self):
         """Refresh should work even when stored credentials have no scopes."""
@@ -562,8 +563,8 @@ class TestFetchUsageForAccount:
 
         assert refresh_calls == 0
         persist_mock.assert_not_called()
-        # Usage call 401'd and there's no retry-with-refresh for active, so None.
-        assert result is None
+        assert isinstance(result, oauth.UsageFetchError)
+        assert result.reason == "unauthorized"
 
     def test_active_account_401_does_not_retry_with_refresh(self):
         """Active account that 401s returns None without attempting a refresh."""
@@ -588,8 +589,44 @@ class TestFetchUsageForAccount:
                 persist_credentials=persist_mock,
             )
 
-        assert result is None
+        assert isinstance(result, oauth.UsageFetchError)
+        assert result.reason == "unauthorized"
         persist_mock.assert_not_called()
+
+    def test_rate_limit_returns_classified_error(self):
+        """429s should be observable instead of collapsing into None."""
+        credentials = self._make_credentials()
+        body = json.dumps({
+            "error": {
+                "type": "rate_limit_error",
+                "message": "Rate limited. Please try again later.",
+            }
+        }).encode()
+        headers = {"Retry-After": "30"}
+
+        def mock_urlopen(req, timeout=0):
+            if "oauth/usage" in req.full_url:
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    429,
+                    "Too Many Requests",
+                    hdrs=headers,
+                    fp=MagicMock(read=MagicMock(return_value=body)),
+                )
+            raise AssertionError(f"Unexpected URL: {req.full_url}")
+
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
+            result = oauth.fetch_usage_for_account(
+                "1",
+                "test@example.com",
+                credentials,
+                is_active=True,
+            )
+
+        assert isinstance(result, oauth.UsageFetchError)
+        assert result.reason == "rate_limited"
+        assert result.status_code == 429
+        assert result.retry_after == "30"
 
     def test_persist_failure_logs_warning_with_recovery_hint(self, caplog, capsys):
         """If the persist callback raises, _persist logs at WARNING level with

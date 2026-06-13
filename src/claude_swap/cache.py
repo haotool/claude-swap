@@ -35,6 +35,21 @@ def read_cache(path: Path, ttl: float, default=MISSING):
     return default
 
 
+def read_cache_data(path: Path, default=MISSING):
+    """Read cached JSON data without enforcing TTL."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return raw["data"]
+    except (
+        OSError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        KeyError,
+        TypeError,
+    ):
+        return default
+
+
 def write_cache(path: Path, data) -> None:
     """Write data to a cache file with a timestamp."""
     path.parent.mkdir(parents=True, exist_ok=True)

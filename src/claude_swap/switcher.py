@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from claude_swap.exceptions import (
     ValidationError,
 )
 from claude_swap import oauth
-from claude_swap.cache import MISSING, read_cache, write_cache
+from claude_swap.cache import MISSING, read_cache, read_cache_data, write_cache
 from claude_swap.locking import FileLock
 from claude_swap.logging_config import setup_logging
 from claude_swap.models import Platform, SwitchTransaction, get_timestamp
@@ -75,6 +76,8 @@ _USAGE_CACHE_TTL = 15  # seconds
 # Auto-switch (Beta): when the active account's 5h/7d usage reaches this
 # percentage, the TUI monitor rotates to the next managed account.
 DEFAULT_AUTO_SWITCH_THRESHOLD = 95
+_BACKUP_CREDENTIAL_VERIFY_ATTEMPTS = 3
+_BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS = 0.5
 
 
 def _max_usage_pct(usage: dict | None) -> float | None:
@@ -141,6 +144,44 @@ def _sweep_legacy_keyring(usernames: list[str], removed_items: list[str]) -> Non
                 pass  # Doesn't exist / other error — ignore
     except Exception:
         pass  # keyring unavailable — nothing to clean up
+
+
+def _usage_error_to_cache(error_value: oauth.UsageFetchError) -> dict:
+    return {
+        "_type": "usage_fetch_error",
+        "reason": error_value.reason,
+        "status_code": error_value.status_code,
+        "message": error_value.message,
+        "retry_after": error_value.retry_after,
+    }
+
+
+def _usage_from_cache(value):
+    if isinstance(value, dict) and value.get("_type") == "usage_fetch_error":
+        return oauth.UsageFetchError(
+            reason=str(value.get("reason") or "unknown"),
+            status_code=value.get("status_code"),
+            message=str(value.get("message") or ""),
+            retry_after=value.get("retry_after"),
+        )
+    return value
+
+
+def _usage_to_cache(value):
+    if isinstance(value, oauth.UsageFetchError):
+        return _usage_error_to_cache(value)
+    return value
+
+
+def _is_usage_dict(value) -> bool:
+    return isinstance(value, dict) and value.get("_type") != "usage_fetch_error"
+
+
+def _merge_usage_with_previous(current, previous):
+    previous = _usage_from_cache(previous)
+    if (current is None or isinstance(current, oauth.UsageFetchError)) and _is_usage_dict(previous):
+        return previous, current
+    return current, None
 
 
 class ClaudeAccountSwitcher:
@@ -416,6 +457,129 @@ class ClaudeAccountSwitcher:
             mark_session_stale(self._session_dir(account_num, email))
         else:
             self._invalidate_session_credentials(account_num, email)
+
+    def _write_verified_live_account_credentials(
+        self,
+        account_num: str,
+        email: str,
+        credentials: str,
+    ) -> str:
+        """Persist live credentials and verify the stored backup matches.
+
+        On macOS in particular, the live Claude credential can lag or be
+        concurrently mutated around login/switch boundaries. Writing a backup
+        without read-back verification can silently preserve stale tokens.
+        Returns the verified credential string actually persisted.
+        """
+        expected = credentials
+
+        for attempt in range(_BACKUP_CREDENTIAL_VERIFY_ATTEMPTS):
+            self._write_account_credentials(account_num, email, expected)
+            stored = self._read_account_credentials(account_num, email)
+            live_now = self._read_credentials()
+            if live_now is None:
+                raise CredentialReadError("Failed to re-read live credentials for verification")
+            if not live_now:
+                raise CredentialReadError("No live credentials found during verification")
+            if stored == live_now:
+                return live_now
+
+            if attempt == _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS - 1:
+                raise CredentialWriteError(
+                    "Stored backup credentials did not match live credentials"
+                )
+
+            expected = live_now
+            time.sleep(_BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS)
+
+        raise CredentialWriteError("Unreachable backup credential verification failure")
+
+    def _sync_live_account_credentials_to_backup(
+        self,
+        account_num: str,
+        email: str,
+        credentials: str,
+    ) -> None:
+        """Best-effort sync for live credentials Claude Code may have refreshed."""
+        oauth_data = oauth.extract_oauth_data(credentials)
+        if (
+            not oauth_data
+            or not oauth_data.get("refreshToken")
+            or not isinstance(oauth_data.get("expiresAt"), (int, float))
+        ):
+            return
+        try:
+            stored = self._read_account_credentials(account_num, email)
+            if stored == credentials:
+                return
+            self._write_verified_live_account_credentials(
+                account_num,
+                email,
+                credentials,
+            )
+            self._logger.info("Synced refreshed live credentials for account %s", account_num)
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to sync live credentials for account %s (%s): %r",
+                account_num,
+                email,
+                exc,
+            )
+
+    def _refresh_target_credentials_before_activation(
+        self,
+        account_num: str,
+        email: str,
+        credentials: str,
+    ) -> str:
+        """Refresh an expired inactive backup before making it live."""
+        oauth_data = oauth.extract_oauth_data(credentials)
+        if not oauth_data or not oauth_data.get("accessToken"):
+            return credentials
+        if not oauth_data.get("refreshToken"):
+            return credentials
+        if not oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
+            return credentials
+
+        refreshed = oauth.refresh_oauth_credentials(credentials)
+        if not refreshed:
+            raise SwitchError(
+                f"Account-{account_num} stored OAuth token is expired and "
+                f"refresh failed. Re-add with: cswap --add-account --slot {account_num}"
+            )
+
+        self._write_account_credentials(account_num, email, refreshed)
+        self._logger.info("Refreshed expired target credentials for account %s", account_num)
+        return refreshed
+
+    def _refresh_inactive_credentials_if_needed(
+        self,
+        account_num: str,
+        email: str,
+        credentials: str,
+    ) -> tuple[str, str | None]:
+        """Refresh an inactive backup token before it reaches expiry."""
+        oauth_data = oauth.extract_oauth_data(credentials)
+        if (
+            not oauth_data
+            or not oauth_data.get("accessToken")
+            or not oauth_data.get("refreshToken")
+            or not oauth.is_oauth_token_expired(oauth_data.get("expiresAt"))
+        ):
+            return credentials, None
+
+        refreshed = oauth.refresh_oauth_credentials(credentials)
+        if not refreshed:
+            self._logger.info(
+                "OAuth refresh unavailable: account=%s email=%s",
+                account_num,
+                email,
+            )
+            return credentials, "token refresh failed"
+
+        self._write_account_credentials(account_num, email, refreshed)
+        self._logger.info("Refreshed inactive credentials for account %s", account_num)
+        return refreshed, "token refreshed"
 
     def _delete_account_credentials(self, account_num: str, email: str) -> None:
         """Delete account credentials from backup.
@@ -820,7 +984,11 @@ class ClaudeAccountSwitcher:
             except PermissionError:
                 raise ConfigError("Permission denied reading Claude config")
 
-            self._write_account_credentials(account_num, current_email, current_creds)
+            current_creds = self._write_verified_live_account_credentials(
+                account_num,
+                current_email,
+                current_creds,
+            )
             self._write_account_config(account_num, current_email, current_config)
 
             seq["activeAccountNumber"] = int(account_num)
@@ -928,7 +1096,11 @@ class ClaudeAccountSwitcher:
             print(f"{dimmed(f'Moved from slot {migrate_from} → {slot}')}")
 
         # Store backups
-        self._write_account_credentials(account_num, current_email, current_creds)
+        current_creds = self._write_verified_live_account_credentials(
+            account_num,
+            current_email,
+            current_creds,
+        )
         self._write_account_config(account_num, current_email, current_config)
 
         # Update sequence.json
@@ -1215,6 +1387,7 @@ class ClaudeAccountSwitcher:
     def list_accounts(
         self,
         show_token_status: bool = False,
+        show_health: bool = False,
     ) -> None:
         """List all managed accounts."""
         if not self.sequence_file.exists():
@@ -1236,6 +1409,7 @@ class ClaudeAccountSwitcher:
                     break
 
         accounts_info = []
+        health_notes: dict[str, list[str]] = {}
         for num in data.get("sequence", []):
             account = data.get("accounts", {}).get(str(num), {})
             email = account.get("email", "unknown")
@@ -1245,14 +1419,28 @@ class ClaudeAccountSwitcher:
 
             if is_active:
                 creds = self._read_credentials() or ""
+                if creds:
+                    self._sync_live_account_credentials_to_backup(
+                        str(num),
+                        email,
+                        creds,
+                    )
             else:
                 creds = self._read_account_credentials(str(num), email)
+                if creds:
+                    creds, refresh_note = self._refresh_inactive_credentials_if_needed(
+                        str(num),
+                        email,
+                        creds,
+                    )
+                    if refresh_note:
+                        health_notes.setdefault(str(num), []).append(refresh_note)
 
             accounts_info.append((num, email, org_name, org_uuid, is_active, creds))
 
         def fetch(
             account_info: tuple[int, str, str, str, bool, str]
-        ) -> dict | str | None:
+        ):
             num, email, _, _, is_active, creds = account_info
             if not creds or not oauth.extract_access_token(creds):
                 return "no credentials"
@@ -1269,24 +1457,42 @@ class ClaudeAccountSwitcher:
             # unavailable until the session exits.
             has_live_session = bool(self._live_session_pids(str(num), email))
 
-            return oauth.fetch_usage_for_account(
+            result = oauth.fetch_usage_for_account(
                 str(num), email, creds,
                 is_active=is_active or has_live_session,
                 persist_credentials=persist,
             )
+            if isinstance(result, oauth.UsageFetchError):
+                self._logger.info(
+                    "Usage fetch unavailable: account=%s email=%s active=%s reason=%s status=%s",
+                    num,
+                    email,
+                    is_active,
+                    result.reason,
+                    result.status_code,
+                )
+            return result
 
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
         cached = read_cache(usage_cache_path, _USAGE_CACHE_TTL)
+        previous_cached = read_cache_data(usage_cache_path, default={})
         account_keys = {str(info[0]) for info in accounts_info}
         if cached is not MISSING and isinstance(cached, dict) and cached.keys() == account_keys:
-            usages = [cached.get(str(info[0])) for info in accounts_info]
+            usages = [_usage_from_cache(cached.get(str(info[0]))) for info in accounts_info]
+            usage_notes = [None for _ in accounts_info]
         else:
             with ThreadPoolExecutor() as executor:
                 usages = list(executor.map(fetch, accounts_info))
-            write_cache(usage_cache_path, {
-                str(info[0]): usage
-                for info, usage in zip(accounts_info, usages)
-            })
+            merged_usages = {}
+            usage_notes = []
+            for info, usage in zip(accounts_info, usages):
+                key = str(info[0])
+                previous = previous_cached.get(key) if isinstance(previous_cached, dict) else None
+                merged_usage, note = _merge_usage_with_previous(usage, previous)
+                merged_usages[key] = _usage_to_cache(merged_usage)
+                usage_notes.append(note)
+            usages = [_usage_from_cache(merged_usages[str(info[0])]) for info in accounts_info]
+            write_cache(usage_cache_path, merged_usages)
 
         print(bolded("Accounts:"))
         for i, ((num, email, org_name, org_uuid, is_active, _), usage) in enumerate(zip(accounts_info, usages)):
@@ -1298,13 +1504,25 @@ class ClaudeAccountSwitcher:
                 print(f"  {num}: {email} {muted(f'[{tag}]')}")
             if isinstance(usage, str):
                 print(f"     {dimmed(usage)}")
+                health_notes.setdefault(str(num), []).append(usage)
+            elif isinstance(usage, oauth.UsageFetchError):
+                print(f"     {dimmed(oauth.describe_usage_error(usage))}")
+                health_notes.setdefault(str(num), []).append(usage.reason)
             elif usage is None:
                 print(f"     {dimmed('usage unavailable')}")
+                health_notes.setdefault(str(num), []).append("usage unavailable")
             else:
                 lines = _format_usage_lines(usage)
                 for j, line in enumerate(lines):
                     connector = "└" if j == len(lines) - 1 else "├"
                     print(f"     {dimmed(connector)} {muted(line)}")
+            if show_health:
+                notes = health_notes.get(str(num), [])
+                health = "ok" if not notes else ", ".join(notes)
+                print(f"     {dimmed('•')} {muted(f'health: {health}')}")
+            note = usage_notes[i]
+            if isinstance(note, oauth.UsageFetchError):
+                print(f"     {dimmed('•')} {muted(f'cached; live fetch {oauth.describe_usage_error(note)}')}")
 
             if show_token_status:
                 token_status = oauth.build_token_status(accounts_info[i][5])
@@ -1377,6 +1595,12 @@ class ClaudeAccountSwitcher:
             )
             print(f"  {dimmed(f'Total managed accounts: {total}')}")
             creds = self._read_credentials() or ""
+            if creds:
+                self._sync_live_account_credentials_to_backup(
+                    account_num,
+                    current_email,
+                    creds,
+                )
             if creds and oauth.extract_access_token(creds):
                 # Reuse the cache list_accounts writes (cache-first). On miss,
                 # fetch with is_active=True (Claude Code owns active credentials,
@@ -1384,22 +1608,45 @@ class ClaudeAccountSwitcher:
                 # other accounts' rows survive.
                 usage_cache_path = self.backup_dir / "cache" / "usage.json"
                 cached = read_cache(usage_cache_path, _USAGE_CACHE_TTL)
+                previous_cached = read_cache_data(usage_cache_path, default={})
                 if (cached is not MISSING and isinstance(cached, dict)
                         and account_num in cached):
-                    usage = cached[account_num]
+                    usage = _usage_from_cache(cached[account_num])
+                    usage_note = None
                 else:
-                    usage = oauth.fetch_usage_for_account(
+                    fetched_usage = oauth.fetch_usage_for_account(
                         account_num, current_email, creds,
                         is_active=True,
                     )
-                    existing = cached if (cached is not MISSING and isinstance(cached, dict)) else {}
-                    existing[account_num] = usage
+                    if isinstance(fetched_usage, oauth.UsageFetchError):
+                        self._logger.info(
+                            "Usage fetch unavailable: account=%s email=%s active=True reason=%s status=%s",
+                            account_num,
+                            current_email,
+                            fetched_usage.reason,
+                            fetched_usage.status_code,
+                        )
+                    existing = (
+                        previous_cached
+                        if isinstance(previous_cached, dict)
+                        else {}
+                    )
+                    previous_usage = existing.get(account_num)
+                    usage, usage_note = _merge_usage_with_previous(
+                        fetched_usage,
+                        previous_usage,
+                    )
+                    existing[account_num] = _usage_to_cache(usage)
                     write_cache(usage_cache_path, existing)
                 if isinstance(usage, dict):
                     lines = _format_usage_lines(usage)
                     for j, line in enumerate(lines):
                         connector = "└" if j == len(lines) - 1 else "├"
                         print(f"  {dimmed(connector)} {muted(line)}")
+                elif isinstance(usage, oauth.UsageFetchError):
+                    print(f"  {dimmed(oauth.describe_usage_error(usage))}")
+                if isinstance(usage_note, oauth.UsageFetchError):
+                    print(f"  {dimmed('•')} {muted(f'cached; live fetch {oauth.describe_usage_error(usage_note)}')}")
         else:
             print(f"{bolded('Status:')} {current_email} {dimmed('(not managed)')}")
 
@@ -1489,20 +1736,29 @@ class ClaudeAccountSwitcher:
             cached = read_cache(usage_cache_path, _USAGE_CACHE_TTL)
             if (cached is not MISSING and isinstance(cached, dict)
                     and account_num in cached):
-                usage = cached[account_num]
+                usage = _usage_from_cache(cached[account_num])
 
         if usage is None:
-            usage = oauth.fetch_usage_for_account(
+            fetched_usage = oauth.fetch_usage_for_account(
                 account_num or "active", current_email, creds, is_active=True,
             )
-            if account_num is not None and isinstance(usage, dict):
-                existing = read_cache(usage_cache_path, _USAGE_CACHE_TTL)
+            usage = fetched_usage
+            if account_num is not None:
+                previous_cached = read_cache_data(usage_cache_path, default={})
+                previous_usage = (
+                    previous_cached.get(account_num)
+                    if isinstance(previous_cached, dict)
+                    else None
+                )
+                usage, _ = _merge_usage_with_previous(fetched_usage, previous_usage)
+            if account_num is not None and not isinstance(usage, oauth.UsageFetchError):
+                existing = read_cache_data(usage_cache_path, default={})
                 existing = (
                     existing
-                    if (existing is not MISSING and isinstance(existing, dict))
+                    if isinstance(existing, dict)
                     else {}
                 )
-                existing[account_num] = usage
+                existing[account_num] = _usage_to_cache(usage)
                 write_cache(usage_cache_path, existing)
 
         return _max_usage_pct(usage)
@@ -1734,6 +1990,11 @@ class ClaudeAccountSwitcher:
                         f"Account-{target_account} has no stored config backup. "
                         f"Re-add with: cswap --add-account --slot {target_account}"
                     )
+                target_creds = self._refresh_target_credentials_before_activation(
+                    target_account,
+                    target_email,
+                    target_creds,
+                )
                 try:
                     target_config_data = json.loads(target_config)
                 except json.JSONDecodeError as exc:
@@ -1842,7 +2103,7 @@ class ClaudeAccountSwitcher:
 
             try:
                 # Step 1: Backup current account
-                self._write_account_credentials(
+                original_creds = self._write_verified_live_account_credentials(
                     current_account, current_email, original_creds
                 )
                 self._write_account_config(
@@ -1866,6 +2127,11 @@ class ClaudeAccountSwitcher:
                         f"Account-{target_account} has no stored config backup. "
                         f"Re-add with: cswap --add-account --slot {target_account}"
                     )
+                target_creds = self._refresh_target_credentials_before_activation(
+                    target_account,
+                    target_email,
+                    target_creds,
+                )
 
                 # Step 3: Activate target account - credentials
                 self._write_credentials(target_creds)
