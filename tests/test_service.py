@@ -252,6 +252,45 @@ class TestStatus:
         # ``program = ...`` is filtered out so the output stays scannable.
         assert "program = /usr/bin/python3" not in out
 
+    def test_status_warns_on_version_mismatch(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ):
+        """status() warns when the plist records an older cswap version."""
+        _force_darwin(monkeypatch)
+        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path.parent.mkdir(parents=True)
+        # Write a plist whose installed version differs from the current one.
+        plist_data = {"EnvironmentVariables": {service._VERSION_ENV_KEY: "0.0.1"}}
+        with plist_path.open("wb") as fh:
+            plistlib.dump(plist_data, fh)
+        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(returncode=0, stdout="state = running\n"))
+
+        rc = service.status(ClaudeAccountSwitcher())
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "0.0.1" in out
+        assert "cswap service install" in out
+
+    def test_status_no_warning_when_version_matches(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ):
+        """No warning when installed version == current version."""
+        _force_darwin(monkeypatch)
+        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path.parent.mkdir(parents=True)
+        plist_data = {"EnvironmentVariables": {service._VERSION_ENV_KEY: service.__version__}}
+        with plist_path.open("wb") as fh:
+            plistlib.dump(plist_data, fh)
+        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(returncode=0, stdout="state = running\n"))
+
+        service.status(ClaudeAccountSwitcher())
+
+        out = capsys.readouterr().out
+        assert "cswap service install" not in out
+
 
 class TestLogs:
     def test_missing_files_reported_cleanly(

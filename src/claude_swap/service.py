@@ -19,9 +19,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.printer import accent, bolded, dimmed, muted
+from claude_swap.printer import accent, bolded, dimmed, muted, warning
 from claude_swap.switcher import ClaudeAccountSwitcher
+
+# Key injected into the plist EnvironmentVariables so ``status`` can detect
+# whether the running service was installed from an older package version.
+_VERSION_ENV_KEY = "CSWAP_INSTALLED_VERSION"
 
 SERVICE_LABEL = "com.claude-swap.monitor"
 
@@ -67,7 +72,9 @@ def _program_arguments() -> list[str]:
 
 
 def _passthrough_env() -> dict[str, str]:
-    return {k: os.environ[k] for k in _FORWARDED_ENV_KEYS if k in os.environ}
+    env = {k: os.environ[k] for k in _FORWARDED_ENV_KEYS if k in os.environ}
+    env[_VERSION_ENV_KEY] = __version__
+    return env
 
 
 def _build_plist(switcher: ClaudeAccountSwitcher) -> dict:
@@ -159,12 +166,35 @@ def uninstall(switcher: ClaudeAccountSwitcher) -> int:
     return 0
 
 
+def _installed_version() -> str | None:
+    """Return the cswap version recorded in the installed plist, or None."""
+    try:
+        with _plist_path().open("rb") as fh:
+            data = plistlib.load(fh)
+        if not isinstance(data, dict):
+            return None
+        return data.get("EnvironmentVariables", {}).get(_VERSION_ENV_KEY)
+    except (OSError, Exception):
+        return None
+
+
 def status(switcher: ClaudeAccountSwitcher) -> int:
     """Print a short summary: not installed / installed-but-not-loaded / loaded."""
     _require_macos()
     if not _plist_path().exists():
         print(f"{bolded('Service:')} {dimmed('not installed')}")
         return 0
+
+    # Warn if the installed plist was written by an older package version.
+    # The running process won't pick up new code until the service restarts.
+    installed_ver = _installed_version()
+    if installed_ver is not None and installed_ver != __version__:
+        warning(
+            f"Service was installed with cswap {installed_ver}; "
+            f"current version is {__version__}. "
+            "Run `cswap service install` to restart on the new version."
+        )
+
     proc = _launchctl("print", _launchd_service_target(), check=False)
     if proc.returncode != 0:
         print(f"{bolded('Service:')} {accent('installed but not loaded')}")
