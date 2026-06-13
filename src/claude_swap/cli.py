@@ -105,6 +105,7 @@ Examples:
   %(prog)s --add-token sk-ant-oat01-... --email me@example.com
   %(prog)s --add-token - --slot 3
   %(prog)s --list
+  %(prog)s --health
   %(prog)s --switch
   %(prog)s --switch-to 2
   %(prog)s --switch-to user@example.com
@@ -116,6 +117,7 @@ Examples:
   %(prog)s --export backup.cswap
   %(prog)s --import backup.cswap
   %(prog)s --tui                              # interactive arrow-key menu
+  %(prog)s --monitor                          # foreground auto-switch monitor
   %(prog)s --upgrade                          # self-upgrade to latest version
         """,
     )
@@ -184,6 +186,11 @@ Examples:
         help="List all managed accounts",
     )
     group.add_argument(
+        "--health",
+        action="store_true",
+        help="Show account health, usage, and OAuth token status",
+    )
+    group.add_argument(
         "--switch",
         action="store_true",
         help="Rotate to next account in sequence",
@@ -220,6 +227,11 @@ Examples:
         help="Launch interactive arrow-key menu (single-level)",
     )
     group.add_argument(
+        "--monitor",
+        action="store_true",
+        help="Run the auto-switch monitor in the foreground",
+    )
+    group.add_argument(
         "--upgrade",
         action="store_true",
         help="Upgrade claude-swap to the latest version on PyPI",
@@ -237,8 +249,8 @@ Examples:
 
     args = parser.parse_args()
 
-    if args.token_status and not args.list:
-        parser.error("--token-status can only be used with --list")
+    if args.token_status and not (args.list or args.health):
+        parser.error("--token-status can only be used with --list or --health")
 
     if args.slot is not None and not (args.add_account or args.add_token is not None):
         parser.error("--slot can only be used with --add-account or --add-token")
@@ -293,6 +305,11 @@ Examples:
             switcher.list_accounts(
                 show_token_status=args.token_status,
             )
+        elif args.health:
+            switcher.list_accounts(
+                show_token_status=True,
+                show_health=True,
+            )
         elif args.switch:
             switcher.switch()
         elif args.switch_to:
@@ -319,6 +336,10 @@ Examples:
                 )
                 sys.exit(1)
             sys.exit(tui_run(switcher))
+        elif args.monitor:
+            from claude_swap.monitor import run_cli_monitor
+
+            sys.exit(run_cli_monitor(switcher))
     except ClaudeSwitchError as e:
         error(f"Error: {e}")
         sys.exit(1)

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_swap import tui
+from claude_swap import monitor, tui
 from claude_swap.exceptions import ValidationError
 from claude_swap.switcher import (
     DEFAULT_AUTO_SWITCH_THRESHOLD,
@@ -225,3 +225,54 @@ class TestRunAutoMonitor:
              patch("claude_swap.tui.curses.curs_set"):
             tui._run_auto_monitor(screen, switcher, threshold=95)
         mock_switch.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# CLI monitor                                                                #
+# --------------------------------------------------------------------------- #
+
+
+class TestCliAutoMonitor:
+    def test_does_not_start_when_existing_pid_is_running(self, temp_home: Path, capsys):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
+        pid_path.write_text("12345", encoding="utf-8")
+
+        with patch("claude_swap.monitor._pid_is_running", return_value=True):
+            code = monitor.run_cli_monitor(switcher, once=True)
+
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "Status:" in out
+        assert "Auto-switch monitor (Beta)" in out
+        assert "already running (pid 12345)" in out
+
+    def test_once_switches_when_threshold_reached(self, temp_home: Path, capsys):
+        switcher = ClaudeAccountSwitcher()
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
+             patch.object(switcher, "switch") as mock_switch:
+            code = monitor.run_cli_monitor(
+                switcher,
+                poll_seconds=1,
+                once=True,
+            )
+
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "Auto-switch monitor (Beta)" in out
+        assert "threshold 95%" in out
+        assert "active usage:" in out
+        mock_switch.assert_called_once()
+
+    def test_restores_sigterm_handler_after_once_run(self, temp_home: Path):
+        import signal
+
+        switcher = ClaudeAccountSwitcher()
+        original = signal.getsignal(signal.SIGTERM)
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=10.0):
+            monitor.run_cli_monitor(switcher, poll_seconds=1, once=True)
+
+        assert signal.getsignal(signal.SIGTERM) == original

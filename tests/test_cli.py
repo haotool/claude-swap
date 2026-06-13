@@ -79,6 +79,8 @@ class TestCLI:
         assert "--switch" in result.stdout
         assert "--list" in result.stdout
         assert "--status" in result.stdout
+        assert "--monitor" in result.stdout
+        assert "--health" in result.stdout
 
     def test_no_args_shows_error(self):
         """Test that running without args shows error."""
@@ -113,14 +115,14 @@ class TestCLI:
         # Should run (may fail due to no config, but flag should be accepted)
         assert "--debug" not in result.stderr or "unrecognized" not in result.stderr
 
-    def test_token_status_flag_requires_list(self, capsys):
-        """--token-status should only be accepted alongside --list."""
+    def test_token_status_flag_requires_list_or_health(self, capsys):
+        """--token-status should only be accepted alongside --list or --health."""
         with patch.object(sys, "argv", ["claude-swap", "--token-status", "--status"]):
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
 
         assert excinfo.value.code == 2
-        assert "--token-status can only be used with --list" in capsys.readouterr().err
+        assert "--token-status can only be used with --list or --health" in capsys.readouterr().err
 
     def test_token_status_flag_is_forwarded_to_list(self):
         """--list --token-status should call list_accounts(show_token_status=True)."""
@@ -133,6 +135,45 @@ class TestCLI:
         switcher_cls.return_value.list_accounts.assert_called_once_with(
             show_token_status=True,
         )
+
+    def test_health_shows_token_status_and_health(self):
+        """--health should reuse the account list with health observability enabled."""
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch.object(sys, "argv", ["claude-swap", "--health"]), \
+             patch("os.geteuid", return_value=1000), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            cli.main()
+
+        switcher_cls.return_value.list_accounts.assert_called_once_with(
+            show_token_status=True,
+            show_health=True,
+        )
+
+    def test_token_status_flag_is_allowed_with_health(self):
+        """--health already shows token status, and explicit --token-status is accepted."""
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch.object(sys, "argv", ["claude-swap", "--health", "--token-status"]), \
+             patch("os.geteuid", return_value=1000), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            cli.main()
+
+        switcher_cls.return_value.list_accounts.assert_called_once_with(
+            show_token_status=True,
+            show_health=True,
+        )
+
+    def test_monitor_dispatches_to_run_cli_monitor(self):
+        """--monitor should start the plain CLI monitor."""
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch.object(sys, "argv", ["claude-swap", "--monitor"]), \
+             patch("claude_swap.monitor.run_cli_monitor", return_value=0) as mock_run, \
+             patch("os.geteuid", return_value=1000), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+
+        assert excinfo.value.code == 0
+        mock_run.assert_called_once_with(switcher_cls.return_value)
 
     def test_slot_flag_requires_add_account(self, capsys):
         """--slot should only be accepted alongside --add-account or --add-token."""

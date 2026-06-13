@@ -90,6 +90,12 @@ Launch the interactive menu and open **Auto-switch at limit (Beta)**:
 cswap --tui
 ```
 
+Or start the same foreground monitor directly from the CLI:
+
+```bash
+cswap --monitor
+```
+
 From there you can:
 
 - **Enable/Disable** automatic switching (the setting persists across runs).
@@ -102,8 +108,8 @@ From there you can:
 
 Because switching doesn't require a Claude Code restart (see the note above),
 the new account takes effect on your next message — on macOS once the Keychain
-cache expires. The monitor runs only while its screen is open in the TUI; there
-is no background daemon.
+cache expires. The monitor is foreground-only; `cswap --monitor` records its PID
+and exits without starting another monitor if one is already running.
 
 > **Beta:** this feature is new and runs as a foreground watcher. The usage
 > percentages come from the same API as `cswap --list`. Please report any rough
@@ -124,10 +130,12 @@ This will update the stored credentials without creating a duplicate.
 ```bash
 cswap run 2                     # Run an account in this terminal only (session mode)
 cswap --list                    # Show all accounts with 5h/7d usage and reset times
+cswap --health                  # Show account health, usage, and OAuth token status
 cswap --status                  # Show current account
 cswap --add-account --slot 3    # Add account to a specific slot (prompts before overwrite)
 cswap --remove-account 2        # Remove an account
 cswap --tui                     # Launch the interactive arrow-key menu (incl. auto-switch, Beta)
+cswap --monitor                 # Run the foreground auto-switch monitor
 cswap --upgrade                 # Upgrade claude-swap to the latest version
 cswap --purge                   # Remove all claude-swap data
 ```
