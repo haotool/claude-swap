@@ -13,7 +13,21 @@ from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.printer import accent, bolded, dimmed, muted
 from claude_swap.switcher import ClaudeAccountSwitcher
 
-AUTO_MONITOR_POLL_SECONDS = 60
+# The single source of truth for the auto-switch monitor's cadence and rule.
+# Both the CLI monitor (cswap --monitor), the TUI monitor, and the launchd
+# service import these — do not redefine the interval or the rule elsewhere.
+MONITOR_POLL_SECONDS = 60
+
+
+def should_switch(pct: float | None, threshold: int) -> bool:
+    """Whether the active account's usage warrants an automatic switch.
+
+    ``pct`` is the highest 5h/7d utilization for the active account (or
+    ``None`` when usage is unavailable); ``threshold`` is the configured
+    percentage. The rule is intentionally trivial and centralized so every
+    caller (CLI, TUI, service) shares one definition.
+    """
+    return pct is not None and pct >= threshold
 
 
 class _MonitorStopped(Exception):
@@ -65,7 +79,7 @@ def _acquire_monitor_pid(path: Path) -> int | None:
 def run_cli_monitor(
     switcher: ClaudeAccountSwitcher,
     *,
-    poll_seconds: int = AUTO_MONITOR_POLL_SECONDS,
+    poll_seconds: int = MONITOR_POLL_SECONDS,
     once: bool = False,
     stream: TextIO | None = None,
 ) -> int:
@@ -105,7 +119,7 @@ def run_cli_monitor(
             pct_text = "unavailable" if pct is None else f"{pct:.0f}%"
             print(f"  {muted('active usage:')} {pct_text}", file=out, flush=True)
 
-            if pct is not None and pct >= threshold:
+            if should_switch(pct, threshold):
                 print(
                     f"  {accent('threshold reached')} {muted('switching account')}",
                     file=out,

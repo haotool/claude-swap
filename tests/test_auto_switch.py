@@ -146,22 +146,22 @@ class TestActiveUsagePct:
 
 
 # --------------------------------------------------------------------------- #
-# TUI decision helper                                                         #
+# Monitor decision core                                                       #
 # --------------------------------------------------------------------------- #
 
 
-class TestShouldAutoSwitch:
-    def test_below_threshold(self):
-        assert tui._should_auto_switch(94, 95) is False
+class TestShouldSwitch:
+    def test_at_threshold_switches(self):
+        assert monitor.should_switch(95, 95) is True
 
-    def test_at_threshold(self):
-        assert tui._should_auto_switch(95, 95) is True
+    def test_above_threshold_switches(self):
+        assert monitor.should_switch(99.5, 95) is True
 
-    def test_above_threshold(self):
-        assert tui._should_auto_switch(99.5, 95) is True
+    def test_below_threshold_holds(self):
+        assert monitor.should_switch(94.9, 95) is False
 
-    def test_none_pct(self):
-        assert tui._should_auto_switch(None, 95) is False
+    def test_none_usage_holds(self):
+        assert monitor.should_switch(None, 95) is False
 
 
 # --------------------------------------------------------------------------- #

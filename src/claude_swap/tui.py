@@ -22,15 +22,13 @@ from datetime import datetime
 from typing import Callable
 
 from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.monitor import MONITOR_POLL_SECONDS, should_switch
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
 # Minimum terminal size we render in. Below this, we bail to plain CLI advice.
 _MIN_ROWS = 12
 _MIN_COLS = 60
-
-# How often the auto-switch (Beta) monitor polls the active account's usage.
-_AUTO_POLL_SECONDS = 60
 
 
 def run(switcher: ClaudeAccountSwitcher) -> int:
@@ -184,11 +182,6 @@ def _do_refresh(stdscr, switcher: ClaudeAccountSwitcher) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _should_auto_switch(pct: float | None, threshold: int) -> bool:
-    """Whether the active account's usage warrants an automatic switch."""
-    return pct is not None and pct >= threshold
-
-
 def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     """Settings + launcher for auto-switch (Beta).
 
@@ -248,7 +241,7 @@ def _run_auto_monitor(
 ) -> None:
     """Foreground watcher loop: poll active usage and switch at the threshold.
 
-    Polls every ``_AUTO_POLL_SECONDS`` (press ``s`` to check immediately,
+    Polls every ``MONITOR_POLL_SECONDS`` (press ``s`` to check immediately,
     ``q``/Esc to stop). When the active account reaches ``threshold``%, it
     shells out to ``switcher.switch()`` to rotate to the next account, then
     keeps watching the new active account.
@@ -264,8 +257,8 @@ def _run_auto_monitor(
             if seconds_to_next <= 0:
                 last_pct = switcher.get_active_usage_pct()
                 last_checked = datetime.now().strftime("%H:%M:%S")
-                seconds_to_next = _AUTO_POLL_SECONDS
-                if _should_auto_switch(last_pct, threshold):
+                seconds_to_next = MONITOR_POLL_SECONDS
+                if should_switch(last_pct, threshold):
                     switched = _auto_perform_switch(stdscr, switcher)
                     message = (
                         f"Reached {last_pct:.0f}% — switched account."
@@ -327,7 +320,7 @@ def _draw_monitor(
     _draw_header(
         stdscr,
         "Auto-switch monitor (Beta)",
-        f"threshold {threshold}%  ·  polling every {_AUTO_POLL_SECONDS}s",
+        f"threshold {threshold}%  ·  polling every {MONITOR_POLL_SECONDS}s",
         cols,
     )
     pct_str = f"{pct:.0f}%" if pct is not None else "unavailable"
