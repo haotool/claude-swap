@@ -7,13 +7,14 @@ Curses primitives are mocked exactly as in ``test_tui.py``.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from claude_swap import monitor, tui
-from claude_swap.exceptions import ValidationError
+from claude_swap.exceptions import ClaudeSwitchError, ValidationError
 from claude_swap.switcher import (
     DEFAULT_AUTO_SWITCH_THRESHOLD,
     ClaudeAccountSwitcher,
@@ -276,3 +277,48 @@ class TestCliAutoMonitor:
             monitor.run_cli_monitor(switcher, poll_seconds=1, once=True)
 
         assert signal.getsignal(signal.SIGTERM) == original
+
+    def test_logs_poll_and_switch_at_threshold(
+        self, temp_home: Path, caplog
+    ):
+        switcher = ClaudeAccountSwitcher()
+        switched = {"n": 0}
+
+        def _do_switch() -> None:
+            switched["n"] += 1
+
+        caplog.set_level(logging.INFO, logger="claude-swap")
+        with patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
+             patch.object(switcher, "switch", side_effect=_do_switch):
+            monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
+
+        records = [
+            r for r in caplog.records if r.name == "claude-swap"
+        ]
+        msgs = [r.getMessage() for r in records]
+        assert any("monitor poll" in m and "96" in m for m in msgs), msgs
+        assert any("monitor threshold reached" in m for m in msgs), msgs
+        assert any("monitor switched account" in m for m in msgs), msgs
+        assert switched["n"] == 1
+
+    def test_logs_warning_when_switch_fails(self, temp_home: Path, caplog):
+        switcher = ClaudeAccountSwitcher()
+
+        def _raise() -> None:
+            raise ClaudeSwitchError("boom")
+
+        caplog.set_level(logging.INFO, logger="claude-swap")
+        with patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
+             patch.object(switcher, "switch", side_effect=_raise):
+            monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
+
+        warnings = [
+            r
+            for r in caplog.records
+            if r.name == "claude-swap" and r.levelno == logging.WARNING
+        ]
+        assert warnings, [
+            (r.name, r.levelname, r.getMessage()) for r in caplog.records
+        ]
+        assert any("monitor switch failed" in r.getMessage() for r in warnings)
+        assert any("boom" in r.getMessage() for r in warnings)

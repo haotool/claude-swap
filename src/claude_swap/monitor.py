@@ -30,6 +30,11 @@ def should_switch(pct: float | None, threshold: int) -> bool:
     return pct is not None and pct >= threshold
 
 
+def _logger(switcher: ClaudeAccountSwitcher):
+    """The shared 'claude-swap' file logger the switcher already configured."""
+    return switcher._logger
+
+
 class _MonitorStopped(Exception):
     """Raised when the foreground monitor receives a stop signal."""
 
@@ -85,6 +90,7 @@ def run_cli_monitor(
 ) -> int:
     """Run the foreground auto-switch monitor from the CLI."""
     out = stream or sys.stdout
+    log = _logger(switcher)
     cfg = switcher.get_auto_switch_config()
     if not cfg["enabled"]:
         cfg = switcher.set_auto_switch_config(enabled=True)
@@ -106,6 +112,12 @@ def run_cli_monitor(
         file=out,
     )
     print(f"  {dimmed(f'pid {os.getpid()}')}", file=out)
+    log.info(
+        "monitor start: threshold=%s poll=%ss pid=%s",
+        threshold,
+        poll_seconds,
+        os.getpid(),
+    )
 
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
@@ -118,6 +130,9 @@ def run_cli_monitor(
             pct = switcher.get_active_usage_pct()
             pct_text = "unavailable" if pct is None else f"{pct:.0f}%"
             print(f"  {muted('active usage:')} {pct_text}", file=out, flush=True)
+            log.info(
+                "monitor poll: active_usage_pct=%s threshold=%s", pct, threshold
+            )
 
             if should_switch(pct, threshold):
                 print(
@@ -125,10 +140,20 @@ def run_cli_monitor(
                     file=out,
                     flush=True,
                 )
+                log.info(
+                    "monitor threshold reached: pct=%s threshold=%s — switching",
+                    pct,
+                    threshold,
+                )
                 try:
                     switcher.switch()
                 except ClaudeSwitchError as exc:
                     print(f"  {dimmed(f'switch failed: {exc}')}", file=out, flush=True)
+                    log.warning(
+                        "monitor switch failed: pct=%s error=%s", pct, exc
+                    )
+                else:
+                    log.info("monitor switched account at pct=%s", pct)
 
             if once:
                 return 0
@@ -140,6 +165,7 @@ def run_cli_monitor(
         print(f"\n{dimmed('Monitor stopped')}", file=out)
         return 143
     finally:
+        log.info("monitor stopped")
         signal.signal(signal.SIGTERM, previous_sigterm)
         try:
             if pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):

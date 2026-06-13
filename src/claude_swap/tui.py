@@ -248,6 +248,7 @@ def _run_auto_monitor(
     """
     curses.curs_set(0)
     stdscr.timeout(1000)  # getch() returns -1 after ~1s, driving the countdown
+    log = switcher._logger
     last_pct: float | None = None
     last_checked = "never"
     message = "Monitoring started."
@@ -258,8 +259,20 @@ def _run_auto_monitor(
                 last_pct = switcher.get_active_usage_pct()
                 last_checked = datetime.now().strftime("%H:%M:%S")
                 seconds_to_next = MONITOR_POLL_SECONDS
+                log.info(
+                    "monitor poll: active_usage_pct=%s threshold=%s",
+                    last_pct,
+                    threshold,
+                )
                 if should_switch(last_pct, threshold):
+                    log.info(
+                        "monitor threshold reached: pct=%s threshold=%s — switching",
+                        last_pct,
+                        threshold,
+                    )
                     switched = _auto_perform_switch(stdscr, switcher)
+                    if switched:
+                        log.info("monitor switched account at pct=%s", last_pct)
                     message = (
                         f"Reached {last_pct:.0f}% — switched account."
                         if switched
@@ -281,6 +294,7 @@ def _run_auto_monitor(
                 continue
             seconds_to_next -= 1
     finally:
+        log.info("monitor stopped")
         stdscr.timeout(-1)
 
 
@@ -288,12 +302,14 @@ def _auto_perform_switch(stdscr, switcher: ClaudeAccountSwitcher) -> bool:
     """Suspend curses, run ``switcher.switch()``, then resume. No Enter prompt."""
     curses.def_prog_mode()
     curses.endwin()
+    log = switcher._logger
     switched = True
     try:
         try:
             switcher.switch()
         except ClaudeSwitchError as e:
             print(f"Auto-switch error: {e}")
+            log.warning("monitor switch failed: pct=%s error=%s", None, e)
             switched = False
         except KeyboardInterrupt:
             print("\nOperation cancelled.")
