@@ -543,6 +543,13 @@ class ClaudeAccountSwitcher:
 
         refreshed = oauth.refresh_oauth_credentials(credentials)
         if not refreshed:
+            if self._live_session_pids(account_num, email):
+                self._logger.warning(
+                    "pre-activation refresh failed for account-%s; "
+                    "live session-mode instance present, switching anyway",
+                    account_num,
+                )
+                return credentials
             raise SwitchError(
                 f"Account-{account_num} stored OAuth token is expired and "
                 f"refresh failed. Re-add with: cswap --add-account --slot {account_num}"

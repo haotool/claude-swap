@@ -903,7 +903,9 @@ class TestListAccountsUsage:
                  patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
                  patch(
                      "claude_swap.oauth.fetch_usage_for_account",
-                     side_effect=[rate_limited, usage_result],
+                     side_effect=lambda num, *args, **kwargs: (
+                         rate_limited if str(num) == "1" else usage_result
+                     ),
                  ):
                 switcher.list_accounts()
 
