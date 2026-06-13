@@ -157,7 +157,12 @@ def run_cli_monitor(
                     threshold,
                 )
                 try:
-                    switcher.switch()
+                    # quiet=True: no user is watching launchd/foreground output,
+                    # so suppress interactive banners. force_refresh=True: mint a
+                    # fresh OAuth token so Claude Code's first API call after
+                    # picking up the new credentials has maximum remaining
+                    # lifetime — production-grade seamless handoff.
+                    switcher.switch(quiet=True, force_refresh=True)
                 except ClaudeSwitchError as exc:
                     print(f"  {dimmed(f'switch failed: {exc}')}", file=out, flush=True)
                     log.warning(

@@ -108,8 +108,11 @@ From there you can:
 
 Because switching doesn't require a Claude Code restart (see the note above),
 the new account takes effect on your next message — on macOS once the Keychain
-cache expires. The monitor is foreground-only; `cswap --monitor` records its PID
-and exits without starting another monitor if one is already running.
+cache expires. For automated paths (TUI monitor + launchd service) the target
+account's OAuth token is force-refreshed *before* activation, so the first API
+call after handoff uses a freshly-issued token with maximum remaining lifetime.
+The monitor is foreground-only; `cswap --monitor` records its PID and exits
+without starting another monitor if one is already running.
 
 > **Beta:** this feature is new and runs as a foreground watcher. The usage
 > percentages come from the same API as `cswap --list`. Please report any rough

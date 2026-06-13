@@ -531,18 +531,41 @@ class ClaudeAccountSwitcher:
         account_num: str,
         email: str,
         credentials: str,
+        *,
+        force: bool = False,
     ) -> str:
-        """Refresh an expired inactive backup before making it live."""
+        """Refresh an inactive backup's OAuth token before making it live.
+
+        With ``force=False`` (default, interactive callers): refresh only when
+        the stored access token has already expired. Saves a network round-trip
+        when the cached token is still valid.
+
+        With ``force=True`` (background auto-switch): refresh unconditionally so
+        Claude Code's first API call against the newly-active account gets a
+        token with maximum remaining lifetime, removing the "stale but valid"
+        window. A failed forced refresh on a still-valid token is non-fatal —
+        we fall back to the existing token rather than blocking the switch.
+        """
         oauth_data = oauth.extract_oauth_data(credentials)
         if not oauth_data or not oauth_data.get("accessToken"):
             return credentials
         if not oauth_data.get("refreshToken"):
             return credentials
-        if not oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
+
+        expired = oauth.is_oauth_token_expired(oauth_data.get("expiresAt"))
+        if not force and not expired:
             return credentials
 
         refreshed = oauth.refresh_oauth_credentials(credentials)
         if not refreshed:
+            # Forced refresh on a still-valid token: degrade gracefully.
+            if not expired:
+                self._logger.info(
+                    "forced pre-activation refresh failed for account-%s "
+                    "(existing token still valid; using it)",
+                    account_num,
+                )
+                return credentials
             if self._live_session_pids(account_num, email):
                 self._logger.warning(
                     "pre-activation refresh failed for account-%s; "
@@ -556,7 +579,12 @@ class ClaudeAccountSwitcher:
             )
 
         self._write_account_credentials(account_num, email, refreshed)
-        self._logger.info("Refreshed expired target credentials for account %s", account_num)
+        self._logger.info(
+            "Refreshed target credentials for account %s (force=%s, was_expired=%s)",
+            account_num,
+            force,
+            expired,
+        )
         return refreshed
 
     def _refresh_inactive_credentials_if_needed(
@@ -1789,8 +1817,31 @@ class ClaudeAccountSwitcher:
 
         self.add_account()
 
-    def switch(self) -> None:
-        """Switch to next account in sequence."""
+    def _activation_followup_text(self) -> str:
+        """Platform-aware reassurance about when the activated account takes effect.
+
+        Replaces the historical "Please restart Claude Code" warning which
+        contradicted the README's accurate description of Claude Code's
+        credential-reading behavior (re-reads ``.credentials.json`` per message
+        on Linux/Windows; Keychain cache TTL ~30s on macOS). The new message
+        matches reality so users (and tooling) trust the output.
+        """
+        if self.platform == Platform.MACOS:
+            return "New account active within ~30s (Claude Code's Keychain cache TTL)."
+        return "New account active on the next message."
+
+    def switch(self, *, quiet: bool = False, force_refresh: bool = False) -> None:
+        """Switch to next account in sequence.
+
+        Args:
+            quiet: Suppress informational console output. Used by the background
+                auto-switch monitor where there is no interactive user to read
+                banners; errors still propagate and are logged.
+            force_refresh: Refresh the target account's OAuth token before
+                activation even when not yet expired. Recommended for automated
+                switches so Claude Code's first API call against the new
+                account gets a freshly-issued token.
+        """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
 
@@ -1831,7 +1882,7 @@ class ClaudeAccountSwitcher:
                         "Re-add a slot with: cswap --add-account --slot <number>"
                     )
                 target = fallback
-            self._perform_switch(target)
+            self._perform_switch(target, quiet=quiet, force_refresh=force_refresh)
             return
 
         current_email, current_org_uuid = identity
@@ -1883,7 +1934,7 @@ class ClaudeAccountSwitcher:
             ))
             return
 
-        self._perform_switch(next_account)
+        self._perform_switch(next_account, quiet=quiet, force_refresh=force_refresh)
 
     def switch_to(self, identifier: str) -> None:
         """Switch to specific account."""
@@ -1932,11 +1983,26 @@ class ClaudeAccountSwitcher:
 
         self._perform_switch(target_account)
 
-    def _perform_switch(self, target_account: str) -> None:
+    def _perform_switch(
+        self,
+        target_account: str,
+        *,
+        quiet: bool = False,
+        force_refresh: bool = False,
+    ) -> None:
         """Perform the actual account switch with transaction support.
 
         The post-switch display runs after the lock releases so that persist
         callbacks inside list_accounts() can re-acquire it.
+
+        Args:
+            quiet: When True, suppress the interactive "Switched to" banner and
+                the post-switch ``list_accounts()`` call. Errors still raise.
+                Used by the background auto-switch monitor.
+            force_refresh: When True, refresh the target's OAuth token even if
+                not expired so the activated credentials carry maximum
+                remaining lifetime. See
+                ``_refresh_target_credentials_before_activation``.
         """
         # Session-mode drift warning (warn, never block): switching the
         # default login to an account that also has a live session profile
@@ -2001,6 +2067,7 @@ class ClaudeAccountSwitcher:
                     target_account,
                     target_email,
                     target_creds,
+                    force=force_refresh,
                 )
                 try:
                     target_config_data = json.loads(target_config)
@@ -2079,12 +2146,13 @@ class ClaudeAccountSwitcher:
                 self._logger.info(
                     f"Activated account {target_account} (no prior live account)"
                 )
-                print(
-                    f"{accent('Activated')} Account-{target_account} ({target_email})"
-                )
-                print()
-                warning("Please restart Claude Code to use the new authentication.")
-                print()
+                if not quiet:
+                    print(
+                        f"{accent('Activated')} Account-{target_account} ({target_email})"
+                    )
+                    print()
+                    print(dimmed(self._activation_followup_text()))
+                    print()
                 return
 
             current_email, _ = current_identity
@@ -2138,6 +2206,7 @@ class ClaudeAccountSwitcher:
                     target_account,
                     target_email,
                     target_creds,
+                    force=force_refresh,
                 )
 
                 # Step 3: Activate target account - credentials
@@ -2188,6 +2257,8 @@ class ClaudeAccountSwitcher:
 
         # Lock released. Safe to do network I/O and let persist callbacks
         # re-acquire the lock from inside list_accounts().
+        if quiet:
+            return
         print(f"{accent('Switched to')} Account-{target_account} ({target_email})")
         try:
             self.list_accounts()
@@ -2195,7 +2266,7 @@ class ClaudeAccountSwitcher:
             self._logger.warning(f"Post-switch usage display failed: {e!r}")
             print(dimmed("  (usage display unavailable — run `cswap --list` to retry)"))
         print()
-        warning("Please restart Claude Code to use the new authentication.")
+        print(dimmed(self._activation_followup_text()))
         print()
 
     def purge(self) -> None:

@@ -1152,6 +1152,112 @@ class TestPerformSwitchPostDisplay:
         )
         assert backup_oauth["accessToken"] == "sk-rotated-1"
 
+    def test_quiet_switch_suppresses_banners_and_followup(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        capsys,
+    ):
+        """quiet=True is the contract the background monitor relies on:
+        launchd's stdout/stderr should not collect interactive banner text or
+        the platform-specific 'next message / 30s' followup line.
+        """
+        switcher, creds_store, configs_store = self._setup_two_accounts(
+            temp_home, sample_sequence_data,
+        )
+        live_state = {"creds": json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state,
+        )
+
+        try:
+            with patch(
+                "claude_swap.oauth.refresh_oauth_credentials",
+                return_value=creds_store[("2", "account2@example.com")],
+            ), patch.object(
+                switcher, "list_accounts"
+            ) as mock_list:
+                switcher._perform_switch("2", quiet=True)
+        finally:
+            for p in patches:
+                p.stop()
+
+        # Commit happened — sequence advanced.
+        data = switcher._get_sequence_data()
+        assert data is not None
+        assert data["activeAccountNumber"] == 2
+
+        # Output stays empty: no "Switched to", no followup, no list_accounts().
+        output = capsys.readouterr().out
+        assert "Switched to" not in output
+        assert "New account active" not in output
+        assert "restart Claude Code" not in output
+        mock_list.assert_not_called()
+
+    def test_force_refresh_threads_through_perform_switch(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+    ):
+        """force_refresh=True on _perform_switch must forward to
+        _refresh_target_credentials_before_activation as force=True.
+        Otherwise the monitor's "fresh token after handoff" guarantee is broken.
+        """
+        switcher, creds_store, configs_store = self._setup_two_accounts(
+            temp_home, sample_sequence_data,
+        )
+        live_state = {"creds": json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state,
+        )
+
+        try:
+            with patch.object(
+                switcher,
+                "_refresh_target_credentials_before_activation",
+                wraps=switcher._refresh_target_credentials_before_activation,
+            ) as spy, patch(
+                "claude_swap.oauth.refresh_oauth_credentials",
+                return_value=creds_store[("2", "account2@example.com")],
+            ), patch.object(
+                switcher, "list_accounts"
+            ):
+                switcher._perform_switch("2", quiet=True, force_refresh=True)
+        finally:
+            for p in patches:
+                p.stop()
+
+        # The spy should have seen force=True.
+        spy.assert_called_once()
+        assert spy.call_args.kwargs.get("force") is True
+
+    def test_activation_followup_text_is_platform_aware(self, temp_home: Path):
+        """README documents the platform difference; the followup line must
+        reflect it so the user-visible message stays honest with reality."""
+        from claude_swap.models import Platform
+
+        switcher = ClaudeAccountSwitcher()
+        switcher.platform = Platform.MACOS
+        mac_text = switcher._activation_followup_text()
+        assert "Keychain" in mac_text and "30s" in mac_text
+
+        switcher.platform = Platform.LINUX
+        linux_text = switcher._activation_followup_text()
+        assert "next message" in linux_text
+        assert "Keychain" not in linux_text
+
     def test_switch_survives_post_display_failure(
         self,
         temp_home: Path,
@@ -1199,7 +1305,8 @@ class TestPerformSwitchPostDisplay:
         output = capsys.readouterr().out
         assert "Switched to" in output
         assert "usage display unavailable" in output
-        assert "restart Claude Code" in output
+        # Followup line is platform-aware; both variants reference activation.
+        assert "New account active" in output
 
     def test_switch_with_unset_active_account_does_not_write_none_backup(
         self,
@@ -2956,3 +3063,74 @@ class TestRefreshTargetBeforeActivation:
                 "2", "b@example.com", creds
             )
         assert result == creds
+
+    def _fresh_creds(self) -> str:
+        """Token with a long-into-the-future expiry — not expired."""
+        return json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-fresh",
+                "refreshToken": "rt-fresh",
+                # Year 2099 in epoch ms — guaranteed not expired.
+                "expiresAt": 4_070_908_800_000,
+            },
+        })
+
+    def test_force_refresh_on_fresh_token_triggers_refresh(self, temp_home: Path):
+        """force=True refreshes even when the token has not expired yet.
+
+        This is the production-grade seamless-handoff path used by the
+        background auto-switch monitor: after activation, Claude Code's first
+        API call against the new account must use a freshly-issued token, not
+        a backup token that could be minutes from expiry.
+        """
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        fresh_creds = self._fresh_creds()
+        refreshed_creds = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-refreshed",
+                "refreshToken": "rt-refreshed",
+                "expiresAt": 4_070_908_800_000,
+            },
+        })
+        with patch(
+            "claude_swap.oauth.refresh_oauth_credentials",
+            return_value=refreshed_creds,
+        ) as mock_refresh, patch.object(
+            ClaudeAccountSwitcher, "_write_account_credentials"
+        ) as mock_write:
+            result = s._refresh_target_credentials_before_activation(
+                "2", "b@example.com", fresh_creds, force=True,
+            )
+        mock_refresh.assert_called_once_with(fresh_creds)
+        mock_write.assert_called_once()
+        assert result == refreshed_creds
+
+    def test_force_refresh_failure_on_fresh_token_falls_back(self, temp_home: Path):
+        """When force=True and refresh fails but the existing token is still
+        valid, return the existing creds — degrading gracefully rather than
+        blocking the switch on a transient network error."""
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        fresh = self._fresh_creds()
+        with patch("claude_swap.oauth.refresh_oauth_credentials", return_value=None), \
+             patch.object(ClaudeAccountSwitcher, "_live_session_pids", return_value=[]):
+            result = s._refresh_target_credentials_before_activation(
+                "2", "b@example.com", fresh, force=True,
+            )
+        assert result == fresh
+
+    def test_no_force_skips_refresh_when_not_expired(self, temp_home: Path):
+        """The default (interactive) path saves a network call when the token
+        is still good — preserves the historic fast-path behaviour."""
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        fresh = self._fresh_creds()
+        with patch(
+            "claude_swap.oauth.refresh_oauth_credentials", return_value=None,
+        ) as mock_refresh:
+            result = s._refresh_target_credentials_before_activation(
+                "2", "b@example.com", fresh,
+            )
+        mock_refresh.assert_not_called()
+        assert result == fresh

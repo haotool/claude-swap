@@ -200,8 +200,11 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     the foreground monitor. Settings persist in ``sequence.json``.
 
     No Claude Code restart is needed for the switch to take effect — on
-    Linux/Windows the new credentials are picked up on the next message, and on
-    macOS once the Keychain cache expires.
+    Linux/Windows the new credentials are picked up on the next message; on
+    macOS within Claude Code's ~30s Keychain cache TTL. For automated paths
+    (TUI monitor + launchd background service) the target's OAuth token is
+    force-refreshed before activation so the first API call against the new
+    account gets a freshly-issued token.
     """
     while True:
         cfg = switcher.get_auto_switch_config()
@@ -333,7 +336,10 @@ def _auto_perform_switch(stdscr, switcher: ClaudeAccountSwitcher, pct: float | N
     switched = True
     try:
         try:
-            switcher.switch()
+            # User is watching the TUI monitor (quiet=False to show the banner)
+            # but the switch is automated, so force a fresh token like the
+            # background service path does.
+            switcher.switch(force_refresh=True)
         except ClaudeSwitchError as e:
             print(f"Auto-switch error: {e}")
             log.warning("monitor switch failed: pct=%s error=%s", pct, e)

@@ -348,10 +348,11 @@ class TestCliAutoMonitor:
         self, temp_home: Path, caplog
     ):
         switcher = ClaudeAccountSwitcher()
-        switched = {"n": 0}
+        switched = {"n": 0, "kwargs": None}
 
-        def _do_switch() -> None:
+        def _do_switch(**kwargs) -> None:
             switched["n"] += 1
+            switched["kwargs"] = kwargs
 
         caplog.set_level(logging.INFO, logger="claude-swap")
         with patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
@@ -366,11 +367,15 @@ class TestCliAutoMonitor:
         assert any("monitor threshold reached" in m for m in msgs), msgs
         assert any("monitor switched account" in m for m in msgs), msgs
         assert switched["n"] == 1
+        # Production-grade seamless contract: background monitor must use the
+        # quiet + force_refresh path so launchd output stays clean and the
+        # activated account ships with a freshly-issued OAuth token.
+        assert switched["kwargs"] == {"quiet": True, "force_refresh": True}
 
     def test_logs_warning_when_switch_fails(self, temp_home: Path, caplog):
         switcher = ClaudeAccountSwitcher()
 
-        def _raise() -> None:
+        def _raise(**_kwargs) -> None:
             raise ClaudeSwitchError("boom")
 
         caplog.set_level(logging.INFO, logger="claude-swap")
