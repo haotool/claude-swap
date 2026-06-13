@@ -279,7 +279,7 @@ def _run_auto_monitor(
                         last_pct,
                         threshold,
                     )
-                    switched = _auto_perform_switch(stdscr, switcher)
+                    switched = _auto_perform_switch(stdscr, switcher, last_pct)
                     if switched:
                         log.info("monitor switched account at pct=%s", last_pct)
                     message = (
@@ -307,7 +307,7 @@ def _run_auto_monitor(
         stdscr.timeout(-1)
 
 
-def _auto_perform_switch(stdscr, switcher: ClaudeAccountSwitcher) -> bool:
+def _auto_perform_switch(stdscr, switcher: ClaudeAccountSwitcher, pct: float | None) -> bool:
     """Suspend curses, run ``switcher.switch()``, then resume. No Enter prompt."""
     curses.def_prog_mode()
     curses.endwin()
@@ -318,7 +318,7 @@ def _auto_perform_switch(stdscr, switcher: ClaudeAccountSwitcher) -> bool:
             switcher.switch()
         except ClaudeSwitchError as e:
             print(f"Auto-switch error: {e}")
-            log.warning("monitor switch failed: pct=%s error=%s", None, e)
+            log.warning("monitor switch failed: pct=%s error=%s", pct, e)
             switched = False
         except KeyboardInterrupt:
             print("\nOperation cancelled.")

@@ -32,11 +32,11 @@ SERVICE_LABEL = "com.claude-swap.monitor"
 # every macOS.
 _LAUNCHCTL = "/usr/bin/launchctl"
 
-# Only forward variables that change WHERE cswap reads state, so the background
-# agent resolves the same config/backup paths as the user's shell. PATH is
-# included so the supervised process can still find subprocesses it spawns
-# (e.g. ``/usr/bin/security`` resolves on absolute path, but a future helper
-# that calls ``git`` or ``claude`` would otherwise fail under launchd's empty PATH).
+# HOME, CLAUDE_CONFIG_DIR, XDG_DATA_HOME determine WHERE the supervised
+# ``cswap --monitor`` process reads state, so the launchd agent must see
+# the same values as the user's shell. PATH is forwarded so the monitor
+# child can resolve any subprocesses it spawns under launchd's otherwise-
+# empty default PATH (the agent's own ``launchctl`` is pinned absolute).
 _FORWARDED_ENV_KEYS = ("HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "PATH")
 
 
@@ -127,8 +127,11 @@ def install(switcher: ClaudeAccountSwitcher) -> int:
     plist_path = _plist_path()
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     _log_dir(switcher).mkdir(parents=True, exist_ok=True)
-    with plist_path.open("wb") as fh:
+    tmp_path = plist_path.with_suffix(plist_path.suffix + ".tmp")
+    with tmp_path.open("wb") as fh:
         plistlib.dump(_build_plist(switcher), fh)
+    os.replace(tmp_path, plist_path)
+    os.chmod(plist_path, 0o600)
     # Replace any prior instance: ``bootout`` is best-effort (not installed yet
     # on first run is normal), then ``bootstrap`` must succeed.
     _launchctl("bootout", _launchd_service_target(), check=False)

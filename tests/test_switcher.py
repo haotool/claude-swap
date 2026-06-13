@@ -2916,3 +2916,43 @@ class TestSwitchSkipsBrokenSlots:
 
         with pytest.raises(ConfigError, match="No managed accounts have valid"):
             s.switch()
+
+
+class TestRefreshTargetBeforeActivation:
+    """Lock both branches of ``_refresh_target_credentials_before_activation``:
+    when a stored OAuth token is expired and the network refresh fails, the
+    method must raise SwitchError if no live session is detected, but must
+    tolerate the failure (return the unrefreshed credentials unchanged) when
+    a live session-mode instance is still using the token."""
+
+    def _expired_creds(self) -> str:
+        return json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-expired",
+                "refreshToken": "rt-expired",
+                "expiresAt": 1,
+            },
+        })
+
+    def test_raises_when_no_live_session_and_refresh_fails(self, temp_home: Path):
+        from claude_swap.exceptions import SwitchError
+
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        with patch("claude_swap.oauth.refresh_oauth_credentials", return_value=None), \
+             patch.object(ClaudeAccountSwitcher, "_live_session_pids", return_value=[]):
+            with pytest.raises(SwitchError, match="stored OAuth token is expired"):
+                s._refresh_target_credentials_before_activation(
+                    "2", "b@example.com", self._expired_creds()
+                )
+
+    def test_returns_unchanged_when_live_session_present(self, temp_home: Path):
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        creds = self._expired_creds()
+        with patch("claude_swap.oauth.refresh_oauth_credentials", return_value=None), \
+             patch.object(ClaudeAccountSwitcher, "_live_session_pids", return_value=[1234]):
+            result = s._refresh_target_credentials_before_activation(
+                "2", "b@example.com", creds
+            )
+        assert result == creds
