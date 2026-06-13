@@ -294,6 +294,79 @@ class TestDoRemove:
 
 
 # --------------------------------------------------------------------------- #
+# Main loop dispatch                                                           #
+# --------------------------------------------------------------------------- #
+
+
+class TestMainLoopHealth:
+    """The "Account health & usage" entry must shell out to the existing
+    ``list_accounts(show_token_status=True, show_health=True)`` renderer —
+    SSOT preserved (no curses-native re-implementation)."""
+
+    def _select_keys(self, idx: int) -> list[int]:
+        """Keys to move down ``idx`` times and press Enter."""
+        return [tui.curses.KEY_DOWN] * idx + [10]
+
+    def test_health_entry_dispatches_with_flags(self, temp_home: Path):
+        switcher = MagicMock(spec=ClaudeAccountSwitcher)
+        # _status_line consults the switcher; keep it cheap and deterministic.
+        switcher.get_auto_switch_config.return_value = {
+            "enabled": False, "threshold": 90,
+        }
+        switcher._get_sequence_data_migrated.return_value = None
+        switcher._get_current_account.return_value = None
+
+        screen = _stub_screen(rows=40, cols=120)
+        # Menu order (post-edit): switch, add, remove, refresh, list, health(5),
+        # status, auto, quit(8). Pick "health" (idx 5), then "quit" (idx 8).
+        screen.getch.side_effect = (
+            self._select_keys(5) + self._select_keys(8)
+        )
+
+        with patch("claude_swap.tui._shell_out") as mock_shell, \
+             patch("claude_swap.tui.curses.curs_set"):
+            rc = tui._main_loop(screen, switcher)
+
+        assert rc == 0
+        # The "health" dispatch must have shelled out exactly once for our
+        # selection (plus zero other shell-outs in this flow).
+        assert mock_shell.call_count == 1
+        # Invoke the captured lambda and assert it calls the SSOT renderer
+        # with both health flags set.
+        _stdscr_arg, fn = mock_shell.call_args.args
+        assert _stdscr_arg is screen
+        fn()
+        switcher.list_accounts.assert_called_once_with(
+            show_token_status=True, show_health=True,
+        )
+
+    def test_quick_list_entry_uses_no_flags(self, temp_home: Path):
+        """Regression: the quick "List accounts" entry stays flag-free."""
+        switcher = MagicMock(spec=ClaudeAccountSwitcher)
+        switcher.get_auto_switch_config.return_value = {
+            "enabled": False, "threshold": 90,
+        }
+        switcher._get_sequence_data_migrated.return_value = None
+        switcher._get_current_account.return_value = None
+
+        screen = _stub_screen(rows=40, cols=120)
+        # Pick "list" (idx 4), then "quit" (idx 8).
+        screen.getch.side_effect = (
+            self._select_keys(4) + self._select_keys(8)
+        )
+
+        with patch("claude_swap.tui._shell_out") as mock_shell, \
+             patch("claude_swap.tui.curses.curs_set"):
+            rc = tui._main_loop(screen, switcher)
+
+        assert rc == 0
+        assert mock_shell.call_count == 1
+        _stdscr_arg, fn = mock_shell.call_args.args
+        fn()
+        switcher.list_accounts.assert_called_once_with()
+
+
+# --------------------------------------------------------------------------- #
 # CLI integration                                                              #
 # --------------------------------------------------------------------------- #
 
