@@ -59,17 +59,6 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
   re-introduce it as a one-line wrapper around `macos_keychain.get_password`
   **only if** macOS users report hangs on a locked Keychain. Not worth doing
   pre-emptively.
-- **Sister-test ThreadPoolExecutor flake.** Plan 001 deflaked
-  `test_list_shows_rate_limit_when_no_previous_usage` by routing the mock
-  with `side_effect=lambda` instead of an ordered list. The same root cause
-  (nondeterministic `ThreadPoolExecutor.map` worker order) affects at least
-  `test_list_preserves_previous_cached_usage_when_fetch_returns_none` and
-  `test_list_shows_cached_usage_with_rate_limit_note` in
-  `tests/test_switcher.py`. Stable on most runs; trip ~1 in 5 in isolation,
-  rare in the full suite. Trivial follow-up: apply the same `side_effect=lambda`
-  routing to those sister tests. Out of plan 001's scope; should land before
-  CI starts running.
-
 - **In-curses auto-refreshing usage dashboard.** Plan 004 reuses the CLI
   renderer (SSOT). A native curses table that live-refreshes all accounts would
   fork the formatting and needs a network-cadence decision — separate plan if
