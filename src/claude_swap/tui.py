@@ -23,6 +23,7 @@ from typing import Callable
 
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.monitor import MONITOR_POLL_SECONDS, should_switch
+from claude_swap import service
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -205,13 +206,16 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     while True:
         cfg = switcher.get_auto_switch_config()
         state = "ON" if cfg["enabled"] else "OFF"
+        service_state = _service_state()
         subtitle = (
-            f"Beta · currently {state} · threshold {cfg['threshold']}%  ·  "
-            "rotates to the next account at the limit"
+            f"Rule {state} @ {cfg['threshold']}%  ·  "
+            f"Background service {service_state}"
         )
         items: list[tuple[str, str | None]] = [
-            ("Disable" if cfg["enabled"] else "Enable", "toggle"),
-            (f"Set threshold (now {cfg['threshold']}%)", "threshold"),
+            (f"Auto-switch: {'Disable' if cfg['enabled'] else 'Enable'}", "toggle"),
+            (f"Threshold: set to {cfg['threshold']}%", "threshold"),
+            (_service_menu_label(service_state), "service-toggle"),
+            ("Background service: Show status", "service-status"),
             ("Start monitor now", "start"),
             ("-- Back --", None),
         ]
@@ -237,6 +241,20 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
                     )
                 except ClaudeSwitchError as e:
                     _show_message(stdscr, f"Invalid threshold: {e}", is_error=True)
+        elif choice == "service-toggle":
+            if sys.platform != "darwin":
+                _show_message(
+                    stdscr,
+                    "Background service is currently macOS-only. "
+                    "Use the foreground monitor on this platform.",
+                    is_error=True,
+                )
+            elif service_state == "installed":
+                _shell_out(stdscr, lambda: service.uninstall(switcher))
+            else:
+                _shell_out(stdscr, lambda: service.install(switcher))
+        elif choice == "service-status":
+            _shell_out(stdscr, lambda: service.status(switcher))
         elif choice == "start":
             cfg = switcher.get_auto_switch_config()
             if not cfg["enabled"]:
@@ -386,6 +404,22 @@ def _status_line(switcher: ClaudeAccountSwitcher) -> str:
     if cfg["enabled"]:
         line += f"  ·  auto-switch ON ({cfg['threshold']}%)"
     return line
+
+
+def _service_state() -> str:
+    """Return a compact background-service state for the TUI."""
+    if sys.platform != "darwin":
+        return "unsupported"
+    return "installed" if service._plist_path().exists() else "not installed"
+
+
+def _service_menu_label(service_state: str) -> str:
+    """TUI label for the background-service toggle action."""
+    if service_state == "unsupported":
+        return "Background service: unavailable on this platform"
+    if service_state == "installed":
+        return "Background service: Uninstall"
+    return "Background service: Install"
 
 
 def _account_items(switcher: ClaudeAccountSwitcher) -> list[tuple[str, str]]:
