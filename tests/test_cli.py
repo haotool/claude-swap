@@ -501,3 +501,97 @@ class TestRunCommand:
 
         assert excinfo.value.code == 1
         assert "boom" in capsys.readouterr().err
+
+
+class TestAutoSwitchCommand:
+    """`cswap auto-switch` pre-dispatch: config-only SSOT commands."""
+
+    def test_status_reads_persisted_config(self, capsys):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("os.geteuid", return_value=1000), \
+             patch.object(sys, "argv", ["claude-swap", "auto-switch", "status"]):
+            switcher_cls.return_value.get_auto_switch_config.return_value = {
+                "enabled": True,
+                "threshold": 95,
+            }
+            cli.main()
+
+        switcher_cls.return_value.get_auto_switch_config.assert_called_once_with()
+        out = capsys.readouterr().out
+        assert "Auto-switch:" in out
+        assert "enabled" in out
+        assert "95%" in out
+
+    def test_enable_persists_enabled_true(self, capsys):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("os.geteuid", return_value=1000), \
+             patch.object(sys, "argv", ["claude-swap", "auto-switch", "enable"]):
+            switcher_cls.return_value.set_auto_switch_config.return_value = {
+                "enabled": True,
+                "threshold": 95,
+            }
+            cli.main()
+
+        switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
+            enabled=True
+        )
+        out = capsys.readouterr().out
+        assert "Auto-switch:" in out
+        assert "enabled" in out
+
+    def test_disable_persists_enabled_false(self, capsys):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("os.geteuid", return_value=1000), \
+             patch.object(sys, "argv", ["claude-swap", "auto-switch", "disable"]):
+            switcher_cls.return_value.set_auto_switch_config.return_value = {
+                "enabled": False,
+                "threshold": 95,
+            }
+            cli.main()
+
+        switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
+            enabled=False
+        )
+        out = capsys.readouterr().out
+        assert "Auto-switch:" in out
+        assert "disabled" in out
+
+    def test_set_threshold_persists_threshold(self, capsys):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("os.geteuid", return_value=1000), \
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "auto-switch", "set-threshold", "95"],
+             ):
+            switcher_cls.return_value.set_auto_switch_config.return_value = {
+                "enabled": False,
+                "threshold": 95,
+            }
+            cli.main()
+
+        switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
+            threshold=95
+        )
+        out = capsys.readouterr().out
+        assert "Auto-switch:" in out
+        assert "95%" in out
+
+    def test_set_threshold_invalid_value_exits_cleanly(self, capsys):
+        from claude_swap.exceptions import ValidationError
+
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("os.geteuid", return_value=1000), \
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "auto-switch", "set-threshold", "101"],
+             ):
+            switcher_cls.return_value.set_auto_switch_config.side_effect = ValidationError(
+                "Threshold must be between 1 and 100"
+            )
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+
+        assert excinfo.value.code == 1
+        assert "Threshold must be between 1 and 100" in capsys.readouterr().err

@@ -8,7 +8,7 @@ import sys
 
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.printer import dimmed, error, muted
+from claude_swap.printer import bolded, dimmed, error, muted
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -144,6 +144,76 @@ Examples:
         sys.exit(130)
 
 
+def _print_auto_switch_config(config: dict) -> None:
+    state = "enabled" if config.get("enabled") else "disabled"
+    threshold = int(config.get("threshold", 95))
+    print(f"{bolded('Auto-switch:')} {state} {muted(f'(threshold {threshold}%)')}")
+
+
+def _auto_switch_command(argv: list[str]) -> None:
+    """Handle `cswap auto-switch status|enable|disable|set-threshold N`."""
+    parser = argparse.ArgumentParser(
+        prog="cswap auto-switch",
+        description="Manage persisted auto-switch configuration.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap auto-switch status
+  cswap auto-switch enable
+  cswap auto-switch disable
+  cswap auto-switch set-threshold 95
+        """,
+    )
+    parser.add_argument(
+        "action",
+        choices=("status", "enable", "disable", "set-threshold"),
+        help="status | enable | disable | set-threshold",
+    )
+    parser.add_argument(
+        "threshold",
+        nargs="?",
+        type=int,
+        metavar="NUM",
+        help="Threshold percentage (required for set-threshold)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging",
+    )
+    args = parser.parse_args(argv)
+
+    if args.action == "set-threshold" and args.threshold is None:
+        parser.error("set-threshold requires NUM")
+    if args.action != "set-threshold" and args.threshold is not None:
+        parser.error("threshold is only accepted with set-threshold")
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+
+        if sys.platform != "win32":
+            if os.geteuid() == 0 and not switcher._is_running_in_container():
+                error("Error: Do not run this script as root (unless running in a container)")
+                sys.exit(1)
+
+        if args.action == "status":
+            config = switcher.get_auto_switch_config()
+        elif args.action == "enable":
+            config = switcher.set_auto_switch_config(enabled=True)
+        elif args.action == "disable":
+            config = switcher.set_auto_switch_config(enabled=False)
+        else:
+            config = switcher.set_auto_switch_config(threshold=args.threshold)
+
+        _print_auto_switch_config(config)
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}")
+        sys.exit(130)
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     if len(sys.argv) > 1 and sys.argv[1] == "run":
@@ -152,6 +222,10 @@ def main() -> None:
 
     if len(sys.argv) > 1 and sys.argv[1] == "service":
         _service_command(sys.argv[2:])
+        return  # only reachable in tests where sys.exit is mocked
+
+    if len(sys.argv) > 1 and sys.argv[1] == "auto-switch":
+        _auto_switch_command(sys.argv[2:])
         return  # only reachable in tests where sys.exit is mocked
 
     parser = argparse.ArgumentParser(
