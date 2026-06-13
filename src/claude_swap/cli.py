@@ -88,11 +88,71 @@ Examples:
         sys.exit(130)
 
 
+def _service_command(argv: list[str]) -> None:
+    """Handle `cswap service install|uninstall|status|logs`.
+
+    Pre-dispatched before the main parser is built, mirroring `_run_command`:
+    a positional subcommand can't coexist with main()'s required mutually-
+    exclusive flag group, and this keeps the existing parser untouched.
+    Limitation: `service` must be the first argument (`cswap --debug service
+    status` is not supported; use `cswap service status --debug`).
+    """
+    parser = argparse.ArgumentParser(
+        prog="cswap service",
+        description=(
+            "Manage the macOS launchd background auto-switch monitor. "
+            "Runs `cswap --monitor` under launchd so it starts at login and "
+            "is restarted on crash."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap service install
+  cswap service status
+  cswap service logs
+  cswap service uninstall
+        """,
+    )
+    parser.add_argument(
+        "action",
+        choices=("install", "uninstall", "status", "logs"),
+        help="install | uninstall | status | logs",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        from claude_swap import service
+
+        action = {
+            "install": service.install,
+            "uninstall": service.uninstall,
+            "status": service.status,
+            "logs": service.logs,
+        }[args.action]
+        sys.exit(action(switcher))
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}")
+        sys.exit(130)
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     if len(sys.argv) > 1 and sys.argv[1] == "run":
         _run_command(sys.argv[2:])
         return  # only reachable in tests where exec/exit is mocked
+
+    if len(sys.argv) > 1 and sys.argv[1] == "service":
+        _service_command(sys.argv[2:])
+        return  # only reachable in tests where sys.exit is mocked
 
     parser = argparse.ArgumentParser(
         description="Multi-Account Switcher for Claude Code",
@@ -118,6 +178,7 @@ Examples:
   %(prog)s --import backup.cswap
   %(prog)s --tui                              # interactive arrow-key menu
   %(prog)s --monitor                          # foreground auto-switch monitor
+  %(prog)s service install                    # background auto-switch monitor (macOS)
   %(prog)s --upgrade                          # self-upgrade to latest version
         """,
     )

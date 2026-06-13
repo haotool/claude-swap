@@ -115,6 +115,19 @@ and exits without starting another monitor if one is already running.
 > percentages come from the same API as `cswap --list`. Please report any rough
 > edges via [Issues](https://github.com/realiti4/claude-swap/issues).
 
+#### Run it in the background (macOS)
+
+```bash
+cswap service install      # start at login, supervised by launchd
+cswap service status       # is it loaded? last exit?
+cswap service logs         # tail recent monitor output
+cswap service uninstall    # stop and remove
+```
+
+The service runs the same `cswap --monitor` loop under launchd
+(`com.claude-swap.monitor`), restarting it if it crashes and logging to
+`<backup_dir>/logs/`. `cswap --monitor` remains available for a foreground run.
+
 ### Refresh expired tokens
 
 If an account's token expires, log back into Claude Code with that account and re-run:
