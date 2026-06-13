@@ -59,6 +59,21 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
   re-introduce it as a one-line wrapper around `macos_keychain.get_password`
   **only if** macOS users report hangs on a locked Keychain. Not worth doing
   pre-emptively.
+- **Two review MEDs.** A code-review + security-review pass after all 5 plans
+  landed (commit `4dd42d7` fixed 2 HIGH + 3 LOW; these MEDs deferred):
+  - **PATH snapshot in launchd plist.** `service.py:_passthrough_env` snapshots
+    the install-time `PATH` into `EnvironmentVariables`, so the agent's PATH is
+    frozen at install. If the user later switches Python venvs or changes their
+    shell PATH, behavior diverges silently until they re-run `cswap service
+    install`. Worth a one-line README caveat; or drop `PATH` from
+    `_FORWARDED_ENV_KEYS` once it's clear nothing the supervised monitor
+    invokes by name needs it.
+  - **TUI reaches `switcher._logger` directly.** `monitor.py` introduced
+    `_logger(switcher)` as the SSOT accessor; `tui.py:260,314` bypass it and
+    read the leading-underscore attribute. Either route through
+    `monitor._logger(switcher)` from the TUI too, or promote the helper to a
+    public `switcher.logger`.
+
 - **In-curses auto-refreshing usage dashboard.** Plan 004 reuses the CLI
   renderer (SSOT). A native curses table that live-refreshes all accounts would
   fork the formatting and needs a network-cadence decision — separate plan if
