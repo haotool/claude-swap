@@ -20,7 +20,7 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 002 | Collapse duplicated monitor into one SSOT core | P1 | M | 001 | DONE (commit `76715b3`, 519 passed) |
 | 003 | Structured, file-based observability for the monitor | P1 | S–M | 002 | DONE (commit `1bd3c30`, 521 passed) |
 | 004 | Multi-account health + usage in the TUI (reuse CLI renderer) | P2 | M | 001 | DONE (commit `c59de9a`, 523 passed) |
-| 005 | `cswap service` launchd background monitor (macOS) | P2 | L | 002, 003 | TODO |
+| 005 | `cswap service` launchd background monitor (macOS) | P2 | L | 002, 003 | DONE (commit `851ce81`, 546 passed, +23 new tests) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 
