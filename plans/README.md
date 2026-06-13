@@ -18,7 +18,7 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 |------|-------|----------|--------|------------|--------|
 | 001 | Rebase feature work onto latest upstream (fork sync, adopt `macos_keychain.py`) | P1 | M | — | DONE (worktree `agent-acec9ac2bb4e4fcd5`, 4 commits ahead of upstream/main, 519 passed) |
 | 002 | Collapse duplicated monitor into one SSOT core | P1 | M | 001 | DONE (commit `76715b3`, 519 passed) |
-| 003 | Structured, file-based observability for the monitor | P1 | S–M | 002 | TODO |
+| 003 | Structured, file-based observability for the monitor | P1 | S–M | 002 | DONE (commit `1bd3c30`, 521 passed) |
 | 004 | Multi-account health + usage in the TUI (reuse CLI renderer) | P2 | M | 001 | TODO |
 | 005 | `cswap service` launchd background monitor (macOS) | P2 | L | 002, 003 | TODO |
 
