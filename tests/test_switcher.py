@@ -1057,8 +1057,18 @@ class TestPerformSwitchPostDisplay:
         def read_live():
             return live_state.get("creds", "")
 
-        def write_live(creds):
+        def write_live(creds, *, verify: bool = False) -> None:
             live_state["creds"] = creds
+            # Honour the production contract: verify=True must validate the
+            # readback. Since both read/write target the same in-memory dict
+            # in these tests, the check is trivially satisfied — but the stub
+            # must still accept the kwarg or _perform_switch crashes.
+            if verify and read_live() != creds:
+                # Match the real CredentialWriteError message shape.
+                from claude_swap.exceptions import CredentialWriteError
+                raise CredentialWriteError(
+                    "Credential write verification failed (test stub)"
+                )
 
         patches = [
             patch.object(switcher, "_read_account_credentials", side_effect=read_creds),
@@ -1257,6 +1267,168 @@ class TestPerformSwitchPostDisplay:
         linux_text = switcher._activation_followup_text()
         assert "next message" in linux_text
         assert "Keychain" not in linux_text
+
+    def test_write_credentials_verify_failure_aborts_switch(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+    ):
+        """Defensive readback: when the storage layer silently returns
+        different bytes than we wrote, ``_perform_switch`` must abort and
+        roll back rather than commit a corrupt swap.
+
+        Simulates the silent-Keychain-overwrite scenario by making
+        ``_read_credentials`` return a stale payload after our write.
+        """
+        from claude_swap.exceptions import CredentialWriteError
+
+        switcher, creds_store, configs_store = self._setup_two_accounts(
+            temp_home, sample_sequence_data,
+        )
+        live_state = {"creds": json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state,
+        )
+
+        # Inject a verify mismatch: _read_credentials returns a tampered
+        # payload after the write, simulating a silent Keychain overwrite.
+        def write_then_corrupt(creds, *, verify=False):
+            live_state["creds"] = creds
+            if verify:
+                # Pretend readback returned something else entirely.
+                raise CredentialWriteError(
+                    "Credential write verification failed: readback differs "
+                    "from intended payload."
+                )
+
+        try:
+            with patch.object(
+                switcher, "_write_credentials", side_effect=write_then_corrupt,
+            ), patch(
+                "claude_swap.oauth.refresh_oauth_credentials",
+                return_value=creds_store[("2", "account2@example.com")],
+            ):
+                with pytest.raises(Exception) as exc_info:
+                    switcher._perform_switch("2")
+        finally:
+            for p in patches:
+                p.stop()
+
+        # Either CredentialWriteError directly or SwitchError wrapping it.
+        msg = str(exc_info.value)
+        assert "verification failed" in msg or "readback" in msg
+
+        # Sequence must NOT have advanced.
+        data = switcher._get_sequence_data()
+        assert data is not None
+        assert data["activeAccountNumber"] == 1
+
+    def test_multi_session_race_warning_logged_when_two_plus_running(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        caplog,
+    ):
+        """When >1 default-mode Claude Code processes are running, the
+        switch must log a structured warning naming the PIDs and the
+        underlying claude-code#24317 race condition. The switch still
+        proceeds — the warning is informational."""
+        import logging as _logging
+
+        switcher, creds_store, configs_store = self._setup_two_accounts(
+            temp_home, sample_sequence_data,
+        )
+        live_state = {"creds": json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state,
+        )
+
+        caplog.set_level(_logging.WARNING, logger="claude-swap")
+        try:
+            with patch.object(
+                switcher,
+                "_live_default_mode_claude_pids",
+                return_value=[101, 202, 303],
+            ), patch(
+                "claude_swap.oauth.refresh_oauth_credentials",
+                return_value=creds_store[("2", "account2@example.com")],
+            ), patch.object(switcher, "list_accounts"):
+                switcher._perform_switch("2", quiet=True)
+        finally:
+            for p in patches:
+                p.stop()
+
+        warnings = [
+            r.getMessage() for r in caplog.records
+            if r.name == "claude-swap" and r.levelno == _logging.WARNING
+        ]
+        assert any(
+            "multi-session race" in m and "101" in m and "303" in m
+            and "24317" in m
+            for m in warnings
+        ), warnings
+
+        # Switch still committed — the warning is non-blocking.
+        data = switcher._get_sequence_data()
+        assert data is not None
+        assert data["activeAccountNumber"] == 2
+
+    def test_multi_session_race_warning_silent_with_single_session(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        caplog,
+    ):
+        """With <=1 live Claude Code process the warning must not fire —
+        log noise here would train users to ignore real signals."""
+        import logging as _logging
+
+        switcher, creds_store, configs_store = self._setup_two_accounts(
+            temp_home, sample_sequence_data,
+        )
+        live_state = {"creds": json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live-1",
+                "refreshToken": "rt-live-1",
+            },
+        })}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state,
+        )
+
+        caplog.set_level(_logging.WARNING, logger="claude-swap")
+        try:
+            with patch.object(
+                switcher,
+                "_live_default_mode_claude_pids",
+                return_value=[101],
+            ), patch(
+                "claude_swap.oauth.refresh_oauth_credentials",
+                return_value=creds_store[("2", "account2@example.com")],
+            ), patch.object(switcher, "list_accounts"):
+                switcher._perform_switch("2", quiet=True)
+        finally:
+            for p in patches:
+                p.stop()
+
+        warnings = [
+            r.getMessage() for r in caplog.records
+            if r.name == "claude-swap" and r.levelno == _logging.WARNING
+        ]
+        assert not any("multi-session race" in m for m in warnings), warnings
 
     def test_switch_survives_post_display_failure(
         self,

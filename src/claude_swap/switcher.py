@@ -334,15 +334,27 @@ class ClaudeAccountSwitcher:
                     return None
             return ""
 
-    def _write_credentials(self, credentials: str) -> None:
+    def _write_credentials(self, credentials: str, *, verify: bool = False) -> None:
         """Write credentials to Claude Code's storage.
 
         Claude Code stores credentials in:
         - macOS: Keychain with service "Claude Code-credentials"
         - Linux/WSL/Windows: File at ~/.claude/.credentials.json
 
+        Args:
+            credentials: The credential payload to persist (raw string).
+            verify: When True, immediately read the credentials back from the
+                storage layer and confirm the readback matches what was
+                written. Defends against silent Keychain ACL corruption and
+                concurrent overwrites by other processes between our write and
+                the next operation. Recommended for activation-path writes;
+                left False on rollback writes where verification failure would
+                mask the original cause of the rollback.
+
         Raises:
-            CredentialWriteError: If writing credentials fails.
+            CredentialWriteError: If writing credentials fails, or if
+                ``verify=True`` and the readback does not match the intended
+                payload.
         """
         if self.platform == Platform.MACOS:
             try:
@@ -377,6 +389,17 @@ class ClaudeAccountSwitcher:
                     raise
             except Exception as e:
                 raise CredentialWriteError(f"Failed to write credentials: {e}")
+
+        if verify:
+            readback = self._read_credentials()
+            if readback != credentials:
+                # We deliberately do NOT include credential payloads in the
+                # error message (avoid leaking secrets into logs).
+                raise CredentialWriteError(
+                    "Credential write verification failed: readback differs "
+                    "from intended payload. Possible silent Keychain corruption "
+                    "or concurrent overwrite. Aborting switch."
+                )
 
     def _uses_file_backup_backend(self) -> bool:
         """Whether per-account backup credentials live in files vs. the Keychain.
@@ -757,6 +780,27 @@ class ClaudeAccountSwitcher:
         from claude_swap.session import live_sessions_for
 
         return [s.pid for s in live_sessions_for(self._session_dir(account_num, email))]
+
+    def _live_default_mode_claude_pids(self) -> list[int]:
+        """PIDs of default-mode Claude Code processes that share the active credential store.
+
+        Read from ``~/.claude/sessions/*.json`` (or ``$CLAUDE_CONFIG_DIR``) —
+        the same source Claude Code itself maintains. Session-mode profiles
+        (``cswap run``) live under their own config dirs and are NOT counted
+        here; only default-mode sessions are affected by an active-credential
+        swap.
+
+        Used to detect the multi-session OAuth refresh race described in
+        Anthropic claude-code#24317: each running Claude Code process loaded
+        the refresh token into memory at startup, so when several of them
+        race to refresh near-simultaneously after a swap, all but one fail
+        with ``invalid_grant`` and trigger an interactive re-login prompt.
+        We can't fix the race from outside the CLI; we surface a warning so
+        the user (or launchd log reader) understands what they're seeing.
+        """
+        from claude_swap.process_detection import list_sessions
+
+        return [s.pid for s in list_sessions()]
 
     def _ensure_no_live_session(self, account_num: str, email: str, action: str) -> None:
         """Refuse a destructive operation while a session-mode claude is live."""
@@ -2024,6 +2068,32 @@ class ClaudeAccountSwitcher:
                     f"'cswap run {target_account}'."
                 )
 
+        # Multi-session race awareness (claude-code#24317): when more than one
+        # default-mode Claude Code process is running, each holds its own
+        # in-memory copy of the old refresh token. After we swap credentials,
+        # all of them try to refresh near-simultaneously and Anthropic's
+        # single-use refresh token allows only one to succeed — the rest
+        # surface an interactive re-login prompt. We can't prevent this from
+        # outside the CLI; we log a structured warning so launchd readers
+        # (monitor.err) and interactive users understand what they're seeing.
+        live_default_pids = self._live_default_mode_claude_pids()
+        if len(live_default_pids) > 1:
+            pid_list = ", ".join(map(str, sorted(live_default_pids)))
+            self._logger.warning(
+                "multi-session race possible: %d live Claude Code processes "
+                "(PIDs %s); claude-code#24317 may force re-login on one or more "
+                "after switch",
+                len(live_default_pids),
+                pid_list,
+            )
+            if not quiet:
+                warning(
+                    f"{len(live_default_pids)} Claude Code sessions running "
+                    f"(PIDs {pid_list}). After the swap, one or more may need "
+                    "re-login due to a single-use refresh-token race "
+                    "(claude-code#24317). Close extra sessions first to avoid this."
+                )
+
         with FileLock(self.lock_file):
             data = self._get_sequence_data()
             active_account = data.get("activeAccountNumber")
@@ -2102,7 +2172,7 @@ class ClaudeAccountSwitcher:
                 creds_written = False
                 config_written = False
                 try:
-                    self._write_credentials(target_creds)
+                    self._write_credentials(target_creds, verify=True)
                     creds_written = True
 
                     # Mirror the normal switch path: preserve existing local
@@ -2210,7 +2280,7 @@ class ClaudeAccountSwitcher:
                 )
 
                 # Step 3: Activate target account - credentials
-                self._write_credentials(target_creds)
+                self._write_credentials(target_creds, verify=True)
                 transaction.record_step("credentials_written")
                 self._logger.info("Wrote target credentials")
 
