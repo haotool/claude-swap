@@ -29,7 +29,7 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 011 | Remove `# ----` banner divider comments to match upstream style | P1 | S | — | DONE (net −28 lines across 3 files, 653 passed, 3 skipped) |
 | 012 | Replace brittle TUI menu KEY_DOWN counts with `_select_from` patching | P1 | S | — | DONE (5 tests migrated, KEY_DOWN count 10→1, 653 passed, 3 skipped) |
 | 013 | Add regression test for SIGTERM → clean monitor exit (launchd contract) | P1 | S | — | DONE (+1 test, 654 passed, 3 skipped) |
-| 014 | Make `cache.write_cache` atomic with mode 0o600 | P1 | S | — | TODO |
+| 014 | Make `cache.write_cache` atomic with mode 0o600 | P1 | S | — | DONE (+4 tests, 658 passed, 3 skipped) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 
