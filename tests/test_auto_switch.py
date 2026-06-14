@@ -14,7 +14,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from claude_swap import monitor, tui
-from claude_swap.exceptions import ClaudeSwitchError, ValidationError
+from claude_swap.exceptions import ClaudeSwitchError, SwitchError, ValidationError
+from claude_swap.models import (
+    AutoSwitchDecisionContext,
+    BackgroundAutoSwitchIntent,
+    InteractiveAutoSwitchIntent,
+)
 from claude_swap.switcher import (
     DEFAULT_AUTO_SWITCH_THRESHOLD,
     ClaudeAccountSwitcher,
@@ -31,6 +36,90 @@ def _stub_screen(rows: int = 30, cols: int = 100) -> MagicMock:
 def _login(temp_home: Path, email: str = "u@example.com") -> None:
     config = {"oauthAccount": {"emailAddress": email}}
     (temp_home / ".claude.json").write_text(json.dumps(config))
+
+
+# --------------------------------------------------------------------------- #
+# SwitchIntent contract (Background vs Interactive)                             #
+# --------------------------------------------------------------------------- #
+
+
+def _bootstrap_switchable_accounts(
+    temp_home: Path,
+    num_accounts: int,
+) -> ClaudeAccountSwitcher:
+    switcher = ClaudeAccountSwitcher()
+    switcher._setup_directories()
+    accounts: dict = {}
+    sequence: list[int] = []
+    for i in range(1, num_accounts + 1):
+        accounts[str(i)] = {"email": f"a{i}@example.com"}
+        sequence.append(i)
+    data = {
+        "accounts": accounts,
+        "sequence": sequence,
+        "activeAccountNumber": 1 if sequence else None,
+    }
+    switcher._write_json(switcher.sequence_file, data)
+    (temp_home / ".claude").mkdir(parents=True, exist_ok=True)
+    (temp_home / ".claude.json").write_text(
+        json.dumps({
+            "oauthAccount": {
+                "emailAddress": "a1@example.com",
+                "accountUuid": "uuid-1",
+            },
+        })
+    )
+    return switcher
+
+
+class TestSwitchIntentContract:
+    """Product SSOT: background monitor fails closed; TUI monitor prints."""
+
+    @staticmethod
+    def _single_account_decision() -> AutoSwitchDecisionContext:
+        return AutoSwitchDecisionContext(
+            threshold=95,
+            active_usage_pct=99.0,
+            live_active_slot="1",
+            sequence_active_slot="1",
+            usage_by_slot={},
+        )
+
+    def test_background_single_account_raises(self, temp_home: Path, capsys):
+        switcher = _bootstrap_switchable_accounts(temp_home, num_accounts=1)
+        decision = self._single_account_decision()
+        with pytest.raises(SwitchError, match="Only one account"):
+            switcher.switch(BackgroundAutoSwitchIntent(decision=decision))
+        assert capsys.readouterr().out == ""
+
+    def test_interactive_single_account_prints_and_returns(
+        self, temp_home: Path, capsys,
+    ):
+        switcher = _bootstrap_switchable_accounts(temp_home, num_accounts=1)
+        decision = self._single_account_decision()
+        switched = switcher.switch(InteractiveAutoSwitchIntent(decision=decision))
+        out = capsys.readouterr().out
+        assert switched is False
+        assert "Only one account" in out
+
+    def test_background_no_trusted_signal_raises_without_stdout(
+        self, temp_home: Path, capsys,
+    ):
+        switcher = _bootstrap_switchable_accounts(temp_home, num_accounts=3)
+        decision = switcher.build_auto_switch_decision(95, 99.0)
+        with pytest.raises(SwitchError, match="Cannot choose auto-switch target"):
+            switcher.switch(BackgroundAutoSwitchIntent(decision=decision))
+        assert capsys.readouterr().out == ""
+
+    def test_interactive_no_trusted_signal_prints_then_raises(
+        self, temp_home: Path, capsys,
+    ):
+        switcher = _bootstrap_switchable_accounts(temp_home, num_accounts=3)
+        decision = switcher.build_auto_switch_decision(95, 99.0)
+        with pytest.raises(SwitchError, match="Cannot choose auto-switch target"):
+            switcher.switch(InteractiveAutoSwitchIntent(decision=decision))
+        out = capsys.readouterr().out
+        assert "Cannot choose auto-switch target" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -727,10 +816,10 @@ class TestCliAutoMonitor:
         out = capsys.readouterr().out
         assert "switch failed: boom" in out
         assert "switching account" not in out
+
+    def test_monitor_stops_when_config_disabled_mid_cycle(self, temp_home: Path):
         """Config is re-read each cycle: disabling via TUI stops switching."""
         switcher = ClaudeAccountSwitcher()
-        # First call (startup): enabled → monitor starts.
-        # Second call (in-loop): disabled → bail without switching.
         with patch.object(
             switcher,
             "get_auto_switch_config",
