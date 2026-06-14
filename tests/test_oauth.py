@@ -66,6 +66,34 @@ class TestFormatReset:
         assert "h" not in countdown
 
 
+class TestDescribeUsageError:
+    def test_describe_usage_error(self):
+        cases = [
+            (
+                oauth.UsageFetchError(reason="rate_limited", retry_after="30s"),
+                "usage unavailable (rate limited, retry after 30s)",
+            ),
+            (
+                oauth.UsageFetchError(reason="rate_limited"),
+                "usage unavailable (rate limited)",
+            ),
+            (
+                oauth.UsageFetchError(reason="unauthorized"),
+                "usage unavailable (unauthorized)",
+            ),
+            (
+                oauth.UsageFetchError(reason="network_error"),
+                "usage unavailable (network error)",
+            ),
+            (
+                oauth.UsageFetchError(reason="http_error", status_code=500),
+                "usage unavailable",
+            ),
+        ]
+        for error, expected in cases:
+            assert oauth.describe_usage_error(error) == expected
+
+
 class TestFetchUsage:
     """Test fetch_usage."""
 

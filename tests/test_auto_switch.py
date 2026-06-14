@@ -434,6 +434,32 @@ class TestRunAutoMonitor:
         drawn = screen.addstr.call_args_list
         assert any("Next check in" in str(c) for c in drawn)
 
+    def test_s_key_forces_immediate_poll(self, temp_home: Path):
+        """Pressing ``s`` zeroes the countdown so monitor_step runs again."""
+        switcher = ClaudeAccountSwitcher()
+        screen = stub_screen()
+        screen.getch.side_effect = [ord("s"), ord("q")]
+        polled = monitor.MonitorStepResult(
+            kind="polled",
+            threshold=95,
+            pct=50.0,
+            next_interval=60,
+            pct_text="50%",
+            user_message="Monitoring active account.",
+        )
+        with patch.object(
+            switcher, "get_auto_switch_config",
+            return_value={"enabled": True, "threshold": 95},
+        ), patch(
+            "claude_swap.tui.monitor_step",
+            return_value=polled,
+        ) as mock_step, \
+             patch("claude_swap.tui._acquire_monitor_pid", return_value=None), \
+             patch("claude_swap.tui._release_monitor_pid"), \
+             patch("claude_swap.tui.curses.curs_set"):
+            tui._run_auto_monitor(screen, switcher, threshold=95)
+        assert mock_step.call_count == 2
+
     def test_blocks_when_cli_monitor_already_running(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
@@ -909,10 +935,10 @@ class TestCliAutoMonitor:
     def test_monitor_idles_when_no_live_claude_sessions(
         self, temp_home: Path, caplog,
     ):
-        """Phase 4 short-circuit: with zero default-mode Claude Code processes
-        running there is nothing burning tokens, so the monitor skips the
-        usage API call entirely and idles at the polling ceiling.  Override
-        the class-level fixture's return value to simulate the idle state.
+        """With zero default-mode Claude Code processes running there is
+        nothing burning tokens, so the monitor skips the usage API call
+        entirely and idles at the polling ceiling.  Override the class-level
+        fixture's return value to simulate the idle state.
         """
         switcher = ClaudeAccountSwitcher()
         caplog.set_level(logging.INFO, logger="claude-swap")
@@ -976,10 +1002,10 @@ class TestCliAutoMonitor:
     def test_monitor_backs_off_on_consecutive_usage_failures(
         self, temp_home: Path, caplog,
     ):
-        """Phase 3 backoff: when the usage API returns None, the failure
-        counter increments and the next poll interval grows exponentially.
-        We exercise the in-process counter by running the loop multiple times
-        through the (mocked) sleep boundary, verifying logged backoff values.
+        """When the usage API returns None, the failure counter increments and
+        the next poll interval grows exponentially.  We exercise the in-process
+        counter by running the loop multiple times through the (mocked) sleep
+        boundary, verifying logged backoff values.
         """
         switcher = ClaudeAccountSwitcher()
         caplog.set_level(logging.WARNING, logger="claude-swap")
@@ -1087,9 +1113,8 @@ class TestNextPollInterval:
 
 @pytest.mark.usefixtures("stub_live_claude")
 class TestSleepWakeAndHeartbeat:
-    """Round-2 review additions: sleep/wake baseline reset and idle heartbeat
-    for the schema-break safety net.  Both are operational guardrails for
-    monitor.err observability.
+    """Sleep/wake baseline reset and idle heartbeat for the schema-break safety
+    net.  Both are operational guardrails for monitor.err observability.
     """
 
     def test_wake_gap_resets_baseline_and_last_switch_error(

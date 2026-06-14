@@ -38,6 +38,14 @@ MonitorStepKind = Literal[
     "polled",
 ]
 
+# Outcome vocabulary (see also models.SwitchPlanOutcome in the switcher planner):
+#   SwitchPlanOutcome       MonitorStepKind
+#   "already_optimal"   →   "already_optimal"  (perform_switch returned False / saturated hold)
+#   "chosen"            →   "switched"         (perform_switch returned True)
+#   "no_trusted_signal" →   "switch_failed"    (SwitchError from planning)
+# MonitorStepKind adds engine-only kinds: disabled, idle, usage_unavailable,
+# threshold_no_handler, switch_cancelled, polled.
+
 from claude_swap.models import AutoSwitchDecisionContext, BackgroundAutoSwitchIntent
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.printer import accent, bolded, dimmed, muted
@@ -78,8 +86,8 @@ MONITOR_POLL_NEAR_TRIGGER_RATIO = 0.95
 # so a persistent outage stops hammering the API.
 MONITOR_FAILURE_BACKOFF_BASE = MONITOR_POLL_SECONDS_MIN
 
-# Schema-break safety net.  Phase 4 idles when the session-detection
-# function returns zero live PIDs.  If that signal misfires (e.g. Anthropic
+# Schema-break safety net.  When session-detection returns zero live PIDs the
+# monitor idles at the polling ceiling.  If that signal misfires (e.g. Anthropic
 # changes ``~/.claude/sessions/*.json`` and our parser silently returns []),
 # we'd never poll usage again — auto-switch goes observably-silent.  Emit a
 # WARNING when we've been idle this long while the config says auto-switch
