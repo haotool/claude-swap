@@ -328,32 +328,26 @@ def _persist_usage_cache_entry(
         existing[key] = _usage_to_cache(merged)
 
 
-def _resolve_slot_cached_at(entry: dict, file_timestamp: float | None) -> float | None:
-    """Resolve when a cache row was last known-good.
-
-    Legacy rows without ``_cached_at`` inherit the wrapper file timestamp so
-    pre-007 caches remain trusted until the file TTL expires.
-    """
-    if not isinstance(entry, dict):
-        return None
-    cached_at = entry.get("_cached_at")
-    if isinstance(cached_at, (int, float)) and float(cached_at) > 0:
-        return float(cached_at)
-    if file_timestamp is not None and file_timestamp > 0:
-        return file_timestamp
-    return None
-
-
 def _usage_slot_trusted(
     entry: dict,
     now: float,
     file_timestamp: float | None = None,
 ) -> bool:
-    """True when a single usage cache row is within the per-slot TTL."""
-    cached_at = _resolve_slot_cached_at(entry, file_timestamp)
-    if cached_at is None:
+    """True when a single usage cache row is within the per-slot TTL.
+
+    Legacy rows without ``_cached_at`` inherit the wrapper file timestamp so
+    pre-007 caches remain trusted until the file TTL expires.
+    """
+    if not isinstance(entry, dict):
         return False
-    return now - cached_at < _USAGE_CACHE_TTL
+    cached_at = entry.get("_cached_at")
+    if isinstance(cached_at, (int, float)) and float(cached_at) > 0:
+        resolved = float(cached_at)
+    elif file_timestamp is not None and file_timestamp > 0:
+        resolved = file_timestamp
+    else:
+        return False
+    return now - resolved < _USAGE_CACHE_TTL
 
 
 class ClaudeAccountSwitcher:
