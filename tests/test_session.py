@@ -480,6 +480,29 @@ class TestIsSessionValid:
             tmp_path / "missing", ACCOUNT_EMAIL, ORG_UUID
         )
 
+    def test_invokes_pathext_resolved_launcher(
+        self, manager, tmp_path, monkeypatch, valid_payload
+    ):
+        """The probe must call the resolved launcher, not bare "claude".
+
+        On Windows `claude` is a `.cmd` shim that a bare "claude" won't
+        resolve, so validation would always fail. Use shutil.which instead.
+        """
+        tmp_path.mkdir(exist_ok=True)
+        resolved = "/fake/bin/claude.CMD"
+        monkeypatch.setattr(session_mod.shutil, "which", lambda name: resolved)
+        seen_argv = {}
+
+        def capture_run(argv, *a, **k):
+            seen_argv["argv"] = argv
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps(valid_payload), stderr=""
+            )
+
+        monkeypatch.setattr(session_mod.subprocess, "run", capture_run)
+        assert manager._is_session_valid(tmp_path, ACCOUNT_EMAIL, ORG_UUID)
+        assert seen_argv["argv"][0] == resolved
+
 
 # ---------------------------------------------------------------------------
 # sharing

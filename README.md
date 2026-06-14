@@ -80,7 +80,7 @@ cswap run 2 -- --resume         # everything after '--' is forwarded to claude
 cswap run 2 --no-share          # don't share your ~/.claude customizations
 ```
 
-Your `~/.claude` customizations (settings, keybindings, CLAUDE.md, skills, commands, agents) are shared into the session by default — use `--no-share` for a bare profile. Conversation history stays per-account. Note that session mode isolates the *account*, not your files: two Claude instances in the same repo still edit the same working tree.
+Your `~/.claude` customizations (settings, keybindings, CLAUDE.md, skills, commands, agents) are shared into the session by default — use `--no-share` for a bare profile. Conversation history stays per-account.
 
 ### Auto-switch at usage limit (Beta)
 

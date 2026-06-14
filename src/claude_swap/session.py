@@ -410,9 +410,14 @@ class SessionManager:
         """
         if not session_dir.is_dir():
             return False
+        # On Windows `claude` is a `.cmd` shim, and a bare "claude" passed to
+        # subprocess won't resolve it (PATHEXT isn't applied) — it raises
+        # FileNotFoundError, which the handler below turns into a false
+        # "failed validation". shutil.which finds the shim.
+        claude_bin = shutil.which("claude") or "claude"
         try:
             result = subprocess.run(
-                ["claude", "auth", "status", "--json"],
+                [claude_bin, "auth", "status", "--json"],
                 env=_probe_env(session_dir),
                 capture_output=True,
                 text=True,
