@@ -25,6 +25,11 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 007 | Harden automated target planning with trusted usage snapshots and live-active identity | P1 | M | 006 | DONE (630 passed) |
 | 008 | Replace `switch()`'s boolean policy matrix with explicit types and publish one beta contract | P2 | M | 006, 007 | DONE (630 passed) |
 | 009 | Clean Code / SSOT convergence audit (plans 006–008) + phased merge roadmap | P1 | L | 006, 007, 008 | DONE (~9/10 production; 652 passed, 3 skipped; subprocess metadata fix `7a8c2a9`; OAuth FileLock only major leftover) |
+| 010 | Inline `_resolve_slot_cached_at` into its single caller | P1 | S | — | DONE (branch `advisor/010-inline-resolve-slot-cached-at`, commit `5eeabc2`, net −6 lines, 653 passed, 3 skipped) |
+| 011 | Remove `# ----` banner divider comments to match upstream style | P1 | S | — | TODO |
+| 012 | Replace brittle TUI menu KEY_DOWN counts with `_select_from` patching | P1 | S | — | TODO |
+| 013 | Add regression test for SIGTERM → clean monitor exit (launchd contract) | P1 | S | — | TODO |
+| 014 | Make `cache.write_cache` atomic with mode 0o600 | P1 | S | — | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 
@@ -45,6 +50,7 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
   - **007 after 006**: hardens automated target planning once monitor decisions come from one engine snapshot; removes stale-cache / stale-active drift from unattended switching.
   - **008 last**: replaces the growing `switch()` boolean matrix with explicit intent types and aligns docs/contracts after 006/007 settle the real architecture.
 - **009 after 006–008**: read-only 20-department audit consolidated into `plans/009-clean-code-convergence-audit.md`. Phase 1 items are merge blockers (atomic commit, TUI PID, error boundary, poll-interval fix). Phases 2–4 track adapter/cache/intent/docs/test debt — do not re-audit the same gaps ad hoc.
+- **010–014 are P1 clean-code convergence (post-009 review, 2026-06-14)** from `improve` skill survey. All independent (no inter-plan deps); intended to land sequentially via executor sub-agents with reviewer verdicts between each. 012 and 013 both modify `tests/test_auto_switch.py` and must not run in parallel.
 
 ```
 001 ──┬──> 002 ──> 003 ──> 005
