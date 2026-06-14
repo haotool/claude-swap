@@ -43,9 +43,7 @@ STATE_FILENAME = ".migrations.json"
 STATE_VERSION = 1
 
 
-# ---------------------------------------------------------------------------
 # State file
-# ---------------------------------------------------------------------------
 
 
 def _state_path(switcher: "ClaudeAccountSwitcher") -> Path:
@@ -100,9 +98,7 @@ def _mark_applied(switcher: "ClaudeAccountSwitcher", migration_id: str) -> None:
         raise
 
 
-# ---------------------------------------------------------------------------
 # Migrations
-# ---------------------------------------------------------------------------
 
 
 def _delete_keyring_quietly(
@@ -452,9 +448,7 @@ MIGRATIONS: list[tuple[str, Callable[["ClaudeAccountSwitcher"], bool]]] = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Runner
-# ---------------------------------------------------------------------------
 
 
 def run_migrations(switcher: "ClaudeAccountSwitcher") -> None:

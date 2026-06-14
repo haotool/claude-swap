@@ -52,11 +52,7 @@ def run(switcher: ClaudeAccountSwitcher) -> int:
         return 0
 
 
-# ---------------------------------------------------------------------------
 # Main menu loop
-# ---------------------------------------------------------------------------
-
-
 class _ExitRequested(Exception):
     """Internal signal to break out of the curses loop."""
 
@@ -124,11 +120,7 @@ def _main_loop(stdscr: "curses._CursesWindow", switcher: ClaudeAccountSwitcher) 
             _show_message(stdscr, "Operation cancelled.")
 
 
-# ---------------------------------------------------------------------------
 # Sub-flows
-# ---------------------------------------------------------------------------
-
-
 def _do_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     items = _account_items(switcher)
     if not items:
@@ -199,11 +191,7 @@ def _do_refresh(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     _shell_out(stdscr, lambda: switcher.add_account(slot=None))
 
 
-# ---------------------------------------------------------------------------
 # Auto-switch (Beta)
-# ---------------------------------------------------------------------------
-
-
 def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     """Settings + launcher for auto-switch (Beta).
 
@@ -410,11 +398,7 @@ def _draw_monitor(
     stdscr.refresh()
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-
-
 def _status_line(switcher: ClaudeAccountSwitcher) -> str:
     """Compact one-liner: 'Active: email [org] · N managed'. Pure-local, no network."""
     seq = switcher._get_sequence_data() or {}
@@ -482,11 +466,7 @@ def _account_items(switcher: ClaudeAccountSwitcher) -> list[tuple[str, str]]:
     return items
 
 
-# ---------------------------------------------------------------------------
 # Curses primitives — kept thin so we can mock them in tests
-# ---------------------------------------------------------------------------
-
-
 def _select_from(
     stdscr,
     title: str,

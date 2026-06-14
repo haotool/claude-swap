@@ -53,9 +53,7 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 
 PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
 
-# ----------------------------------------------------------------------------
 # Polling cadence — all tunables live here so the trade-offs are auditable.
-# ----------------------------------------------------------------------------
 
 # Ceiling on the polling interval.  Historical default; preserved as the
 # canonical name so the TUI's ``MONITOR_POLL_SECONDS`` import keeps working.
