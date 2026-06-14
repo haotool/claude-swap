@@ -259,11 +259,13 @@ class TestDoAutoSwitch:
     def test_service_toggle_installs_on_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        # Down to "Background service: Install" (idx 2) + Enter, then Esc.
-        screen.getch.side_effect = [tui.curses.KEY_DOWN, tui.curses.KEY_DOWN, 10, 27]
 
         with patch("claude_swap.tui.sys.platform", "darwin"), \
              patch("claude_swap.tui._service_state", return_value="not installed"), \
+             patch(
+                 "claude_swap.tui._select_from",
+                 side_effect=["service-toggle", None],
+             ), \
              patch("claude_swap.tui._shell_out") as mock_shell:
             tui._do_auto_switch(screen, switcher)
 
@@ -276,10 +278,13 @@ class TestDoAutoSwitch:
     def test_service_toggle_uninstalls_on_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        screen.getch.side_effect = [tui.curses.KEY_DOWN, tui.curses.KEY_DOWN, 10, 27]
 
         with patch("claude_swap.tui.sys.platform", "darwin"), \
              patch("claude_swap.tui._service_state", return_value="loaded"), \
+             patch(
+                 "claude_swap.tui._select_from",
+                 side_effect=["service-toggle", None],
+             ), \
              patch("claude_swap.tui._shell_out") as mock_shell:
             tui._do_auto_switch(screen, switcher)
 
@@ -292,16 +297,11 @@ class TestDoAutoSwitch:
     def test_service_status_shells_out(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        # Down to "Background service: Show status" (idx 3) + Enter, then Esc.
-        screen.getch.side_effect = [
-            tui.curses.KEY_DOWN,
-            tui.curses.KEY_DOWN,
-            tui.curses.KEY_DOWN,
-            10,
-            27,
-        ]
 
-        with patch("claude_swap.tui._shell_out") as mock_shell:
+        with patch(
+            "claude_swap.tui._select_from",
+            side_effect=["service-status", None],
+        ), patch("claude_swap.tui._shell_out") as mock_shell:
             tui._do_auto_switch(screen, switcher)
 
         _stdscr_arg, fn = mock_shell.call_args.args
@@ -313,16 +313,13 @@ class TestDoAutoSwitch:
     def test_service_status_shows_error_off_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        screen.getch.side_effect = [
-            tui.curses.KEY_DOWN,
-            tui.curses.KEY_DOWN,
-            tui.curses.KEY_DOWN,
-            10,
-            27,
-        ]
 
         with patch("claude_swap.tui.sys.platform", "linux"), \
              patch("claude_swap.tui._service_state", return_value="unsupported"), \
+             patch(
+                 "claude_swap.tui._select_from",
+                 side_effect=["service-status", None],
+             ), \
              patch("claude_swap.tui._show_message") as mock_message, \
              patch("claude_swap.tui._shell_out") as mock_shell:
             tui._do_auto_switch(screen, switcher)
@@ -333,10 +330,13 @@ class TestDoAutoSwitch:
     def test_service_toggle_shows_error_off_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        screen.getch.side_effect = [tui.curses.KEY_DOWN, tui.curses.KEY_DOWN, 10, 27]
 
         with patch("claude_swap.tui.sys.platform", "linux"), \
              patch("claude_swap.tui._service_state", return_value="unsupported"), \
+             patch(
+                 "claude_swap.tui._select_from",
+                 side_effect=["service-toggle", None],
+             ), \
              patch("claude_swap.tui._show_message") as mock_message:
             tui._do_auto_switch(screen, switcher)
 
