@@ -1,7 +1,8 @@
 """Plain CLI auto-switch monitor with adaptive polling.
 
 The monitor periodically checks the active account's usage percentage and
-rotates to the next account when a configured threshold is reached.  The
+switches to the cooldown-aware best target when a configured threshold is
+reached.  The
 cadence is *adaptive*: when usage is far from threshold and stable, the
 monitor polls slowly (the historical 60s ceiling); as usage approaches the
 threshold or starts climbing, the interval shrinks toward a floor of 5s so
@@ -20,12 +21,29 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Literal, TextIO
 
+MonitorStepKind = Literal[
+    "disabled",
+    "idle",
+    "usage_unavailable",
+    "threshold_no_handler",
+    "switch_failed",
+    "switch_cancelled",
+    "switched",
+    "already_optimal",
+    "polled",
+]
+
+from claude_swap.models import AutoSwitchDecisionContext, BackgroundAutoSwitchIntent
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.printer import accent, bolded, dimmed, muted
 from claude_swap.switcher import ClaudeAccountSwitcher
+
+PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
 
 # ----------------------------------------------------------------------------
 # Polling cadence — all tunables live here so the trade-offs are auditable.
@@ -114,12 +132,17 @@ def _next_poll_interval(
         # Test contract: poll_seconds=0 disables real sleeps everywhere.
         return 0
 
+    # Final-approach override — see NEAR_TRIGGER_RATIO docstring.
+    # Checked before the no-baseline path so a post-switch reset at high
+    # usage still polls at the floor instead of idling at t_max.
+    if (
+        current_pct is not None
+        and current_pct >= threshold * MONITOR_POLL_NEAR_TRIGGER_RATIO
+    ):
+        return max(min(t_min, t_max), 0)
+
     if current_pct is None or last_pct is None or elapsed <= 0:
         return t_max
-
-    # Final-approach override — see NEAR_TRIGGER_RATIO docstring.
-    if current_pct >= threshold * MONITOR_POLL_NEAR_TRIGGER_RATIO:
-        return max(min(t_min, t_max), 0)
 
     # Velocity in pct-points per second.  Negative values (post-switch drop)
     # and exact zero collapse to "idle" — slow polling is correct.
@@ -158,8 +181,302 @@ def _logger(switcher: ClaudeAccountSwitcher):
     return switcher._logger
 
 
+@dataclass
+class MonitorRuntimeState:
+    """Mutable monitor runtime — owned exclusively by ``monitor_step``."""
+
+    last_pct: float | None = None
+    last_poll_time: float | None = None
+    last_wall_time: float | None = None
+    consecutive_failures: int = 0
+    last_switch_error: str | None = None
+    saturated_hold: bool = False
+    idle_started_wall: float | None = None
+    idle_heartbeat_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class MonitorStepResult:
+    """Render-neutral outcome of one monitor engine iteration."""
+
+    kind: MonitorStepKind
+    threshold: int
+    pct: float | None
+    next_interval: int
+    pct_text: str = "unavailable"
+    switched: bool = False
+    switch_error: str | None = None
+    user_message: str = ""
+    consecutive_failures: int = 0
+
+
+def monitor_step(
+    switcher: ClaudeAccountSwitcher,
+    state: MonitorRuntimeState,
+    *,
+    poll_seconds: int = MONITOR_POLL_SECONDS,
+    perform_switch: PerformSwitch | None = None,
+) -> MonitorStepResult:
+    """Advance the monitor by one decision cycle (no sleep / no rendering).
+
+    CLI, TUI, and launchd adapters call this in a loop and handle I/O
+    themselves.  ``perform_switch`` receives the poll-cycle decision snapshot
+    and must invoke ``switcher.switch(BackgroundAutoSwitchIntent(...))`` (or
+    the interactive equivalent for TUI).
+    """
+    log = _logger(switcher)
+    cfg = switcher.get_auto_switch_config()
+    if not cfg["enabled"]:
+        log.info("monitor poll: auto-switch disabled — sleeping")
+        return MonitorStepResult(
+            kind="disabled",
+            threshold=int(cfg["threshold"]),
+            pct=state.last_pct,
+            next_interval=poll_seconds,
+            user_message="Auto-switch disabled.",
+        )
+
+    threshold = int(cfg["threshold"])
+    wall = time.time()
+
+    live_pids = switcher._live_default_mode_claude_pids()
+    if not live_pids:
+        if state.idle_started_wall is None:
+            state.idle_started_wall = wall
+        elif (
+            wall - state.idle_started_wall >= MONITOR_IDLE_HEARTBEAT_SECONDS
+            and wall - state.idle_heartbeat_at >= MONITOR_IDLE_HEARTBEAT_SECONDS
+        ):
+            log.warning(
+                "monitor idle for %ds with auto-switch enabled — "
+                "no live Claude Code sessions detected. If you have "
+                "Claude Code running, the session-detection signal "
+                "may have changed (claude-code internals).",
+                int(wall - state.idle_started_wall),
+            )
+            state.idle_heartbeat_at = wall
+
+        log.info(
+            "monitor poll: no live Claude Code sessions — idle at %ds",
+            poll_seconds,
+        )
+        state.last_pct = None
+        state.last_poll_time = None
+        state.last_wall_time = None
+        state.consecutive_failures = 0
+        return MonitorStepResult(
+            kind="idle",
+            threshold=threshold,
+            pct=None,
+            next_interval=poll_seconds,
+            pct_text="idle",
+            user_message="No live Claude Code sessions — idle.",
+        )
+
+    state.idle_started_wall = None
+    state.idle_heartbeat_at = 0.0
+
+    if (
+        state.last_wall_time is not None
+        and wall - state.last_wall_time
+        > MONITOR_WAKE_GAP_MULTIPLIER * poll_seconds
+    ):
+        log.info(
+            "monitor: wake-gap %ds detected — resetting baselines",
+            int(wall - state.last_wall_time),
+        )
+        state.last_pct = None
+        state.last_poll_time = None
+        state.last_switch_error = None
+        state.saturated_hold = False
+        state.consecutive_failures = 0
+
+    now = time.monotonic()
+    pct = switcher.get_active_usage_pct()
+    pct_text = "unavailable" if pct is None else f"{pct:.0f}%"
+
+    if pct is None:
+        state.consecutive_failures += 1
+        interval = _failure_backoff_seconds(
+            state.consecutive_failures, t_max=poll_seconds,
+        )
+        log.warning(
+            "monitor poll: active_usage_pct=None failures=%d backoff=%ds",
+            state.consecutive_failures,
+            interval,
+        )
+        state.last_pct = None
+        state.last_poll_time = None
+        state.last_wall_time = wall
+        return MonitorStepResult(
+            kind="usage_unavailable",
+            threshold=threshold,
+            pct=None,
+            next_interval=interval,
+            pct_text=pct_text,
+            consecutive_failures=state.consecutive_failures,
+            user_message=(
+                f"Usage unavailable — retry in {interval}s "
+                f"({state.consecutive_failures} consecutive failures)."
+            ),
+        )
+
+    state.consecutive_failures = 0
+    elapsed = (now - state.last_poll_time) if state.last_poll_time is not None else 0.0
+    interval = _next_poll_interval(
+        pct, state.last_pct, elapsed, threshold,
+        t_max=poll_seconds,
+    )
+    log.info(
+        "monitor poll: active_usage_pct=%s threshold=%s next_poll=%ds",
+        pct, threshold, interval,
+    )
+
+    if should_switch(pct, threshold):
+        log.info(
+            "monitor threshold reached: pct=%s threshold=%s — switching",
+            pct,
+            threshold,
+        )
+        if perform_switch is None:
+            log.warning(
+                "monitor threshold reached but no switch handler: pct=%s threshold=%s",
+                pct,
+                threshold,
+            )
+            state.last_pct = None
+            state.last_poll_time = None
+            state.last_wall_time = wall
+            return MonitorStepResult(
+                kind="threshold_no_handler",
+                threshold=threshold,
+                pct=pct,
+                next_interval=interval,
+                pct_text=pct_text,
+                user_message=(
+                    f"Reached {pct:.0f}% — threshold crossed but no switch handler."
+                ),
+            )
+        if state.saturated_hold:
+            log.info(
+                "monitor: saturated hold at pct=%s — skipping replan",
+                pct,
+            )
+            state.last_pct = pct
+            state.last_poll_time = now
+            state.last_wall_time = wall
+            return MonitorStepResult(
+                kind="already_optimal",
+                threshold=threshold,
+                pct=pct,
+                next_interval=interval,
+                pct_text=pct_text,
+                user_message=(
+                    f"Reached {pct:.0f}% — already on soonest-to-free account."
+                ),
+            )
+
+        switched = False
+        switch_error: str | None = None
+        try:
+            decision = switcher.build_auto_switch_decision(threshold, pct)
+            switched = perform_switch(decision)
+        except SwitchCancelled:
+            log.info("monitor switch cancelled at pct=%s", pct)
+            state.saturated_hold = False
+            state.last_pct = pct
+            state.last_poll_time = now
+            state.last_wall_time = wall
+            return MonitorStepResult(
+                kind="switch_cancelled",
+                threshold=threshold,
+                pct=pct,
+                next_interval=interval,
+                pct_text=pct_text,
+                user_message=f"Reached {pct:.0f}% — switch cancelled.",
+            )
+        except (ClaudeSwitchError, OSError) as exc:
+            switch_error = str(exc)
+            err_msg = switch_error
+            if err_msg == state.last_switch_error:
+                log.debug(
+                    "monitor switch failed (repeat): pct=%s error=%s",
+                    pct, exc,
+                )
+            else:
+                log.warning(
+                    "monitor switch failed: pct=%s error=%s", pct, exc
+                )
+                state.last_switch_error = err_msg
+        else:
+            if switched:
+                log.info("monitor switched account at pct=%s", pct)
+                state.last_switch_error = None
+            else:
+                log.info(
+                    "monitor: already on optimal account at pct=%s — holding",
+                    pct,
+                )
+        state.last_wall_time = wall
+        if switch_error is not None:
+            state.last_pct = None
+            state.last_poll_time = None
+            return MonitorStepResult(
+                kind="switch_failed",
+                threshold=threshold,
+                pct=pct,
+                next_interval=interval,
+                pct_text=pct_text,
+                switch_error=switch_error,
+                user_message=f"Reached {pct:.0f}% — switch failed (see above).",
+            )
+        if switched:
+            state.saturated_hold = False
+            state.last_pct = None
+            state.last_poll_time = None
+            return MonitorStepResult(
+                kind="switched",
+                threshold=threshold,
+                pct=pct,
+                next_interval=interval,
+                pct_text=pct_text,
+                switched=True,
+                user_message=f"Reached {pct:.0f}% — switched account.",
+            )
+        state.saturated_hold = True
+        state.last_pct = pct
+        state.last_poll_time = now
+        return MonitorStepResult(
+            kind="already_optimal",
+            threshold=threshold,
+            pct=pct,
+            next_interval=interval,
+            pct_text=pct_text,
+            user_message=(
+                f"Reached {pct:.0f}% — already on soonest-to-free account."
+            ),
+        )
+
+    state.saturated_hold = False
+    state.last_pct = pct
+    state.last_poll_time = now
+    state.last_wall_time = wall
+    return MonitorStepResult(
+        kind="polled",
+        threshold=threshold,
+        pct=pct,
+        next_interval=interval,
+        pct_text=pct_text,
+        user_message="Monitoring active account.",
+    )
+
+
 class _MonitorStopped(Exception):
     """Raised when the foreground monitor receives a stop signal."""
+
+
+class SwitchCancelled(Exception):
+    """Raised when an interactive switch is cancelled (e.g. Ctrl-C)."""
 
 
 def _pid_file(switcher: ClaudeAccountSwitcher) -> Path:
@@ -202,6 +519,14 @@ def _acquire_monitor_pid(path: Path) -> int | None:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(str(os.getpid()))
     return None
+
+
+def _release_monitor_pid(path: Path) -> None:
+    try:
+        if path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            path.unlink()
+    except OSError:
+        pass
 
 
 def run_cli_monitor(
@@ -255,221 +580,83 @@ def run_cli_monitor(
 
     signal.signal(signal.SIGTERM, stop_monitor)
 
-    # Adaptive-polling state.  Reset to None after a switch (or whenever the
-    # baseline becomes meaningless) so the next iteration falls back to t_max
-    # rather than computing velocity from a stale reference point.
-    last_pct: float | None = None
-    last_poll_time: float | None = None
-    last_wall_time: float | None = None
-    consecutive_failures = 0
-    # Dedup the switch-error log: a permanently broken slot (e.g. expired
-    # refresh token with no live session) would otherwise spam a WARNING on
-    # every poll.  Log the first occurrence loud, subsequent identical
-    # failures at DEBUG so launchd's monitor.err stays scannable.
-    last_switch_error: str | None = None
-    # Schema-break heartbeat: when the session-detection function returns
-    # zero live PIDs for an extended period, emit a single WARNING so an
-    # on-call sees we've gone silent — covers the case where Anthropic
-    # changes the session file schema and our parser silently bails.
-    idle_started_wall: float | None = None
-    idle_heartbeat_at: float = 0.0
+    state = MonitorRuntimeState()
+
+    def perform_switch(decision: AutoSwitchDecisionContext) -> bool:
+        return switcher.switch(BackgroundAutoSwitchIntent(decision=decision))
 
     try:
         while True:
-            # Re-read config each cycle so TUI changes (threshold, disable)
-            # take effect within one poll interval without a service restart.
-            cfg = switcher.get_auto_switch_config()
-            if not cfg["enabled"]:
-                log.info("monitor poll: auto-switch disabled — sleeping")
+            result = monitor_step(
+                switcher,
+                state,
+                poll_seconds=poll_seconds,
+                perform_switch=perform_switch,
+            )
+            threshold = result.threshold
+
+            if result.kind == "disabled":
                 if once:
                     return 0
-                time.sleep(poll_seconds)
-                continue
-            threshold = int(cfg["threshold"])
-
-            # Single wall-clock sample per iteration, hoisted above all the
-            # branches that consume it (idle heartbeat, wake-gap recovery,
-            # backoff state).  One call avoids a sub-tick inconsistency
-            # where two close-together time.time() reads straddle a
-            # sleep/wake boundary.
-            wall = time.time()
-
-            # Phase 4 short-circuit: if no default-mode Claude Code is running
-            # the active account cannot be burning tokens, so skip the usage
-            # API call entirely and idle at t_max.  Reset the velocity baseline
-            # too — once a session reappears, we want a clean delta from the
-            # fresh sample, not one across a long inactivity gap.
-            live_pids = switcher._live_default_mode_claude_pids()
-            if not live_pids:
-                # Heartbeat: emit ONE WARNING when we've been idle longer
-                # than MONITOR_IDLE_HEARTBEAT_SECONDS while auto-switch is
-                # enabled.  Covers the schema-break failure mode where our
-                # session parser silently bails and the monitor goes silent.
-                if idle_started_wall is None:
-                    idle_started_wall = wall
-                elif (
-                    wall - idle_started_wall >= MONITOR_IDLE_HEARTBEAT_SECONDS
-                    and wall - idle_heartbeat_at >= MONITOR_IDLE_HEARTBEAT_SECONDS
-                ):
-                    log.warning(
-                        "monitor idle for %ds with auto-switch enabled — "
-                        "no live Claude Code sessions detected. If you have "
-                        "Claude Code running, the session-detection signal "
-                        "may have changed (claude-code internals).",
-                        int(wall - idle_started_wall),
-                    )
-                    idle_heartbeat_at = wall
-
-                log.info(
-                    "monitor poll: no live Claude Code sessions — idle at %ds",
-                    poll_seconds,
-                )
-                last_pct = None
-                last_poll_time = None
-                last_wall_time = None
-                consecutive_failures = 0
-                if once:
-                    return 0
-                time.sleep(poll_seconds)
+                time.sleep(result.next_interval)
                 continue
 
-            # Active path: reset idle-heartbeat tracking.
-            idle_started_wall = None
-            idle_heartbeat_at = 0.0
-
-            # Sleep/wake recovery: a long wall-clock gap means the laptop
-            # slept (monotonic is paused) or the process was stalled.  The
-            # old baseline is garbage and a stale ``last_switch_error`` could
-            # mask a real new failure as a "repeat".  Reset both.
-            if (
-                last_wall_time is not None
-                and wall - last_wall_time
-                > MONITOR_WAKE_GAP_MULTIPLIER * poll_seconds
-            ):
-                log.info(
-                    "monitor: wake-gap %ds detected — resetting baselines",
-                    int(wall - last_wall_time),
-                )
-                last_pct = None
-                last_poll_time = None
-                last_switch_error = None
-                consecutive_failures = 0
-
-            now = time.monotonic()
-            pct = switcher.get_active_usage_pct()
-            pct_text = "unavailable" if pct is None else f"{pct:.0f}%"
-
-            if pct is None:
-                # Phase 3: usage API failed → exponential backoff.  The previous
-                # velocity baseline is now stale; drop it so a recovery doesn't
-                # compute a misleading delta.
-                consecutive_failures += 1
-                interval = _failure_backoff_seconds(
-                    consecutive_failures, t_max=poll_seconds,
-                )
+            if result.kind == "idle":
                 print(
-                    f"  {muted('active usage:')} {pct_text} "
-                    f"{muted(f'· backoff {interval}s ({consecutive_failures} consecutive failures)')}",
+                    f"  {muted('active usage:')} {result.pct_text} "
+                    f"{muted(f'· idle {result.next_interval}s')}",
                     file=out,
                     flush=True,
                 )
-                log.warning(
-                    "monitor poll: active_usage_pct=None failures=%d backoff=%ds",
-                    consecutive_failures,
-                    interval,
-                )
-                last_pct = None
-                last_poll_time = None
-                # Even on failure, record the wall time so wake-gap detection
-                # has a valid reference point.  The next successful poll will
-                # disambiguate transient failure from sleep+recovery.
-                last_wall_time = wall
                 if once:
                     return 0
-                time.sleep(interval)
+                time.sleep(result.next_interval)
                 continue
 
-            consecutive_failures = 0
+            if result.kind == "usage_unavailable":
+                print(
+                    f"  {muted('active usage:')} {result.pct_text} "
+                    f"{muted(f'· backoff {result.next_interval}s '
+                             f'({result.consecutive_failures} consecutive failures)')}",
+                    file=out,
+                    flush=True,
+                )
+                if once:
+                    return 0
+                time.sleep(result.next_interval)
+                continue
 
-            # Compute the adaptive interval *before* the switch decision so we
-            # log a consistent "next poll" value even on threshold iterations.
-            elapsed = (now - last_poll_time) if last_poll_time is not None else 0.0
-            interval = _next_poll_interval(
-                pct, last_pct, elapsed, threshold,
-                t_max=poll_seconds,
-            )
             print(
-                f"  {muted('active usage:')} {pct_text} "
-                f"{muted(f'· next poll {interval}s')}",
+                f"  {muted('active usage:')} {result.pct_text} "
+                f"{muted(f'· next poll {result.next_interval}s')}",
                 file=out,
                 flush=True,
             )
-            log.info(
-                "monitor poll: active_usage_pct=%s threshold=%s next_poll=%ds",
-                pct, threshold, interval,
-            )
 
-            if should_switch(pct, threshold):
-                print(
-                    f"  {accent('threshold reached')} {muted('switching account')}",
-                    file=out,
-                    flush=True,
-                )
-                log.info(
-                    "monitor threshold reached: pct=%s threshold=%s — switching",
-                    pct,
-                    threshold,
-                )
-                try:
-                    # quiet=True: no user is watching launchd/foreground output,
-                    # so suppress interactive banners. force_refresh=True: mint a
-                    # fresh OAuth token so Claude Code's first API call after
-                    # picking up the new credentials has maximum remaining
-                    # lifetime — production-grade seamless handoff.
-                    # prefer_least_busy=True: when multiple accounts are over
-                    # threshold, park on the one whose window resets soonest
-                    # instead of bouncing in sequence order through saturated
-                    # slots.  Cold-cache falls back to round-robin transparently.
-                    switcher.switch(
-                        quiet=True,
-                        force_refresh=True,
-                        prefer_least_busy=True,
+            if result.kind in ("switched", "switch_failed", "already_optimal"):
+                if result.kind == "already_optimal":
+                    print(
+                        f"  {accent('threshold reached')} "
+                        f"{muted('holding on soonest-to-free account')}",
+                        file=out,
+                        flush=True,
                     )
-                except ClaudeSwitchError as exc:
-                    print(f"  {dimmed(f'switch failed: {exc}')}", file=out, flush=True)
-                    err_msg = str(exc)
-                    if err_msg == last_switch_error:
-                        # Same failure as last time — likely a permanently
-                        # broken slot.  Drop to DEBUG so logs stay readable;
-                        # the user already has the actionable message.
-                        log.debug(
-                            "monitor switch failed (repeat): pct=%s error=%s",
-                            pct, exc,
-                        )
-                    else:
-                        log.warning(
-                            "monitor switch failed: pct=%s error=%s", pct, exc
-                        )
-                        last_switch_error = err_msg
                 else:
-                    log.info("monitor switched account at pct=%s", pct)
-                    last_switch_error = None
-                # The active account just changed — the previous pct sample
-                # belongs to the old account.  Reset baseline so we don't
-                # compute a wildly negative velocity on the next iteration.
-                last_pct = None
-                last_poll_time = None
-            else:
-                last_pct = pct
-                last_poll_time = now
-
-            # Wall-clock timestamp drives the sleep/wake-gap detection above;
-            # always update regardless of switch decision.
-            last_wall_time = wall
+                    print(
+                        f"  {accent('threshold reached')} {muted('switching account')}",
+                        file=out,
+                        flush=True,
+                    )
+                    if result.kind == "switch_failed":
+                        print(
+                            f"  {dimmed(f'switch failed: {result.switch_error}')}",
+                            file=out,
+                            flush=True,
+                        )
 
             if once:
                 return 0
-            time.sleep(interval)
+            time.sleep(result.next_interval)
     except KeyboardInterrupt:
         print(f"\n{dimmed('Monitor stopped')}", file=out)
         return 130
@@ -479,8 +666,4 @@ def run_cli_monitor(
     finally:
         log.info("monitor stopped")
         signal.signal(signal.SIGTERM, previous_sigterm)
-        try:
-            if pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                pid_path.unlink()
-        except OSError:
-            pass
+        _release_monitor_pid(pid_path)
