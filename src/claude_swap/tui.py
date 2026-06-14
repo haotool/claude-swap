@@ -36,7 +36,7 @@ from claude_swap.monitor import (
     _release_monitor_pid,
     monitor_step,
 )
-from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.switcher import ClaudeAccountSwitcher, auto_switch_display
 
 
 # Minimum terminal size we render in. Below this, we bail to plain CLI advice.
@@ -220,13 +220,13 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     """
     while True:
         cfg = switcher.get_auto_switch_config()
-        state = "ON" if cfg["enabled"] else "OFF"
+        _enabled, threshold, on_off, _state = auto_switch_display(cfg)
         # Local name deliberately differs from ``service.service_state`` (the
         # function used inside ``_service_state()``) so future readers don't
         # accidentally shadow the import.
         current_service_state = _service_state()
         subtitle = (
-            f"Rule {state} @ {cfg['threshold']}%  ·  "
+            f"Rule {on_off} @ {threshold}%  ·  "
             f"Background service {current_service_state}"
         )
         items: list[tuple[str, str | None]] = [
@@ -272,10 +272,7 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
             else:
                 _shell_out(stdscr, lambda: service.status(switcher))
         elif choice == "start":
-            cfg = switcher.get_auto_switch_config()
-            if not cfg["enabled"]:
-                # Starting the monitor implies enabling the feature.
-                cfg = switcher.set_auto_switch_config(enabled=True)
+            cfg = switcher.ensure_auto_switch_enabled()
             _run_auto_monitor(stdscr, switcher, cfg["threshold"])
 
 
@@ -430,9 +427,11 @@ def _status_line(switcher: ClaudeAccountSwitcher) -> str:
         tag = "personal" if not org else org[:8]
         active = f"{email} [{tag}]"
     line = f"Active: {active}  ·  {n} managed"
-    cfg = switcher.get_auto_switch_config()
-    if cfg["enabled"]:
-        line += f"  ·  auto-switch ON ({cfg['threshold']}%)"
+    enabled, threshold, on_off, _state = auto_switch_display(
+        switcher.get_auto_switch_config()
+    )
+    if enabled:
+        line += f"  ·  auto-switch {on_off} ({threshold}%)"
     return line
 
 

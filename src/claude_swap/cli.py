@@ -9,7 +9,7 @@ import sys
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.printer import bolded, dimmed, error, muted
-from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.switcher import ClaudeAccountSwitcher, auto_switch_display
 
 
 def _run_command(argv: list[str]) -> None:
@@ -145,8 +145,7 @@ Examples:
 
 
 def _print_auto_switch_config(config: dict) -> None:
-    state = "enabled" if config.get("enabled") else "disabled"
-    threshold = int(config.get("threshold", 95))
+    _enabled, threshold, _on_off, state = auto_switch_display(config)
     print(f"{bolded('Auto-switch:')} {state} {muted(f'(threshold {threshold}%)')}")
 
 

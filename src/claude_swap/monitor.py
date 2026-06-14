@@ -578,9 +578,7 @@ def run_cli_monitor(
     """
     out = stream or sys.stdout
     log = _logger(switcher)
-    cfg = switcher.get_auto_switch_config()
-    if not cfg["enabled"]:
-        cfg = switcher.set_auto_switch_config(enabled=True)
+    cfg = switcher.ensure_auto_switch_enabled()
     threshold = int(cfg["threshold"])
 
     pid_path = _pid_file(switcher)

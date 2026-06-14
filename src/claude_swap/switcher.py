@@ -90,6 +90,17 @@ _USAGE_CACHE_TTL = 15  # seconds; per-slot freshness for automated planning
 # percentage, automated paths pick the cooldown-aware best target.
 DEFAULT_AUTO_SWITCH_THRESHOLD = 95
 _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS = 3
+
+
+def auto_switch_display(cfg: dict) -> tuple[bool, int, str, str]:
+    """Normalized auto-switch fields for CLI/TUI status formatters."""
+    enabled = bool(cfg["enabled"])
+    threshold = int(cfg["threshold"])
+    on_off = "ON" if enabled else "OFF"
+    enabled_disabled = "enabled" if enabled else "disabled"
+    return enabled, threshold, on_off, enabled_disabled
+
+
 _BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS = 0.5
 
 # Cooldown-aware target picker (``_pick_best_switch_target``):
@@ -2273,6 +2284,17 @@ class ClaudeAccountSwitcher:
         self._write_json(self.sequence_file, data)
         return {"enabled": cfg["enabled"], "threshold": cfg["threshold"]}
 
+    def ensure_auto_switch_enabled(self) -> dict:
+        """Return config, persisting ``enabled=True`` if currently disabled.
+
+        Foreground monitors (CLI ``--monitor``, TUI "Start monitor now")
+        treat starting as opt-in.
+        """
+        cfg = self.get_auto_switch_config()
+        if not cfg["enabled"]:
+            cfg = self.set_auto_switch_config(enabled=True)
+        return cfg
+
     def get_active_usage_pct(self) -> float | None:
         """Return the highest 5h/7d utilization pct for the active account.
 
@@ -2405,9 +2427,14 @@ class ClaudeAccountSwitcher:
         if intent is None:
             intent = ManualSwitchIntent()
 
-        quiet = intent.quiet
-        decision = getattr(intent, "decision", None)
-        automated = decision is not None
+        if isinstance(intent, (InteractiveAutoSwitchIntent, BackgroundAutoSwitchIntent)):
+            quiet = intent.quiet
+            decision = intent.decision
+            automated = True
+        else:
+            quiet = intent.quiet
+            decision = None
+            automated = False
 
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
