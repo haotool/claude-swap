@@ -113,7 +113,7 @@ These are **done in the working tree**; Phase 1 must preserve them, not re-fork:
 | P1-5 | **`switch()` API break** — `quiet=`/`prefer_least_busy=` removed; return `None`→`bool` | CHANGELOG / semver note; external callers need migration |
 | P1-6 | Legacy `usage.json` without `_cached_at` — no `migrations.py` backfill | One-time stamp from file `timestamp` or force refresh post-upgrade |
 | P1-7 | Duplicate switch-failure WARNING in TUI (`_auto_perform_switch` + engine) | Remove adapter duplicate; engine owns structured logs |
-| P1-8 | CLI prints "switching account" before `switch_failed` detail | Fix render branch |
+| P1-8 | CLI prints "switching account" before `switch_failed` detail | ✅ Fix render branch |
 | P1-9 | Upgrade ops: **`cswap --list`** warm cache + **`cswap service install`** after package upgrade | README runbook |
 
 ### P2 — Quality / maintainability

@@ -641,18 +641,19 @@ def run_cli_monitor(
                         file=out,
                         flush=True,
                     )
-                else:
+                elif result.kind == "switched":
                     print(
                         f"  {accent('threshold reached')} {muted('switching account')}",
                         file=out,
                         flush=True,
                     )
-                    if result.kind == "switch_failed":
-                        print(
-                            f"  {dimmed(f'switch failed: {result.switch_error}')}",
-                            file=out,
-                            flush=True,
-                        )
+                else:
+                    print(
+                        f"  {accent('threshold reached')} "
+                        f"{dimmed(f'switch failed: {result.switch_error}')}",
+                        file=out,
+                        flush=True,
+                    )
 
             if once:
                 return 0

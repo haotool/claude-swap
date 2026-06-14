@@ -712,7 +712,21 @@ class TestCliAutoMonitor:
         assert any("monitor switch failed" in r.getMessage() for r in warnings)
         assert any("boom" in r.getMessage() for r in warnings)
 
-    def test_monitor_respects_disable_at_poll_time(self, temp_home: Path):
+    def test_cli_stdout_omits_switching_before_switch_failed(
+        self, temp_home: Path, capsys,
+    ):
+        switcher = ClaudeAccountSwitcher()
+
+        def _raise(_intent) -> bool:
+            raise ClaudeSwitchError("boom")
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
+             patch.object(switcher, "switch", side_effect=_raise):
+            monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
+
+        out = capsys.readouterr().out
+        assert "switch failed: boom" in out
+        assert "switching account" not in out
         """Config is re-read each cycle: disabling via TUI stops switching."""
         switcher = ClaudeAccountSwitcher()
         # First call (startup): enabled → monitor starts.
