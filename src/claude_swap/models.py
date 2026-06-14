@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform as platform_module
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,13 +26,17 @@ class Platform(Enum):
 
     @classmethod
     def detect(cls) -> Platform:
-        """Detect current platform."""
-        system = platform_module.system()
-        if system == "Darwin":
+        """Detect current platform.
+
+        Uses sys.platform rather than platform.system() because the latter
+        calls platform.uname() on Windows, which runs a WMI query that can
+        hang indefinitely when the WMI service is slow or unresponsive.
+        """
+        if sys.platform == "darwin":
             return cls.MACOS
-        elif system == "Windows":
+        elif sys.platform == "win32":
             return cls.WINDOWS
-        elif system == "Linux":
+        elif sys.platform.startswith("linux"):
             if os.environ.get("WSL_DISTRO_NAME"):
                 return cls.WSL
             return cls.LINUX

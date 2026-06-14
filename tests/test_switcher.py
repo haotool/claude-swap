@@ -54,14 +54,13 @@ class TestEmailValidation:
 class TestPlatformDetection:
     """Test platform detection."""
 
-    @patch("platform.system", return_value="Darwin")
-    def test_macos_detection(self, mock_system, temp_home: Path):
+    @patch("sys.platform", "darwin")
+    def test_macos_detection(self, temp_home: Path):
         """Test macOS platform detection."""
         assert Platform.detect() == Platform.MACOS
 
-    @patch("platform.system", return_value="Linux")
-    @patch.dict(os.environ, {}, clear=False)
-    def test_linux_detection(self, mock_system, temp_home: Path):
+    @patch("sys.platform", "linux")
+    def test_linux_detection(self, temp_home: Path):
         """Test Linux platform detection."""
         # Ensure WSL_DISTRO_NAME is not set
         env = os.environ.copy()
@@ -69,19 +68,19 @@ class TestPlatformDetection:
         with patch.dict(os.environ, env, clear=True):
             assert Platform.detect() == Platform.LINUX
 
-    @patch("platform.system", return_value="Linux")
+    @patch("sys.platform", "linux")
     @patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu"})
-    def test_wsl_detection(self, mock_system, temp_home: Path):
+    def test_wsl_detection(self, temp_home: Path):
         """Test WSL platform detection."""
         assert Platform.detect() == Platform.WSL
 
-    @patch("platform.system", return_value="Windows")
-    def test_windows_detection(self, mock_system, temp_home: Path):
+    @patch("sys.platform", "win32")
+    def test_windows_detection(self, temp_home: Path):
         """Test Windows platform detection."""
         assert Platform.detect() == Platform.WINDOWS
 
-    @patch("platform.system", return_value="FreeBSD")
-    def test_unknown_platform(self, mock_system, temp_home: Path):
+    @patch("sys.platform", "freebsd")
+    def test_unknown_platform(self, temp_home: Path):
         """Test unknown platform detection."""
         assert Platform.detect() == Platform.UNKNOWN
 
