@@ -118,15 +118,15 @@ These are **done in the working tree**; Phase 1 must preserve them, not re-fork:
 
 ### P2 — Quality / maintainability
 
-- Plan 008 incomplete internally: `switch()` still derives `quiet`/`force_refresh` via `isinstance`; `_perform_switch` still boolean-driven.
+- Plan 008 internals: `_perform_switch` now intent-driven (`64fadec`); `switch()` top-level may still derive policy via `isinstance` — optional cleanup.
 - `switcher.py` ~3051 lines — duplicated identity resolution and usage fetch paths.
 - Dual outcome vocabularies: `SwitchPlanOutcome` vs `MonitorStepKind` (both use `"already_optimal"` by convention).
 - TUI stale threshold in header (startup param, not `result.threshold`).
 - Auto-enable-on-start duplicated in `run_cli_monitor` + `_do_auto_switch`.
 - Triple config status formatters (CLI/TUI/service).
-- Missing README failure-mode runbook (`no_trusted_signal`, idle heartbeat, PATH snapshot).
+- ~~Missing README failure-mode runbook~~ — done (`e54f3cc`).
 - OAuth refresh outside FileLock during parallel cache refresh (operational race with `force_refresh` handoff).
-- Test gaps: no `InteractiveAutoSwitchIntent` contract test; brittle TUI menu `KEY_DOWN` index tests; duplicate fixtures in `test_auto_switch.py`.
+- Test gaps: intent contract covered (`01b5efc`); brittle TUI menu `KEY_DOWN` index tests; duplicate fixtures in `test_auto_switch.py`; PID lifecycle + CLI E2E still open.
 
 ### P3 — Nice to have
 
@@ -180,20 +180,20 @@ Safe for **manual switching** and **config/plist** surfaces. **Not** silent-upgr
 
 **Goal:** Plan 008 fully realized; reduce `switcher.py` drift.
 
-1. Thread `SwitchIntent` through `_perform_switch` (remove boolean matrix).
-2. Shared identity + usage-fetch helpers (`list_accounts` vs `_refresh_switchable_usage_cache`).
-3. Dead code cleanup from departmental audit.
-4. Align `SwitchPlanOutcome` / `MonitorStepKind` vocabulary or document mapping.
+1. [x] Thread `SwitchIntent` through `_perform_switch` (remove boolean matrix). — `64fadec`
+2. [ ] Shared identity + usage-fetch helpers (`list_accounts` vs `_refresh_switchable_usage_cache`).
+3. [ ] Dead code cleanup from departmental audit.
+4. [ ] Align `SwitchPlanOutcome` / `MonitorStepKind` vocabulary or document mapping.
 
 ### Phase 4 — Docs, tests, optional split
 
 **Goal:** Production-grade beta contract.
 
-1. README failure-mode runbook + upgrade checklist.
-2. CHANGELOG / semver note for API + behavior breaks.
-3. Test backlog (see below) — intent contract, PID lifecycle, thin CLI E2E.
-4. Extract shared fixtures to `conftest.py`; split `test_auto_switch.py` by layer.
-5. Optional `switcher.py` split after helpers converge.
+1. [x] README failure-mode runbook + upgrade checklist. — `e54f3cc`
+2. [ ] CHANGELOG / semver note for API + behavior breaks.
+3. [x] Intent contract tests (`BackgroundAutoSwitchIntent` / `InteractiveAutoSwitchIntent`). — `01b5efc`; PID lifecycle + thin CLI E2E remain open
+4. [ ] Extract shared fixtures to `conftest.py`; split `test_auto_switch.py` by layer.
+5. [ ] Optional `switcher.py` split after helpers converge.
 
 ---
 
@@ -211,9 +211,9 @@ Safe for **manual switching** and **config/plist** surfaces. **Not** silent-upgr
 | 8 | Remove TUI duplicate switch-failure logs | 2 | TUI |
 | 9 | Fix CLI `switch_failed` stdout | 2 | CLI adapter |
 | 10 | TUI threshold from `result.threshold` | 2 | TUI |
-| 11 | README upgrade runbook (`--list`, `service install`, fail-closed) | 4 | docs |
-| 12 | Intent through `_perform_switch` | 3 | switcher |
-| 13 | `InteractiveAutoSwitchIntent` vs `BackgroundAutoSwitchIntent` contract tests | 4 | tests |
+| 11 | README upgrade runbook (`--list`, `service install`, fail-closed) | 4 | docs | ✅ `e54f3cc` |
+| 12 | Intent through `_perform_switch` | 3 | switcher | ✅ `64fadec` |
+| 13 | `InteractiveAutoSwitchIntent` vs `BackgroundAutoSwitchIntent` contract tests | 4 | tests | ✅ `01b5efc` |
 | 14 | PID acquire/stale/cleanup tests | 4 | tests |
 | 15 | Shared fetch/identity helpers in switcher | 3 | switcher |
 
@@ -311,9 +311,9 @@ Stop Phase 1 execution and re-audit if:
 
 **Plan 009 fully complete when:**
 
-- [ ] Phases 2–4 actionable items tracked as separate plans or checkboxes above are closed.
-- [ ] Rollout checklist in README matches shipped behavior.
-- [ ] Test readiness ≥ 85/100 or documented acceptance of remaining gaps.
+- [ ] Phases 2–4 actionable items tracked as separate plans or checkboxes above are closed. (Phase 3: 1/4; Phase 4: 2/5 core items done — see roadmap checkboxes.)
+- [x] Rollout checklist in README matches shipped behavior. — `e54f3cc`
+- [ ] Test readiness ≥ 85/100 or documented acceptance of remaining gaps. (Intent contract landed; PID/E2E backlog remains.)
 
 ---
 
@@ -323,7 +323,7 @@ Stop Phase 1 execution and re-audit if:
 |------|------|---------------|
 | 006 | Monitor engine SSOT | **Implemented** in working tree; adapter drift remains |
 | 007 | Trusted snapshot planning | **Implemented**; intentional fail-closed vs round-robin |
-| 008 | SwitchIntent API | **~90%**; `_perform_switch` still boolean-driven |
+| 008 | SwitchIntent API | **Done**; `_perform_switch` intent-driven (`64fadec`) |
 | **009** | Audit + convergence roadmap | **This document** — does not replace 006–008 |
 
 ```
