@@ -2428,18 +2428,9 @@ class ClaudeAccountSwitcher:
         if intent is None:
             intent = ManualSwitchIntent()
 
-        quiet = isinstance(intent, BackgroundAutoSwitchIntent)
-        force_refresh = isinstance(
-            intent, (InteractiveAutoSwitchIntent, BackgroundAutoSwitchIntent),
-        )
-        automated = isinstance(
-            intent, (InteractiveAutoSwitchIntent, BackgroundAutoSwitchIntent),
-        )
-        decision = (
-            intent.decision
-            if isinstance(intent, (InteractiveAutoSwitchIntent, BackgroundAutoSwitchIntent))
-            else None
-        )
+        quiet = intent.quiet
+        decision = getattr(intent, "decision", None)
+        automated = decision is not None
 
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
@@ -2489,7 +2480,7 @@ class ClaudeAccountSwitcher:
                         "Re-add a slot with: cswap --add-account --slot <number>"
                     )
                 target = fallback
-            self._perform_switch(target, quiet=quiet, force_refresh=force_refresh)
+            self._perform_switch(target, intent=intent)
             return True
 
         current_email, current_org_uuid = identity
@@ -2607,7 +2598,7 @@ class ClaudeAccountSwitcher:
             ))
             return False
 
-        self._perform_switch(next_account, quiet=quiet, force_refresh=force_refresh)
+        self._perform_switch(next_account, intent=intent)
         return True
 
     def switch_to(self, identifier: str) -> None:
@@ -2661,23 +2652,17 @@ class ClaudeAccountSwitcher:
         self,
         target_account: str,
         *,
-        quiet: bool = False,
-        force_refresh: bool = False,
+        intent: SwitchIntent | None = None,
     ) -> None:
         """Perform the actual account switch with transaction support.
 
         The post-switch display runs after the lock releases so that persist
         callbacks inside list_accounts() can re-acquire it.
-
-        Args:
-            quiet: When True, suppress the interactive "Switched to" banner and
-                the post-switch ``list_accounts()`` call. Errors still raise.
-                Used by the background auto-switch monitor.
-            force_refresh: When True, refresh the target's OAuth token even if
-                not expired so the activated credentials carry maximum
-                remaining lifetime. See
-                ``_refresh_target_credentials_before_activation``.
         """
+        if intent is None:
+            intent = ManualSwitchIntent()
+        quiet = intent.quiet
+        force_refresh = intent.force_refresh
         # Session-mode drift warning (warn, never block): switching the
         # default login to an account that also has a live session profile
         # puts the same refresh token in two config dirs — if the server

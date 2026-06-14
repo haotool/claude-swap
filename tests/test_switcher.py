@@ -981,6 +981,23 @@ class TestListAccountsUsage:
 class TestPerformSwitchPostDisplay:
     """Regression tests for the post-switch display running outside the lock."""
 
+    @staticmethod
+    def _background_intent() -> "BackgroundAutoSwitchIntent":
+        from claude_swap.models import (
+            AutoSwitchDecisionContext,
+            BackgroundAutoSwitchIntent,
+        )
+
+        return BackgroundAutoSwitchIntent(
+            decision=AutoSwitchDecisionContext(
+                threshold=95,
+                active_usage_pct=None,
+                live_active_slot="1",
+                sequence_active_slot="1",
+                usage_by_slot={},
+            ),
+        )
+
     def _setup_two_accounts(
         self,
         temp_home: Path,
@@ -1177,7 +1194,7 @@ class TestPerformSwitchPostDisplay:
         sample_sequence_data: dict,
         capsys,
     ):
-        """quiet=True is the contract the background monitor relies on:
+        """BackgroundAutoSwitchIntent suppresses banners and followup:
         launchd's stdout/stderr should not collect interactive banner text or
         the platform-specific 'next message / 30s' followup line.
         """
@@ -1201,7 +1218,7 @@ class TestPerformSwitchPostDisplay:
             ), patch.object(
                 switcher, "list_accounts"
             ) as mock_list:
-                switcher._perform_switch("2", quiet=True)
+                switcher._perform_switch("2", intent=self._background_intent())
         finally:
             for p in patches:
                 p.stop()
@@ -1224,7 +1241,7 @@ class TestPerformSwitchPostDisplay:
         mock_claude_config: Path,
         sample_sequence_data: dict,
     ):
-        """force_refresh=True on _perform_switch must forward to
+        """BackgroundAutoSwitchIntent must forward force_refresh to
         _refresh_target_credentials_before_activation as force=True.
         Otherwise the monitor's "fresh token after handoff" guarantee is broken.
         """
@@ -1252,7 +1269,7 @@ class TestPerformSwitchPostDisplay:
             ), patch.object(
                 switcher, "list_accounts"
             ):
-                switcher._perform_switch("2", quiet=True, force_refresh=True)
+                switcher._perform_switch("2", intent=self._background_intent())
         finally:
             for p in patches:
                 p.stop()
@@ -1373,7 +1390,7 @@ class TestPerformSwitchPostDisplay:
                 "claude_swap.oauth.refresh_oauth_credentials",
                 return_value=creds_store[("2", "account2@example.com")],
             ), patch.object(switcher, "list_accounts"):
-                switcher._perform_switch("2", quiet=True)
+                switcher._perform_switch("2", intent=self._background_intent())
         finally:
             for p in patches:
                 p.stop()
@@ -1427,7 +1444,7 @@ class TestPerformSwitchPostDisplay:
                 "claude_swap.oauth.refresh_oauth_credentials",
                 return_value=creds_store[("2", "account2@example.com")],
             ), patch.object(switcher, "list_accounts"):
-                switcher._perform_switch("2", quiet=True)
+                switcher._perform_switch("2", intent=self._background_intent())
         finally:
             for p in patches:
                 p.stop()

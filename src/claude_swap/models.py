@@ -161,6 +161,14 @@ class SwitchPlanResult:
 class ManualSwitchIntent:
     """Interactive manual rotation (round-robin)."""
 
+    @property
+    def quiet(self) -> bool:
+        return False
+
+    @property
+    def force_refresh(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True)
 class InteractiveAutoSwitchIntent:
@@ -168,12 +176,28 @@ class InteractiveAutoSwitchIntent:
 
     decision: AutoSwitchDecisionContext
 
+    @property
+    def quiet(self) -> bool:
+        return False
+
+    @property
+    def force_refresh(self) -> bool:
+        return True
+
 
 @dataclass(frozen=True)
 class BackgroundAutoSwitchIntent:
     """CLI / launchd monitor: quiet automated switch."""
 
     decision: AutoSwitchDecisionContext
+
+    @property
+    def quiet(self) -> bool:
+        return True
+
+    @property
+    def force_refresh(self) -> bool:
+        return True
 
 
 SwitchIntent = ManualSwitchIntent | InteractiveAutoSwitchIntent | BackgroundAutoSwitchIntent
