@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_swap import monitor, tui
+from claude_swap import monitor, oauth, tui
 from claude_swap.exceptions import ClaudeSwitchError, SwitchError, ValidationError
 from claude_swap.models import (
     AutoSwitchDecisionContext,
@@ -684,6 +685,67 @@ class TestMonitorEngine:
 
         assert perform.call_count == 2
 
+    def test_step_usage_fetch_error_returns_unavailable_backoff(
+        self, temp_home: Path,
+    ):
+        switcher = ClaudeAccountSwitcher()
+        state = monitor.MonitorRuntimeState()
+        _login(temp_home)
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+
+        with patch.object(
+            switcher, "get_auto_switch_config",
+            return_value={"enabled": True, "threshold": 95},
+        ), patch.object(switcher, "_read_credentials", return_value=creds), \
+             patch(
+                 "claude_swap.oauth.fetch_usage_for_account",
+                 return_value=oauth.UsageFetchError(
+                     reason="rate_limited", status_code=429,
+                 ),
+             ):
+            result = monitor.monitor_step(
+                switcher, state, poll_seconds=60, perform_switch=MagicMock(),
+            )
+
+        assert result.kind == "usage_unavailable"
+        assert result.consecutive_failures == 1
+        assert result.next_interval == monitor.MONITOR_FAILURE_BACKOFF_BASE
+        assert "unavailable" in result.user_message.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Monitor PID lifecycle (launchd exclusivity)                                  #
+# --------------------------------------------------------------------------- #
+
+
+class TestMonitorPidLifecycle:
+    def test_acquire_overwrites_stale_dead_pid(self, temp_home: Path):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
+        pid_path.write_text("99999", encoding="utf-8")
+
+        with patch("claude_swap.monitor._pid_is_running", return_value=False):
+            existing = monitor._acquire_monitor_pid(pid_path)
+
+        assert existing is None
+        assert pid_path.read_text(encoding="utf-8").strip() == str(os.getpid())
+
+    def test_run_cli_monitor_releases_pid_in_finally(self, temp_home: Path):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher.set_auto_switch_config(enabled=True)
+        pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
+
+        with patch.object(
+            ClaudeAccountSwitcher,
+            "_live_default_mode_claude_pids",
+            return_value=[99999],
+        ), patch.object(switcher, "get_active_usage_pct", return_value=10.0):
+            monitor.run_cli_monitor(switcher, poll_seconds=1, once=True)
+
+        assert not pid_path.exists()
+
 
 # --------------------------------------------------------------------------- #
 # CLI monitor                                                                #
@@ -737,6 +799,20 @@ class TestCliAutoMonitor:
         assert "threshold 95%" in out
         assert "active usage:" in out
         mock_switch.assert_called_once()
+
+    def test_once_e2e_holds_below_threshold(self, temp_home: Path, capsys):
+        switcher = ClaudeAccountSwitcher()
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=40.0), \
+             patch.object(switcher, "switch") as mock_switch:
+            code = monitor.run_cli_monitor(switcher, poll_seconds=1, once=True)
+
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "active usage:" in out
+        assert "40%" in out
+        assert "switching account" not in out
+        mock_switch.assert_not_called()
 
     def test_restores_sigterm_handler_after_once_run(self, temp_home: Path):
         import signal
