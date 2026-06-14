@@ -60,12 +60,12 @@ Comment Hygiene, DRY, Convergence Roadmap.
 
 | Dimension | Score | Verdict |
 |-----------|-------|---------|
-| **Overall convergence** | **6.5–7 / 10** | WIP committed → ~7.5; Phases 2–4 → ~9 |
-| SSOT architecture | 7/10 | Engine converged; adapters/cache drift |
+| **Overall convergence** | **7.5–8 / 10** | Post-review Top 5 landed (`50994e8`–`8523386`); Phases 3–4 polish → ~9 |
+| SSOT architecture | 7.5/10 | Engine + cache read path converged; adapter display drift remains |
 | Production / SRE | Conditional **GO (beta)** | Not silent-upgrade safe for auto-switch |
 | Security | **PASS** | 0 P0/P1; P2 OAuth refresh outside FileLock |
-| Test readiness | **74/100** | Engine strong; TUI/intent/E2E gaps |
-| Docs (working tree) | ~75% beta-ready | HEAD README stale until commit |
+| Test readiness | **79/100** | Intent + PID lifecycle + thin CLI E2E landed; TUI menu brittleness open |
+| Docs (working tree) | ~85% beta-ready | README runbook + CHANGELOG on HEAD |
 | Plans 006–008 implementation | ~80–95% | Functional; git/checkbox drift |
 
 **Production gate:** Conditional GO for **beta only** — manual switching and
@@ -109,9 +109,9 @@ These are **done in the working tree**; Phase 1 must preserve them, not re-fork:
 | P1-1 | **Cache freshness SSOT split** — file TTL vs per-slot `_cached_at` vs `_usage_cache_fresh` | ✅ Unify trust model (`02c78a8`); threshold pct and planning agree same poll cycle |
 | P1-2 | **Repeated `switch()` while saturated** — `already_optimal` resets baselines but `should_switch` stays true; full replan every ~60s | ✅ Add saturated-hold: skip `perform_switch` until `pct < threshold` |
 | P1-3 | TUI Ctrl-C misreported as `already_optimal` | Map interrupt to distinct outcome |
-| P1-4 | **Automated fail-closed** vs committed round-robin on cold cache (intentional 007) | Document + upgrade runbook; optional cache warm-up on monitor start |
-| P1-5 | **`switch()` API break** — `quiet=`/`prefer_least_busy=` removed; return `None`→`bool` | CHANGELOG / semver note; external callers need migration |
-| P1-6 | Legacy `usage.json` without `_cached_at` — no `migrations.py` backfill | One-time stamp from file `timestamp` or force refresh post-upgrade |
+| P1-4 | **Automated fail-closed** vs committed round-robin on cold cache (intentional 007) | ✅ Document + upgrade runbook; cache warm-up on first active poll (`c049b5b`) |
+| P1-5 | **`switch()` API break** — `quiet=`/`prefer_least_busy=` removed; return `None`→`bool` | ✅ CHANGELOG + upgrade steps (`8523386`); external callers need migration |
+| P1-6 | Legacy `usage.json` without `_cached_at` — no `migrations.py` backfill | ✅ `read_cache_with_timestamp` SSOT (`50994e8`); warm-up + `--list` runbook |
 | P1-7 | Duplicate switch-failure WARNING in TUI (`_auto_perform_switch` + engine) | Remove adapter duplicate; engine owns structured logs |
 | P1-8 | CLI prints "switching account" before `switch_failed` detail | ✅ Fix render branch |
 | P1-9 | Upgrade ops: **`cswap --list`** warm cache + **`cswap service install`** after package upgrade | README runbook |
@@ -126,7 +126,7 @@ These are **done in the working tree**; Phase 1 must preserve them, not re-fork:
 - Triple config status formatters (CLI/TUI/service).
 - ~~Missing README failure-mode runbook~~ — done (`e54f3cc`).
 - OAuth refresh outside FileLock during parallel cache refresh (operational race with `force_refresh` handoff).
-- Test gaps: intent contract covered (`01b5efc`); brittle TUI menu `KEY_DOWN` index tests; duplicate fixtures in `test_auto_switch.py`; PID lifecycle + CLI E2E still open.
+- Test gaps: intent contract covered (`01b5efc`); PID lifecycle + thin CLI E2E covered (`62fbf24`); brittle TUI menu `KEY_DOWN` index tests; duplicate fixtures in `test_auto_switch.py`.
 
 ### P3 — Nice to have
 
@@ -190,8 +190,8 @@ Safe for **manual switching** and **config/plist** surfaces. **Not** silent-upgr
 **Goal:** Production-grade beta contract.
 
 1. [x] README failure-mode runbook + upgrade checklist. — `e54f3cc`
-2. [ ] CHANGELOG / semver note for API + behavior breaks.
-3. [x] Intent contract tests (`BackgroundAutoSwitchIntent` / `InteractiveAutoSwitchIntent`). — `01b5efc`; PID lifecycle + thin CLI E2E remain open
+2. [x] CHANGELOG / semver note for API + behavior breaks. — `8523386`
+3. [x] Intent contract tests (`BackgroundAutoSwitchIntent` / `InteractiveAutoSwitchIntent`). — `01b5efc`; PID lifecycle + thin CLI E2E — `62fbf24`
 4. [ ] Extract shared fixtures to `conftest.py`; split `test_auto_switch.py` by layer.
 5. [ ] Optional `switcher.py` split after helpers converge.
 
@@ -205,16 +205,16 @@ Safe for **manual switching** and **config/plist** surfaces. **Not** silent-upgr
 | 2 | TUI PID exclusivity | 1–2 | adapter/TUI |
 | 3 | `monitor_step` error boundary around `build_auto_switch_decision` | 1 | engine |
 | 4 | Fix `_next_poll_interval` near-trigger ordering | 1 | engine |
-| 5 | Saturated-hold after `already_optimal` | 2 | engine |
-| 6 | Unify cache freshness SSOT | 2 | switcher |
-| 7 | `_cached_at` backfill or warm-up on enable/monitor start | 2 | switcher/migrations |
+| 5 | Saturated-hold after `already_optimal` | 2 | engine | ✅ `6255603` |
+| 6 | Unify cache freshness SSOT | 2 | switcher | ✅ `02c78a8`, `50994e8` |
+| 7 | `_cached_at` backfill or warm-up on enable/monitor start | 2 | switcher/migrations | ✅ `c049b5b` |
 | 8 | Remove TUI duplicate switch-failure logs | 2 | TUI |
 | 9 | Fix CLI `switch_failed` stdout | 2 | CLI adapter |
 | 10 | TUI threshold from `result.threshold` | 2 | TUI |
 | 11 | README upgrade runbook (`--list`, `service install`, fail-closed) | 4 | docs | ✅ `e54f3cc` |
 | 12 | Intent through `_perform_switch` | 3 | switcher | ✅ `64fadec` |
 | 13 | `InteractiveAutoSwitchIntent` vs `BackgroundAutoSwitchIntent` contract tests | 4 | tests | ✅ `01b5efc` |
-| 14 | PID acquire/stale/cleanup tests | 4 | tests |
+| 14 | PID acquire/stale/cleanup tests | 4 | tests | ✅ `62fbf24` |
 | 15 | Shared fetch/identity helpers in switcher | 3 | switcher |
 
 ---
@@ -311,9 +311,21 @@ Stop Phase 1 execution and re-audit if:
 
 **Plan 009 fully complete when:**
 
-- [ ] Phases 2–4 actionable items tracked as separate plans or checkboxes above are closed. (Phase 3: 1/4; Phase 4: 2/5 core items done — see roadmap checkboxes.)
+- [ ] Phases 2–4 actionable items tracked as separate plans or checkboxes above are closed. (Phase 2: Top 5 done; Phase 3: 1/4; Phase 4: 4/5 core items done.)
 - [x] Rollout checklist in README matches shipped behavior. — `e54f3cc`
-- [ ] Test readiness ≥ 85/100 or documented acceptance of remaining gaps. (Intent contract landed; PID/E2E backlog remains.)
+- [ ] Test readiness ≥ 85/100 or documented acceptance of remaining gaps. (79/100 — TUI menu + fixture dedup remain P2.)
+
+### Post-review Top 5 (2026-06-14)
+
+| # | Item | Commit |
+|---|------|--------|
+| 1 | Cache read SSOT (`read_cache_with_timestamp`) | `50994e8` |
+| 2 | Monitor warm-up on first active poll | `c049b5b` |
+| 3 | PID lifecycle + usage-error + CLI monitor E2E tests | `62fbf24` |
+| 4 | CHANGELOG + upgrade steps for `switch()` break | `8523386` |
+| 5 | Saturated-hold regression coverage (with #3 suite) | `6255603` + `62fbf24` |
+
+**Verification:** `python3 -m pytest -q` → **637 passed, 3 skipped, 12 failed** (12 subprocess CLI tests — `PackageNotFoundError` when package not installed editable; env-only, not logic regressions).
 
 ---
 
