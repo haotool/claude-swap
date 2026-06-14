@@ -287,6 +287,13 @@ def run_cli_monitor(
                 continue
             threshold = int(cfg["threshold"])
 
+            # Single wall-clock sample per iteration, hoisted above all the
+            # branches that consume it (idle heartbeat, wake-gap recovery,
+            # backoff state).  One call avoids a sub-tick inconsistency
+            # where two close-together time.time() reads straddle a
+            # sleep/wake boundary.
+            wall = time.time()
+
             # Phase 4 short-circuit: if no default-mode Claude Code is running
             # the active account cannot be burning tokens, so skip the usage
             # API call entirely and idle at t_max.  Reset the velocity baseline
@@ -298,7 +305,6 @@ def run_cli_monitor(
                 # than MONITOR_IDLE_HEARTBEAT_SECONDS while auto-switch is
                 # enabled.  Covers the schema-break failure mode where our
                 # session parser silently bails and the monitor goes silent.
-                wall = time.time()
                 if idle_started_wall is None:
                     idle_started_wall = wall
                 elif (
@@ -335,7 +341,6 @@ def run_cli_monitor(
             # slept (monotonic is paused) or the process was stalled.  The
             # old baseline is garbage and a stale ``last_switch_error`` could
             # mask a real new failure as a "repeat".  Reset both.
-            wall = time.time()
             if (
                 last_wall_time is not None
                 and wall - last_wall_time

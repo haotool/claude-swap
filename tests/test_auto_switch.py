@@ -668,14 +668,14 @@ class TestSleepWakeAndHeartbeat:
         velocity track doesn't bias the next interval and a new failure is
         not masked as a "repeat" of a pre-sleep failure.
 
-        Drive the wall clock from the sleep counter so we don't have to
-        guess how many time.time() calls the startup config-write fires.
+        Concretely: drive an identical switch failure pre-sleep and
+        post-sleep.  Without the reset, the post-sleep failure would drop
+        to DEBUG via the dedup logic; with the reset, it MUST re-surface
+        at WARNING so the on-call sees the new occurrence.
         """
         switcher = ClaudeAccountSwitcher()
-        # Enable auto-switch up front so the startup path makes no
-        # set_auto_switch_config write (which itself stamps a timestamp).
         switcher.set_auto_switch_config(enabled=True, threshold=95)
-        caplog.set_level(logging.INFO, logger="claude-swap")
+        caplog.set_level(logging.DEBUG, logger="claude-swap")
 
         sleeps: list[int] = []
 
@@ -689,14 +689,33 @@ class TestSleepWakeAndHeartbeat:
             # sleep, jump forward by 10 hours to simulate macOS sleep/wake.
             return 1_000_000.0 if not sleeps else 1_000_000.0 + 10 * 3600
 
-        with patch.object(switcher, "get_active_usage_pct", return_value=10.0), \
-             patch.object(switcher, "switch"), \
+        # Same error on every switch attempt — exercises dedup interplay.
+        def boom(**_kwargs):
+            raise ClaudeSwitchError("slot 2 token expired and refresh failed")
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
+             patch.object(switcher, "switch", side_effect=boom), \
              patch("claude_swap.monitor.time.time", side_effect=fake_wall_time), \
              patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
             monitor.run_cli_monitor(switcher, poll_seconds=60)
 
         msgs = [r.getMessage() for r in caplog.records if r.name == "claude-swap"]
         assert any("wake-gap" in m and "resetting baselines" in m for m in msgs), msgs
+
+        # Load-bearing assertion: post-wake, the identical failure must
+        # re-surface at WARNING, not DEBUG.  Two WARNINGs (pre + post wake)
+        # would prove last_switch_error actually reset.
+        warning_failures = [
+            r for r in caplog.records
+            if r.name == "claude-swap"
+            and r.levelno == logging.WARNING
+            and "monitor switch failed" in r.getMessage()
+            and "(repeat)" not in r.getMessage()
+        ]
+        assert len(warning_failures) == 2, [
+            (r.levelname, r.getMessage()) for r in caplog.records
+            if "switch failed" in r.getMessage()
+        ]
 
     def test_idle_heartbeat_fires_after_long_idle_with_enabled_auto_switch(
         self, temp_home: Path, caplog,

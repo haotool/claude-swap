@@ -3244,6 +3244,35 @@ class TestSwitchQuietGuardsRaise:
         out = capsys.readouterr().out
         assert "Only one account" in out
 
+    def test_quiet_mode_skipping_does_not_leak_to_stdout(
+        self, temp_home: Path, capsys, caplog,
+    ):
+        """When auto-switch is rotating and a candidate slot is broken, the
+        per-candidate 'Skipping Account-N' print MUST NOT reach launchd's
+        stdout (where there is no human reader).  The same message should
+        land in the structured logger instead so on-call still has a trail.
+        """
+        import logging
+
+        s = self._bootstrap(temp_home, num_accounts=3)
+        # Account-2 is broken (no creds/config), Account-3 is missing too,
+        # so the loop will print Skipping for both then raise SwitchError.
+        from claude_swap.exceptions import SwitchError
+
+        caplog.set_level(logging.INFO, logger="claude-swap")
+        with pytest.raises(SwitchError):
+            s.switch(quiet=True)
+
+        out = capsys.readouterr().out
+        assert "Skipping" not in out, (
+            "Skipping message leaked to stdout in quiet mode — would pollute "
+            "launchd's monitor.out without a human reader"
+        )
+        msgs = [r.getMessage() for r in caplog.records if r.name == "claude-swap"]
+        assert any("Skipping Account-" in m for m in msgs), (
+            "Skipping must still be logged structurally so the on-call has a trail"
+        )
+
 
 class TestSchemaDriftWarning:
     """When the usage API returns a dict that lacks the expected rate-limit

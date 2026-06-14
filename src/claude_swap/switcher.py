@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -370,7 +371,6 @@ class ClaudeAccountSwitcher:
             cred_dir.mkdir(parents=True, exist_ok=True)
             cred_file = cred_dir / ".credentials.json"
             try:
-                import tempfile
                 fd, tmp_path = tempfile.mkstemp(dir=str(cred_dir), suffix=".tmp")
                 try:
                     os.write(fd, credentials.encode("utf-8"))
@@ -456,7 +456,6 @@ class ClaudeAccountSwitcher:
                 # same-UID process that races a read.  ``mkstemp`` creates the
                 # temp file with 0o600 directly, and ``os.replace`` is atomic
                 # within the directory.
-                import tempfile
                 fd, tmp_path = tempfile.mkstemp(
                     dir=str(self.credentials_dir), suffix=".tmp",
                 )
@@ -1914,7 +1913,6 @@ class ClaudeAccountSwitcher:
             isinstance(usage, dict)
             and "five_hour" not in usage
             and "seven_day" not in usage
-            and not isinstance(usage, oauth.UsageFetchError)
         ):
             keys_seen = sorted(usage.keys())
             self._logger.warning(
@@ -2006,11 +2004,19 @@ class ClaudeAccountSwitcher:
 
             target = str(preferred)
             if not self._account_is_switchable(target):
-                print(
-                    f"{accent('Skipping')} Account-{target} "
-                    f"(no stored credentials/config, re-add with "
-                    f"cswap --add-account --slot {target})"
+                skip_msg = (
+                    f"Skipping Account-{target} (no stored credentials/config, "
+                    f"re-add with cswap --add-account --slot {target})"
                 )
+                if quiet:
+                    # Background service must not leak per-candidate prints to
+                    # launchd's stdout (where there is no human reader); route
+                    # through the structured logger instead.
+                    self._logger.info(skip_msg)
+                else:
+                    print(f"{accent('Skipping')} Account-{target} "
+                          f"(no stored credentials/config, re-add with "
+                          f"cswap --add-account --slot {target})")
                 fallback = next(
                     (str(num) for num in sequence
                      if str(num) != target and self._account_is_switchable(str(num))),
@@ -2069,11 +2075,20 @@ class ClaudeAccountSwitcher:
             if self._account_is_switchable(candidate):
                 next_account = candidate
                 break
-            print(
-                f"{accent('Skipping')} Account-{candidate} "
-                f"(no stored credentials/config, re-add with "
-                f"cswap --add-account --slot {candidate})"
-            )
+            if quiet:
+                # Background service must not leak per-candidate prints; the
+                # structured logger is the right destination for these.
+                self._logger.info(
+                    "Skipping Account-%s (no stored credentials/config, "
+                    "re-add with cswap --add-account --slot %s)",
+                    candidate, candidate,
+                )
+            else:
+                print(
+                    f"{accent('Skipping')} Account-{candidate} "
+                    f"(no stored credentials/config, re-add with "
+                    f"cswap --add-account --slot {candidate})"
+                )
 
         if next_account is None:
             msg = (
