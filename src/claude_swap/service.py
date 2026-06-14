@@ -138,24 +138,52 @@ def install(switcher: ClaudeAccountSwitcher) -> int:
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     _log_dir(switcher).mkdir(parents=True, exist_ok=True)
     tmp_path = plist_path.with_suffix(plist_path.suffix + ".tmp")
-    with tmp_path.open("wb") as fh:
-        plistlib.dump(_build_plist(switcher), fh)
-    os.replace(tmp_path, plist_path)
-    os.chmod(plist_path, 0o600)
+    # O_CREAT|O_EXCL|O_NOFOLLOW with mode 0o600: reject pre-planted symlinks
+    # at the tmp path (same-UID hostile process scenario) and refuse to
+    # clobber an existing file.  We unlink stale tmp paths first because a
+    # crashed prior install can leave one behind.
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    fd = os.open(
+        str(tmp_path),
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            plistlib.dump(_build_plist(switcher), fh)
+        os.replace(tmp_path, plist_path)
+        os.chmod(plist_path, 0o600)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     # Replace any prior instance: ``bootout`` is best-effort (not installed yet
     # on first run is normal), then ``bootstrap`` must succeed.
     _launchctl("bootout", _launchd_service_target(), check=False)
     _launchctl("bootstrap", _launchd_domain(), str(plist_path))
+    log_dir = _log_dir(switcher)
     print(f"{bolded('Service installed:')} {muted(SERVICE_LABEL)}")
     print(f"  {dimmed(str(plist_path))}")
     print(
-        f"  {dimmed('runs `cswap --monitor` at login; logs under ' + str(_log_dir(switcher)))}"
+        f"  {dimmed('runs `cswap --monitor` at login; launchd output → ' + str(log_dir))}"
+    )
+    print(
+        f"  {dimmed('structured log → ' + str(switcher.backup_dir / 'claude-swap.log'))}"
     )
     return 0
 
 
 def uninstall(switcher: ClaudeAccountSwitcher) -> int:
-    """Bootout the agent and remove the plist. Idempotent."""
+    """Bootout the agent and remove the plist. Idempotent.
+
+    Logs and the foreground PID file are intentionally preserved so the user
+    has a post-mortem trail; we print the paths so they know where to look.
+    """
     _require_macos()
     _launchctl("bootout", _launchd_service_target(), check=False)
     plist_path = _plist_path()
@@ -163,6 +191,11 @@ def uninstall(switcher: ClaudeAccountSwitcher) -> int:
     plist_path.unlink(missing_ok=True)
     msg = "removed" if existed else "was not installed"
     print(f"{bolded('Service ' + msg + ':')} {muted(SERVICE_LABEL)}")
+    if existed:
+        log_dir = _log_dir(switcher)
+        structured_log = switcher.backup_dir / "claude-swap.log"
+        print(f"  {dimmed('launchd output retained → ' + str(log_dir))}")
+        print(f"  {dimmed('structured log retained → ' + str(structured_log))}")
     return 0
 
 
@@ -227,15 +260,40 @@ def status(switcher: ClaudeAccountSwitcher) -> int:
         stripped = line.strip()
         if stripped.startswith(("state =", "pid =", "last exit code =")):
             print(f"  {muted(stripped)}")
+    # On-call breadcrumb: where the structured decision-trail lives.  The
+    # launchd capture is only stdout/stderr noise — the real "why did this
+    # fire?" lives in claude-swap.log.
+    print(
+        f"  {dimmed('decision log → ' + str(switcher.backup_dir / 'claude-swap.log'))}"
+    )
     return 0
 
 
 def logs(switcher: ClaudeAccountSwitcher, lines: int = 40) -> int:
-    """Tail the launchd-captured stderr/stdout files for the agent."""
+    """Tail every monitor log surface we own.
+
+    Surfaces in order of decision-trail value for an on-call engineer:
+
+    1. ``claude-swap.log`` — the structured logger.  Every poll, switch
+       decision, switch outcome, dedup'd repeat, and backoff escalation
+       lands here at INFO/WARNING.  This is where you debug ``why did the
+       monitor fire?'' or ``why didn't it?''
+    2. ``monitor.err`` / ``monitor.out`` — launchd's raw stdout/stderr
+       capture.  Useful for crashes and the early-boot banner.
+
+    Splitting the surfaces was the historical default, but at 3am the
+    on-call wants both windows in one place.  Print the file paths inline
+    so a follow-up ``tail -F`` can target whichever stream is interesting.
+    """
     _require_macos()
-    for name in ("monitor.err", "monitor.out"):
-        path = _log_dir(switcher) / name
-        print(bolded(f"== {name} =="))
+    structured = switcher.backup_dir / "claude-swap.log"
+    for path, label in [
+        (structured, "claude-swap.log (structured)"),
+        (_log_dir(switcher) / "monitor.err", "monitor.err (launchd stderr)"),
+        (_log_dir(switcher) / "monitor.out", "monitor.out (launchd stdout)"),
+    ]:
+        print(bolded(f"== {label} =="))
+        print(f"  {dimmed(str(path))}")
         if not path.exists():
             print(f"  {dimmed('(none yet)')}")
             continue

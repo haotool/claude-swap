@@ -330,8 +330,12 @@ class TestLogs:
         rc = service.logs(ClaudeAccountSwitcher())
         assert rc == 0
         out = capsys.readouterr().out
-        assert "== monitor.err ==" in out
-        assert "== monitor.out ==" in out
+        # All three log surfaces are listed even when missing — on-call needs
+        # to see they exist as concepts even before the monitor has written
+        # anything.
+        assert "claude-swap.log (structured)" in out
+        assert "monitor.err (launchd stderr)" in out
+        assert "monitor.out (launchd stdout)" in out
         assert "(none yet)" in out
 
     def test_tails_existing_files(
@@ -343,10 +347,16 @@ class TestLogs:
         log_dir.mkdir(parents=True)
         (log_dir / "monitor.out").write_text("first\nsecond\nthird\n")
         (log_dir / "monitor.err").write_text("only-error-line\n")
+        # Structured log: the decision trail that an on-call really wants.
+        switcher.backup_dir.mkdir(parents=True, exist_ok=True)
+        (switcher.backup_dir / "claude-swap.log").write_text(
+            "structured-line-1\nstructured-line-2\n"
+        )
 
         rc = service.logs(switcher, lines=2)
         assert rc == 0
         out = capsys.readouterr().out
+        assert "structured-line-2" in out
         assert "only-error-line" in out
         # ``lines=2`` keeps only the tail; first line must be dropped.
         assert "second" in out

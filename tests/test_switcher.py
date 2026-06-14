@@ -3197,6 +3197,91 @@ class TestSwitchSkipsBrokenSlots:
             s.switch()
 
 
+class TestSwitchQuietGuardsRaise:
+    """When the auto-switch monitor calls ``switch(quiet=True)`` it MUST see
+    ``ClaudeSwitchError`` for "nothing to switch to" cases, not a silent
+    return — otherwise the monitor logs a false "switched account" on every
+    threshold crossing (general-purpose review HIGH).
+
+    Interactive callers (quiet=False) still see the friendly print + return.
+    """
+
+    def _bootstrap(self, temp_home: Path, num_accounts: int) -> ClaudeAccountSwitcher:
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        accounts: dict = {}
+        sequence: list[int] = []
+        for i in range(1, num_accounts + 1):
+            accounts[str(i)] = {"email": f"a{i}@example.com"}
+            sequence.append(i)
+        data = {
+            "accounts": accounts,
+            "sequence": sequence,
+            "activeAccountNumber": 1 if sequence else None,
+        }
+        s._write_json(s.sequence_file, data)
+        # Pretend there's a current login for account 1 so we get past
+        # the fresh-machine path and into the len(sequence)<2 guard.
+        (temp_home / ".claude").mkdir(parents=True, exist_ok=True)
+        (temp_home / ".claude.json").write_text(
+            json.dumps({"oauthAccount": {
+                "emailAddress": "a1@example.com",
+                "accountUuid": "uuid-1",
+            }})
+        )
+        return s
+
+    def test_quiet_single_account_raises(self, temp_home: Path):
+        from claude_swap.exceptions import SwitchError
+
+        s = self._bootstrap(temp_home, num_accounts=1)
+        with pytest.raises(SwitchError, match="Only one account"):
+            s.switch(quiet=True)
+
+    def test_interactive_single_account_still_silent(self, temp_home: Path, capsys):
+        s = self._bootstrap(temp_home, num_accounts=1)
+        s.switch(quiet=False)
+        out = capsys.readouterr().out
+        assert "Only one account" in out
+
+
+class TestSchemaDriftWarning:
+    """When the usage API returns a dict that lacks the expected rate-limit
+    windows, log a structured WARNING — distinguishes schema-break from
+    transient network failure (general-purpose review HIGH).
+    """
+
+    def test_logs_warning_when_no_window_keys(self, temp_home: Path, caplog):
+        import logging
+
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        (temp_home / ".claude.json").write_text(
+            json.dumps({"oauthAccount": {
+                "emailAddress": "u@example.com",
+                "accountUuid": "uuid-x",
+            }})
+        )
+        caplog.set_level(logging.WARNING, logger="claude-swap")
+
+        # Empty usage dict reaches _max_usage_pct → None, but our drift
+        # detector should fire a WARNING first.
+        with patch.object(s, "_read_credentials", return_value='{"claudeAiOauth":{"accessToken":"sk-abc"}}'), \
+             patch("claude_swap.oauth.extract_access_token", return_value="sk-abc"), \
+             patch("claude_swap.oauth.fetch_usage_for_account", return_value={"new_unexpected_key": 42}):
+            result = s.get_active_usage_pct()
+
+        assert result is None
+        warnings = [
+            r.getMessage() for r in caplog.records
+            if r.name == "claude-swap" and r.levelno == logging.WARNING
+        ]
+        assert any(
+            "no recognized rate-limit windows" in m and "new_unexpected_key" in m
+            for m in warnings
+        ), warnings
+
+
 class TestRefreshTargetBeforeActivation:
     """Lock both branches of ``_refresh_target_credentials_before_activation``:
     when a stored OAuth token is expired and the network refresh fails, the

@@ -450,9 +450,31 @@ class ClaudeAccountSwitcher:
             cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
             try:
                 encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-                cred_file.write_text(encoded, encoding="utf-8")
-                if sys.platform != "win32":
-                    os.chmod(cred_file, 0o600)
+                # Atomic 0o600 write: ``write_text`` would land the file with
+                # the user's umask (typically 0o644) for the window before the
+                # explicit ``chmod``, exposing the base64-encoded token to any
+                # same-UID process that races a read.  ``mkstemp`` creates the
+                # temp file with 0o600 directly, and ``os.replace`` is atomic
+                # within the directory.
+                import tempfile
+                fd, tmp_path = tempfile.mkstemp(
+                    dir=str(self.credentials_dir), suffix=".tmp",
+                )
+                try:
+                    os.write(fd, encoded.encode("utf-8"))
+                    os.close(fd)
+                    fd = -1
+                    os.replace(tmp_path, str(cred_file))
+                    if sys.platform != "win32":
+                        os.chmod(str(cred_file), 0o600)
+                except BaseException:
+                    if fd >= 0:
+                        os.close(fd)
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    raise
             except Exception as e:
                 self._logger.warning(f"Failed to write credentials file: {e}")
                 raise
@@ -1881,6 +1903,26 @@ class ClaudeAccountSwitcher:
                 existing[account_num] = _usage_to_cache(usage)
                 write_cache(usage_cache_path, existing)
 
+        # Schema-drift detection: a non-error dict that lacks BOTH expected
+        # rate-limit window keys looks identical to a network failure
+        # downstream (``_max_usage_pct`` returns None for either).  Surface
+        # it as a distinct WARNING at the boundary so the auto-switch
+        # monitor's exponential backoff doesn't mask the schema break as a
+        # transient outage.  We rate-limit the warning via the structured
+        # logger to avoid spamming on every poll.
+        if (
+            isinstance(usage, dict)
+            and "five_hour" not in usage
+            and "seven_day" not in usage
+            and not isinstance(usage, oauth.UsageFetchError)
+        ):
+            keys_seen = sorted(usage.keys())
+            self._logger.warning(
+                "usage API returned no recognized rate-limit windows "
+                "(keys: %s) — possible schema change",
+                keys_seen,
+            )
+
         return _max_usage_pct(usage)
 
     def _first_run_setup(self) -> None:
@@ -1921,11 +1963,24 @@ class ClaudeAccountSwitcher:
         Args:
             quiet: Suppress informational console output. Used by the background
                 auto-switch monitor where there is no interactive user to read
-                banners; errors still propagate and are logged.
+                banners; errors still propagate and are logged. Also makes the
+                "no managed accounts to switch to" guards RAISE instead of
+                silently printing — the monitor must see those as failures
+                so it does not falsely log a successful rotation.
             force_refresh: Refresh the target account's OAuth token before
                 activation even when not yet expired. Recommended for automated
                 switches so Claude Code's first API call against the new
                 account gets a freshly-issued token.
+
+        Note: ``quiet`` and ``force_refresh`` are independent axes — every
+        combination is supported.  Today's callers use:
+          * ``quiet=False, force_refresh=False`` — manual TUI/CLI switch
+          * ``quiet=False, force_refresh=True``  — TUI auto-switch monitor
+          * ``quiet=True,  force_refresh=True``  — launchd background service
+        A future ``quiet=True, force_refresh=False`` ("silent dry-rotate")
+        is intentionally legal.  If a third orthogonal axis appears, promote
+        the kwargs to a ``SwitchOptions`` dataclass before the signature
+        ossifies.
         """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
@@ -1986,7 +2041,15 @@ class ClaudeAccountSwitcher:
         sequence = data.get("sequence", [])
 
         if len(sequence) < 2:
-            print(dimmed("Only one account is managed. Add more accounts to switch between."))
+            msg = "Only one account is managed. Add more accounts to switch between."
+            if quiet:
+                # Automated callers (auto-switch monitor) must NOT silently
+                # treat "nothing to switch to" as a successful rotation —
+                # that would cause the monitor to log a false "switched
+                # account" on every threshold crossing.  Raise so the caller
+                # can dedup the actionable error.
+                raise SwitchError(msg)
+            print(dimmed(msg))
             return
 
         active_account = data.get("activeAccountNumber")
@@ -2013,10 +2076,16 @@ class ClaudeAccountSwitcher:
             )
 
         if next_account is None:
-            print(dimmed(
-                "No other accounts have valid stored credentials/config.\n"
+            msg = (
+                "No other accounts have valid stored credentials/config. "
                 "Re-add a skipped slot with: cswap --add-account --slot <number>"
-            ))
+            )
+            if quiet:
+                # See the analogous guard above: the auto-switch monitor must
+                # see this as a failure so it can dedup-log and not falsely
+                # report a successful rotation every poll.
+                raise SwitchError(msg)
+            print(dimmed(msg))
             return
 
         self._perform_switch(next_account, quiet=quiet, force_refresh=force_refresh)

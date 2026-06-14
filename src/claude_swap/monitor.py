@@ -60,6 +60,21 @@ MONITOR_POLL_NEAR_TRIGGER_RATIO = 0.95
 # so a persistent outage stops hammering the API.
 MONITOR_FAILURE_BACKOFF_BASE = MONITOR_POLL_SECONDS_MIN
 
+# Schema-break safety net.  Phase 4 idles when the session-detection
+# function returns zero live PIDs.  If that signal misfires (e.g. Anthropic
+# changes ``~/.claude/sessions/*.json`` and our parser silently returns []),
+# we'd never poll usage again — auto-switch goes observably-silent.  Emit a
+# WARNING when we've been idle this long while the config says auto-switch
+# is enabled, so an on-call engineer sees the symptom in monitor.err.
+MONITOR_IDLE_HEARTBEAT_SECONDS = 3600
+
+# Sleep/wake recovery.  ``time.monotonic`` is steady across macOS sleep, but
+# ``last_pct`` from before sleep is stale.  If the wall-clock gap between
+# polls exceeds the polling ceiling by this multiple, treat the previous
+# baseline as garbage and reset both the velocity track and the dedup'd
+# switch-error key so a real new failure isn't masked as a "repeat".
+MONITOR_WAKE_GAP_MULTIPLIER = 4
+
 
 def should_switch(pct: float | None, threshold: int) -> bool:
     """Whether the active account's usage warrants an automatic switch.
@@ -245,12 +260,19 @@ def run_cli_monitor(
     # rather than computing velocity from a stale reference point.
     last_pct: float | None = None
     last_poll_time: float | None = None
+    last_wall_time: float | None = None
     consecutive_failures = 0
     # Dedup the switch-error log: a permanently broken slot (e.g. expired
     # refresh token with no live session) would otherwise spam a WARNING on
     # every poll.  Log the first occurrence loud, subsequent identical
     # failures at DEBUG so launchd's monitor.err stays scannable.
     last_switch_error: str | None = None
+    # Schema-break heartbeat: when the session-detection function returns
+    # zero live PIDs for an extended period, emit a single WARNING so an
+    # on-call sees we've gone silent — covers the case where Anthropic
+    # changes the session file schema and our parser silently bails.
+    idle_started_wall: float | None = None
+    idle_heartbeat_at: float = 0.0
 
     try:
         while True:
@@ -272,17 +294,61 @@ def run_cli_monitor(
             # fresh sample, not one across a long inactivity gap.
             live_pids = switcher._live_default_mode_claude_pids()
             if not live_pids:
+                # Heartbeat: emit ONE WARNING when we've been idle longer
+                # than MONITOR_IDLE_HEARTBEAT_SECONDS while auto-switch is
+                # enabled.  Covers the schema-break failure mode where our
+                # session parser silently bails and the monitor goes silent.
+                wall = time.time()
+                if idle_started_wall is None:
+                    idle_started_wall = wall
+                elif (
+                    wall - idle_started_wall >= MONITOR_IDLE_HEARTBEAT_SECONDS
+                    and wall - idle_heartbeat_at >= MONITOR_IDLE_HEARTBEAT_SECONDS
+                ):
+                    log.warning(
+                        "monitor idle for %ds with auto-switch enabled — "
+                        "no live Claude Code sessions detected. If you have "
+                        "Claude Code running, the session-detection signal "
+                        "may have changed (claude-code internals).",
+                        int(wall - idle_started_wall),
+                    )
+                    idle_heartbeat_at = wall
+
                 log.info(
                     "monitor poll: no live Claude Code sessions — idle at %ds",
                     poll_seconds,
                 )
                 last_pct = None
                 last_poll_time = None
+                last_wall_time = None
                 consecutive_failures = 0
                 if once:
                     return 0
                 time.sleep(poll_seconds)
                 continue
+
+            # Active path: reset idle-heartbeat tracking.
+            idle_started_wall = None
+            idle_heartbeat_at = 0.0
+
+            # Sleep/wake recovery: a long wall-clock gap means the laptop
+            # slept (monotonic is paused) or the process was stalled.  The
+            # old baseline is garbage and a stale ``last_switch_error`` could
+            # mask a real new failure as a "repeat".  Reset both.
+            wall = time.time()
+            if (
+                last_wall_time is not None
+                and wall - last_wall_time
+                > MONITOR_WAKE_GAP_MULTIPLIER * poll_seconds
+            ):
+                log.info(
+                    "monitor: wake-gap %ds detected — resetting baselines",
+                    int(wall - last_wall_time),
+                )
+                last_pct = None
+                last_poll_time = None
+                last_switch_error = None
+                consecutive_failures = 0
 
             now = time.monotonic()
             pct = switcher.get_active_usage_pct()
@@ -309,6 +375,10 @@ def run_cli_monitor(
                 )
                 last_pct = None
                 last_poll_time = None
+                # Even on failure, record the wall time so wake-gap detection
+                # has a valid reference point.  The next successful poll will
+                # disambiguate transient failure from sleep+recovery.
+                last_wall_time = wall
                 if once:
                     return 0
                 time.sleep(interval)
@@ -379,6 +449,10 @@ def run_cli_monitor(
             else:
                 last_pct = pct
                 last_poll_time = now
+
+            # Wall-clock timestamp drives the sleep/wake-gap detection above;
+            # always update regardless of switch decision.
+            last_wall_time = wall
 
             if once:
                 return 0

@@ -645,6 +645,101 @@ class TestNextPollInterval:
         assert out == 15
 
 
+class TestSleepWakeAndHeartbeat:
+    """Round-2 review additions: sleep/wake baseline reset and idle heartbeat
+    for the schema-break safety net.  Both are operational guardrails for
+    monitor.err observability.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_live_claude(self):
+        with patch.object(
+            ClaudeAccountSwitcher,
+            "_live_default_mode_claude_pids",
+            return_value=[99999],
+        ):
+            yield
+
+    def test_wake_gap_resets_baseline_and_last_switch_error(
+        self, temp_home: Path, caplog,
+    ):
+        """A wall-clock gap > WAKE_GAP_MULTIPLIER * poll_seconds indicates
+        sleep/wake.  Baselines and last_switch_error must reset so a stale
+        velocity track doesn't bias the next interval and a new failure is
+        not masked as a "repeat" of a pre-sleep failure.
+
+        Drive the wall clock from the sleep counter so we don't have to
+        guess how many time.time() calls the startup config-write fires.
+        """
+        switcher = ClaudeAccountSwitcher()
+        # Enable auto-switch up front so the startup path makes no
+        # set_auto_switch_config write (which itself stamps a timestamp).
+        switcher.set_auto_switch_config(enabled=True, threshold=95)
+        caplog.set_level(logging.INFO, logger="claude-swap")
+
+        sleeps: list[int] = []
+
+        def fake_sleep(_seconds):
+            sleeps.append(_seconds)
+            if len(sleeps) >= 2:
+                raise monitor._MonitorStopped
+
+        def fake_wall_time():
+            # Pre-sleep ticks share the same wall value; after the first
+            # sleep, jump forward by 10 hours to simulate macOS sleep/wake.
+            return 1_000_000.0 if not sleeps else 1_000_000.0 + 10 * 3600
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=10.0), \
+             patch.object(switcher, "switch"), \
+             patch("claude_swap.monitor.time.time", side_effect=fake_wall_time), \
+             patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
+            monitor.run_cli_monitor(switcher, poll_seconds=60)
+
+        msgs = [r.getMessage() for r in caplog.records if r.name == "claude-swap"]
+        assert any("wake-gap" in m and "resetting baselines" in m for m in msgs), msgs
+
+    def test_idle_heartbeat_fires_after_long_idle_with_enabled_auto_switch(
+        self, temp_home: Path, caplog,
+    ):
+        """When session detection returns zero PIDs for longer than the
+        heartbeat threshold while auto-switch is enabled, emit a WARNING.
+        Covers the schema-break failure mode (parser silently bails)
+        without spamming on every idle poll.
+        """
+        switcher = ClaudeAccountSwitcher()
+        switcher.set_auto_switch_config(enabled=True, threshold=95)
+        caplog.set_level(logging.INFO, logger="claude-swap")
+
+        sleeps: list[int] = []
+
+        def fake_sleep(_s):
+            sleeps.append(_s)
+            if len(sleeps) >= 2:
+                raise monitor._MonitorStopped
+
+        def fake_wall_time():
+            # Before the first sleep, all time.time() calls return the same
+            # wall.  After the first sleep, jump past the heartbeat
+            # threshold so the elif fires on iter 2.
+            if not sleeps:
+                return 1_000_000.0
+            return 1_000_000.0 + monitor.MONITOR_IDLE_HEARTBEAT_SECONDS + 1
+
+        with patch.object(
+            ClaudeAccountSwitcher,
+            "_live_default_mode_claude_pids",
+            return_value=[],
+        ), patch("claude_swap.monitor.time.time", side_effect=fake_wall_time), \
+           patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
+            monitor.run_cli_monitor(switcher, poll_seconds=60)
+
+        warnings = [
+            r.getMessage() for r in caplog.records
+            if r.name == "claude-swap" and r.levelno == logging.WARNING
+        ]
+        assert any("monitor idle for" in m for m in warnings), warnings
+
+
 class TestFailureBackoffSeconds:
     def test_zero_failures_returns_min(self):
         assert monitor._failure_backoff_seconds(0) == monitor.MONITOR_POLL_SECONDS_MIN
