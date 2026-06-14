@@ -492,9 +492,25 @@ class ClaudeAccountSwitcher:
         On macOS in particular, the live Claude credential can lag or be
         concurrently mutated around login/switch boundaries. Writing a backup
         without read-back verification can silently preserve stale tokens.
-        Returns the verified credential string actually persisted.
+        Returns the credential string actually persisted to backup.
+
+        Two distinct drift modes are disambiguated:
+
+        1. **Our write didn't take** (e.g. Keychain ACL hiccup): ``stored``
+           never matches ``expected`` even when ``live_now`` is stable. After
+           ``_BACKUP_CREDENTIAL_VERIFY_ATTEMPTS`` tries we raise
+           ``CredentialWriteError`` — this is a genuine storage failure.
+
+        2. **Claude Code is rotating tokens under us** during the verification
+           window (its own refresh fired concurrently): ``live_now`` keeps
+           changing across attempts. Looping forever is pointless; on the
+           final attempt we log a warning and persist whatever ``live_now``
+           sampled last. Backup is at most one rotation stale, which the
+           normal refresh-before-activation path resolves on the next switch.
         """
         expected = credentials
+        previous_live: str | None = None
+        live_keeps_changing = False
 
         for attempt in range(_BACKUP_CREDENTIAL_VERIFY_ATTEMPTS):
             self._write_account_credentials(account_num, email, expected)
@@ -507,7 +523,27 @@ class ClaudeAccountSwitcher:
             if stored == live_now:
                 return live_now
 
+            # Track whether the drift is "live moving" or "our write failing".
+            if previous_live is not None and live_now != previous_live:
+                live_keeps_changing = True
+            previous_live = live_now
+
             if attempt == _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS - 1:
+                if live_keeps_changing:
+                    # Claude Code is actively refreshing tokens during our
+                    # verification window. Accept the latest sample rather
+                    # than fighting a moving target — the backup will be at
+                    # most one rotation stale, and the refresh-before-
+                    # activation path handles that on the next switch.
+                    self._logger.warning(
+                        "persistent in-flight Claude Code rotation during "
+                        "backup verification for account-%s after %d attempts; "
+                        "persisting last sampled live state",
+                        account_num,
+                        _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS,
+                    )
+                    self._write_account_credentials(account_num, email, live_now)
+                    return live_now
                 raise CredentialWriteError(
                     "Stored backup credentials did not match live credentials"
                 )
@@ -515,7 +551,8 @@ class ClaudeAccountSwitcher:
             expected = live_now
             time.sleep(_BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS)
 
-        raise CredentialWriteError("Unreachable backup credential verification failure")
+        # Unreachable: the loop either returns or raises on every path above.
+        raise CredentialWriteError("backup credential verification fell through unexpectedly")
 
     def _sync_live_account_credentials_to_backup(
         self,
@@ -541,7 +578,11 @@ class ClaudeAccountSwitcher:
                 credentials,
             )
             self._logger.info("Synced refreshed live credentials for account %s", account_num)
-        except Exception as exc:
+        except (CredentialReadError, CredentialWriteError, OSError) as exc:
+            # Narrow catch: these are the credential-store failure modes that
+            # are acceptable to swallow on a best-effort sync hot path.
+            # ``KeyboardInterrupt`` and other base-exception subclasses must
+            # propagate so the user can still Ctrl-C out of list_accounts().
             self._logger.warning(
                 "Failed to sync live credentials for account %s (%s): %r",
                 account_num,

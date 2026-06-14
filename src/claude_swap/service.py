@@ -167,15 +167,22 @@ def uninstall(switcher: ClaudeAccountSwitcher) -> int:
 
 
 def _installed_version() -> str | None:
-    """Return the cswap version recorded in the installed plist, or None."""
+    """Return the cswap version recorded in the installed plist, or ``None``.
+
+    Catches only the specific failure modes that mean "no readable plist
+    on disk" — a missing file, a malformed plist, or a non-dict root.
+    Everything else (genuine logic bugs, attribute errors after a schema
+    change) is allowed to surface so we don't silently disable the
+    version-mismatch warning in ``status()``.
+    """
     try:
         with _plist_path().open("rb") as fh:
             data = plistlib.load(fh)
-        if not isinstance(data, dict):
-            return None
-        return data.get("EnvironmentVariables", {}).get(_VERSION_ENV_KEY)
-    except (OSError, Exception):
+    except (OSError, plistlib.InvalidFileException):
         return None
+    if not isinstance(data, dict):
+        return None
+    return data.get("EnvironmentVariables", {}).get(_VERSION_ENV_KEY)
 
 
 def service_state() -> str:

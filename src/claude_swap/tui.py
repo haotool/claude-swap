@@ -209,15 +209,18 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     while True:
         cfg = switcher.get_auto_switch_config()
         state = "ON" if cfg["enabled"] else "OFF"
-        service_state = _service_state()
+        # Local name deliberately differs from ``service.service_state`` (the
+        # function used inside ``_service_state()``) so future readers don't
+        # accidentally shadow the import.
+        current_service_state = _service_state()
         subtitle = (
             f"Rule {state} @ {cfg['threshold']}%  ·  "
-            f"Background service {service_state}"
+            f"Background service {current_service_state}"
         )
         items: list[tuple[str, str | None]] = [
             (f"Auto-switch: {'Disable' if cfg['enabled'] else 'Enable'}", "toggle"),
             (f"Threshold: set to {cfg['threshold']}%", "threshold"),
-            (_service_menu_label(service_state), "service-toggle"),
+            (_service_menu_label(current_service_state), "service-toggle"),
             ("Background service: Show status", "service-status"),
             ("Start monitor now", "start"),
             ("-- Back --", None),
@@ -245,14 +248,14 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
                 except ClaudeSwitchError as e:
                     _show_message(stdscr, f"Invalid threshold: {e}", is_error=True)
         elif choice == "service-toggle":
-            if service_state == "unsupported":
+            if current_service_state == "unsupported":
                 _show_service_unsupported(stdscr)
-            elif service_state in ("installed but not loaded", "loaded"):
+            elif current_service_state in ("installed but not loaded", "loaded"):
                 _shell_out(stdscr, lambda: service.uninstall(switcher))
             else:
                 _shell_out(stdscr, lambda: service.install(switcher))
         elif choice == "service-status":
-            if service_state == "unsupported":
+            if current_service_state == "unsupported":
                 _show_service_unsupported(stdscr)
             else:
                 _shell_out(stdscr, lambda: service.status(switcher))

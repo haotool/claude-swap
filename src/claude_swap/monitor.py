@@ -115,7 +115,9 @@ def _next_poll_interval(
 
     eta_to_threshold = (threshold - current_pct) / velocity
     target = eta_to_threshold / MONITOR_POLL_SAFETY_FACTOR
-    return int(max(t_min, min(target, t_max)))
+    # ``round`` rather than ``int``: keep the interval closest to the
+    # predicted ETA / SAFETY_FACTOR instead of always biasing earlier.
+    return int(max(t_min, min(round(target), t_max)))
 
 
 def _failure_backoff_seconds(
@@ -244,6 +246,11 @@ def run_cli_monitor(
     last_pct: float | None = None
     last_poll_time: float | None = None
     consecutive_failures = 0
+    # Dedup the switch-error log: a permanently broken slot (e.g. expired
+    # refresh token with no live session) would otherwise spam a WARNING on
+    # every poll.  Log the first occurrence loud, subsequent identical
+    # failures at DEBUG so launchd's monitor.err stays scannable.
+    last_switch_error: str | None = None
 
     try:
         while True:
@@ -347,11 +354,23 @@ def run_cli_monitor(
                     switcher.switch(quiet=True, force_refresh=True)
                 except ClaudeSwitchError as exc:
                     print(f"  {dimmed(f'switch failed: {exc}')}", file=out, flush=True)
-                    log.warning(
-                        "monitor switch failed: pct=%s error=%s", pct, exc
-                    )
+                    err_msg = str(exc)
+                    if err_msg == last_switch_error:
+                        # Same failure as last time — likely a permanently
+                        # broken slot.  Drop to DEBUG so logs stay readable;
+                        # the user already has the actionable message.
+                        log.debug(
+                            "monitor switch failed (repeat): pct=%s error=%s",
+                            pct, exc,
+                        )
+                    else:
+                        log.warning(
+                            "monitor switch failed: pct=%s error=%s", pct, exc
+                        )
+                        last_switch_error = err_msg
                 else:
                     log.info("monitor switched account at pct=%s", pct)
+                    last_switch_error = None
                 # The active account just changed — the previous pct sample
                 # belongs to the old account.  Reset baseline so we don't
                 # compute a wildly negative velocity on the next iteration.

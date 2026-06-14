@@ -3306,3 +3306,95 @@ class TestRefreshTargetBeforeActivation:
             )
         mock_refresh.assert_not_called()
         assert result == fresh
+
+
+class TestWriteVerifiedLiveDriftHandling:
+    """Lock the two drift modes of ``_write_verified_live_account_credentials``:
+
+    1. Persistent Claude Code rotation under us → log warning, persist last
+       sampled live state, do NOT raise.
+    2. Persistent storage write failure (live stable, our write never sticks)
+       → raise ``CredentialWriteError`` so the genuine failure surfaces.
+    """
+
+    def _creds(self, token: str) -> str:
+        return json.dumps({"claudeAiOauth": {"accessToken": token, "refreshToken": "rt"}})
+
+    def test_persistent_live_rotation_does_not_raise(
+        self, temp_home: Path, monkeypatch, caplog,
+    ):
+        """Simulates Claude Code refreshing its token on every verification
+        attempt.  The function must terminate with a warning and persist the
+        last sampled live state instead of raising CredentialWriteError."""
+        import logging
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+
+        # Each iteration: live_now reads return a DIFFERENT token, simulating
+        # Claude Code refreshing concurrently.  Our writes always "succeed"
+        # via the in-memory store, but live_now never equals stored.
+        store: dict = {}
+
+        def write_acct(num, email, creds):
+            store["backup"] = creds
+
+        def read_acct(num, email):
+            return store.get("backup", "")
+
+        live_iter = iter([
+            self._creds("live-1"),
+            self._creds("live-2"),
+            self._creds("live-3"),
+        ])
+
+        def read_live():
+            return next(live_iter)
+
+        monkeypatch.setattr(switcher, "_write_account_credentials", write_acct)
+        monkeypatch.setattr(switcher, "_read_account_credentials", read_acct)
+        monkeypatch.setattr(switcher, "_read_credentials", read_live)
+        monkeypatch.setattr("claude_swap.switcher.time.sleep", lambda *_: None)
+
+        caplog.set_level(logging.WARNING, logger="claude-swap")
+
+        result = switcher._write_verified_live_account_credentials(
+            "2", "b@example.com", self._creds("intended"),
+        )
+
+        # Last sampled live state is what gets persisted as the backup.
+        assert result == self._creds("live-3")
+        assert store["backup"] == self._creds("live-3")
+
+        warnings = [
+            r.getMessage() for r in caplog.records
+            if r.name == "claude-swap" and r.levelno == logging.WARNING
+        ]
+        assert any(
+            "persistent in-flight Claude Code rotation" in m for m in warnings
+        ), warnings
+
+    def test_persistent_storage_write_failure_raises(
+        self, temp_home: Path, monkeypatch,
+    ):
+        """If live_now is stable but our write never sticks, raise so the
+        genuine storage failure surfaces — don't silently swallow it as a
+        rotation event."""
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+
+        # Our writes are no-ops — stored stays empty.  live_now is stable.
+        monkeypatch.setattr(
+            switcher, "_write_account_credentials", lambda *_: None,
+        )
+        monkeypatch.setattr(
+            switcher, "_read_account_credentials", lambda *_: "",
+        )
+        stable_live = self._creds("stable")
+        monkeypatch.setattr(switcher, "_read_credentials", lambda: stable_live)
+        monkeypatch.setattr("claude_swap.switcher.time.sleep", lambda *_: None)
+
+        with pytest.raises(CredentialWriteError, match="did not match"):
+            switcher._write_verified_live_account_credentials(
+                "2", "b@example.com", stable_live,
+            )

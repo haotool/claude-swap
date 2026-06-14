@@ -497,6 +497,47 @@ class TestCliAutoMonitor:
         msgs = [r.getMessage() for r in caplog.records if r.name == "claude-swap"]
         assert any("no live Claude Code sessions" in m for m in msgs), msgs
 
+    def test_monitor_dedups_repeating_switch_errors(self, temp_home, caplog):
+        """A permanently broken slot must not spam an identical WARNING every
+        poll cycle — only the first occurrence is logged at WARNING; repeats
+        drop to DEBUG so launchd's monitor.err stays scannable."""
+        switcher = ClaudeAccountSwitcher()
+        caplog.set_level(logging.DEBUG, logger="claude-swap")
+
+        sleeps: list[int] = []
+
+        def fake_sleep(_seconds):
+            sleeps.append(_seconds)
+            if len(sleeps) >= 3:
+                raise monitor._MonitorStopped
+
+        def boom(**_kwargs):
+            raise ClaudeSwitchError("slot 2 token expired and refresh failed")
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
+             patch.object(switcher, "switch", side_effect=boom), \
+             patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
+            # Explicit poll_seconds=60 so the test does not silently depend on
+            # the module-level default; the value itself doesn't matter here
+            # because time.sleep is mocked.
+            monitor.run_cli_monitor(switcher, poll_seconds=60)
+
+        warnings = [
+            r for r in caplog.records
+            if r.name == "claude-swap"
+            and r.levelno == logging.WARNING
+            and "switch failed" in r.getMessage()
+        ]
+        debugs = [
+            r for r in caplog.records
+            if r.name == "claude-swap"
+            and r.levelno == logging.DEBUG
+            and "switch failed (repeat)" in r.getMessage()
+        ]
+        # First identical failure surfaces; subsequent ones drop to debug.
+        assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert len(debugs) >= 1, [r.getMessage() for r in debugs]
+
     def test_monitor_backs_off_on_consecutive_usage_failures(
         self, temp_home: Path, caplog,
     ):
@@ -518,7 +559,9 @@ class TestCliAutoMonitor:
 
         with patch.object(switcher, "get_active_usage_pct", return_value=None), \
              patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
-            monitor.run_cli_monitor(switcher)  # uses real MAX = 60
+            # Explicit poll_seconds=60 (the production default) so we are not
+            # silently coupled to a module-level constant.
+            monitor.run_cli_monitor(switcher, poll_seconds=60)
 
         # Backoffs follow BASE * 2^(n-1) clamped at MAX:
         # n=1 → 5, n=2 → 10, n=3 → 20.
