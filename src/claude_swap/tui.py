@@ -16,14 +16,26 @@ Design constraints:
 from __future__ import annotations
 
 import curses
+import os
 import sys
 import time
 from datetime import datetime
 from typing import Callable
 
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.monitor import MONITOR_POLL_SECONDS, should_switch
+from claude_swap.models import InteractiveAutoSwitchIntent
 from claude_swap import service
+from claude_swap.monitor import (
+    MONITOR_POLL_SECONDS,
+    MONITOR_POLL_SECONDS_MIN,
+    MonitorRuntimeState,
+    SwitchCancelled,
+    _acquire_monitor_pid,
+    _logger,
+    _pid_file,
+    _release_monitor_pid,
+    monitor_step,
+)
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -195,9 +207,9 @@ def _do_refresh(stdscr, switcher: ClaudeAccountSwitcher) -> None:
 def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     """Settings + launcher for auto-switch (Beta).
 
-    Lets the user toggle automatic rotation to the next account when the active
-    account's 5h/7d usage reaches a threshold, tune that threshold, and start
-    the foreground monitor. Settings persist in ``sequence.json``.
+    Lets the user enable cooldown-aware auto-switch when the active account's
+    5h/7d usage reaches a threshold, tune that threshold, and start the
+    foreground monitor. Settings persist in ``sequence.json``.
 
     No Claude Code restart is needed for the switch to take effect — on
     Linux/Windows the new credentials are picked up on the next message; on
@@ -270,52 +282,61 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
 def _run_auto_monitor(
     stdscr, switcher: ClaudeAccountSwitcher, threshold: int
 ) -> None:
-    """Foreground watcher loop: poll active usage and switch at the threshold.
+    """Foreground watcher: TUI adapter over the shared monitor engine."""
+    pid_path = _pid_file(switcher)
+    running_pid = _acquire_monitor_pid(pid_path)
+    if running_pid is not None:
+        _show_message(
+            stdscr,
+            f"Auto-switch monitor already running (pid {running_pid}). "
+            "Stop the CLI monitor or background service first.",
+            is_error=True,
+        )
+        return
 
-    Polls every ``MONITOR_POLL_SECONDS`` (press ``s`` to check immediately,
-    ``q``/Esc to stop). When the active account reaches ``threshold``%, it
-    shells out to ``switcher.switch()`` to rotate to the next account, then
-    keeps watching the new active account.
-    """
     curses.curs_set(0)
-    stdscr.timeout(1000)  # getch() returns -1 after ~1s, driving the countdown
-    log = switcher._logger
-    last_pct: float | None = None
+    stdscr.timeout(1000)
+    log = _logger(switcher)
+    log.info(
+        "monitor start: threshold=%s adaptive=%s-%ss pid=%s",
+        threshold,
+        MONITOR_POLL_SECONDS_MIN,
+        MONITOR_POLL_SECONDS,
+        os.getpid(),
+    )
+    state = MonitorRuntimeState()
+    poll_ceiling = MONITOR_POLL_SECONDS
+    display_threshold = threshold
     last_checked = "never"
     message = "Monitoring started."
-    seconds_to_next = 0  # poll immediately on entry
+    seconds_to_next = 0
+    last_pct: float | None = None
+
+    def perform_switch(decision) -> bool:
+        return _auto_perform_switch(stdscr, switcher, decision)
+
     try:
         while True:
             if seconds_to_next <= 0:
-                last_pct = switcher.get_active_usage_pct()
-                last_checked = datetime.now().strftime("%H:%M:%S")
-                seconds_to_next = MONITOR_POLL_SECONDS
-                log.info(
-                    "monitor poll: active_usage_pct=%s threshold=%s",
-                    last_pct,
-                    threshold,
+                result = monitor_step(
+                    switcher,
+                    state,
+                    poll_seconds=poll_ceiling,
+                    perform_switch=perform_switch,
                 )
-                if should_switch(last_pct, threshold):
-                    log.info(
-                        "monitor threshold reached: pct=%s threshold=%s — switching",
-                        last_pct,
-                        threshold,
-                    )
-                    switched = _auto_perform_switch(stdscr, switcher, last_pct)
-                    if switched:
-                        log.info("monitor switched account at pct=%s", last_pct)
-                    message = (
-                        f"Reached {last_pct:.0f}% — switched account."
-                        if switched
-                        else f"Reached {last_pct:.0f}% — switch failed (see above)."
-                    )
-                    # Re-read the new active account's usage on the next tick.
-                    last_pct = None
-                else:
-                    message = "Monitoring active account."
+                display_threshold = result.threshold
+                last_pct = result.pct if result.pct is not None else state.last_pct
+                last_checked = datetime.now().strftime("%H:%M:%S")
+                seconds_to_next = result.next_interval
+                message = result.user_message
 
             _draw_monitor(
-                stdscr, threshold, last_pct, last_checked, seconds_to_next, message
+                stdscr,
+                display_threshold,
+                last_pct,
+                last_checked,
+                seconds_to_next,
+                message,
             )
             key = stdscr.getch()
             if key in (27, ord("q"), ord("Q")):
@@ -327,29 +348,29 @@ def _run_auto_monitor(
     finally:
         log.info("monitor stopped")
         stdscr.timeout(-1)
+        _release_monitor_pid(pid_path)
 
 
-def _auto_perform_switch(stdscr, switcher: ClaudeAccountSwitcher, pct: float | None) -> bool:
-    """Suspend curses, run ``switcher.switch()``, then resume. No Enter prompt."""
+def _auto_perform_switch(
+    stdscr,
+    switcher: ClaudeAccountSwitcher,
+    decision,
+) -> bool:
+    """Suspend curses, run automated ``switch()``, then resume."""
     curses.def_prog_mode()
     curses.endwin()
-    log = switcher._logger
-    switched = True
+    switched = False
     try:
         try:
-            # User is watching the TUI monitor (quiet=False to show the banner)
-            # but the switch is automated.  Same contract as the background
-            # service: force a fresh token AND use the cooldown-aware picker
-            # so the user gets parked on the soonest-to-free account when
-            # everything is saturated.
-            switcher.switch(force_refresh=True, prefer_least_busy=True)
+            switched = switcher.switch(
+                InteractiveAutoSwitchIntent(decision=decision),
+            )
         except ClaudeSwitchError as e:
             print(f"Auto-switch error: {e}")
-            log.warning("monitor switch failed: pct=%s error=%s", pct, e)
-            switched = False
+            raise
         except KeyboardInterrupt:
             print("\nOperation cancelled.")
-            switched = False
+            raise SwitchCancelled from None
         print()
         time.sleep(2.5)  # brief pause so the output is readable
     finally:
@@ -372,7 +393,7 @@ def _draw_monitor(
     _draw_header(
         stdscr,
         "Auto-switch monitor (Beta)",
-        f"threshold {threshold}%  ·  polling every {MONITOR_POLL_SECONDS}s",
+        f"threshold {threshold}%  ·  adaptive {MONITOR_POLL_SECONDS_MIN}–{MONITOR_POLL_SECONDS}s",
         cols,
     )
     pct_str = f"{pct:.0f}%" if pct is not None else "unavailable"
