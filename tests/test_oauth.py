@@ -90,6 +90,8 @@ class TestFetchUsage:
 
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
+        assert result["five_hour"]["resets_at"] == future.isoformat()
+        assert result["seven_day"]["resets_at"] == future.isoformat()
         assert result["five_hour"]["countdown"] == "1h 0m"
 
     def test_network_error(self):

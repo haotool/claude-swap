@@ -215,6 +215,7 @@ def build_usage_result(data: dict) -> dict | None:
     if h5:
         h5_entry = {"pct": h5["utilization"]}
         if h5.get("resets_at"):
+            h5_entry["resets_at"] = h5["resets_at"]
             h5_entry["countdown"], h5_entry["clock"] = format_reset(h5["resets_at"])
         result["five_hour"] = h5_entry
 
@@ -222,6 +223,7 @@ def build_usage_result(data: dict) -> dict | None:
     if d7:
         d7_entry = {"pct": d7["utilization"]}
         if d7.get("resets_at"):
+            d7_entry["resets_at"] = d7["resets_at"]
             d7_entry["countdown"], d7_entry["clock"] = format_reset(d7["resets_at"])
         result["seven_day"] = d7_entry
 
