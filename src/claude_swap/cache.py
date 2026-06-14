@@ -50,6 +50,26 @@ def read_cache_data(path: Path, default=MISSING):
         return default
 
 
+def read_cache_with_timestamp(path: Path) -> tuple[dict | None, float | None]:
+    """Read cached JSON data and the wrapper file timestamp."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        data = raw["data"]
+        ts = raw["timestamp"]
+        if isinstance(data, dict) and isinstance(ts, (int, float)):
+            return data, float(ts)
+    except (
+        OSError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        pass
+    return None, None
+
+
 def write_cache(path: Path, data) -> None:
     """Write data to a cache file with a timestamp."""
     path.parent.mkdir(parents=True, exist_ok=True)

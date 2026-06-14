@@ -28,7 +28,7 @@ from claude_swap.exceptions import (
     ValidationError,
 )
 from claude_swap import oauth
-from claude_swap.cache import read_cache_data, write_cache
+from claude_swap.cache import read_cache_data, read_cache_with_timestamp, write_cache
 from claude_swap.locking import FileLock
 from claude_swap.logging_config import setup_logging
 from claude_swap.models import (
@@ -300,26 +300,6 @@ def _persist_usage_cache_entry(
         return
     if _is_usage_dict(merged):
         existing[key] = _usage_to_cache(merged)
-
-
-def _read_usage_cache_file(path: Path) -> tuple[dict | None, float | None]:
-    """Read usage cache rows and the wrapper file timestamp."""
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        data = raw["data"]
-        ts = raw["timestamp"]
-        if isinstance(data, dict) and isinstance(ts, (int, float)):
-            return data, float(ts)
-    except (
-        OSError,
-        json.JSONDecodeError,
-        UnicodeDecodeError,
-        KeyError,
-        TypeError,
-        ValueError,
-    ):
-        pass
-    return None, None
 
 
 def _resolve_slot_cached_at(entry: dict, file_timestamp: float | None) -> float | None:
@@ -983,7 +963,7 @@ class ClaudeAccountSwitcher:
     def _trusted_usage_snapshots(self) -> dict[str, dict]:
         """Usage entries with per-slot freshness — safe for unattended planning."""
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
-        cached, file_ts = _read_usage_cache_file(usage_cache_path)
+        cached, file_ts = read_cache_with_timestamp(usage_cache_path)
         if cached is None:
             return {}
 
@@ -2050,7 +2030,7 @@ class ClaudeAccountSwitcher:
             return result
 
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
-        cached_data, file_ts = _read_usage_cache_file(usage_cache_path)
+        cached_data, file_ts = read_cache_with_timestamp(usage_cache_path)
         previous_cached = cached_data if cached_data is not None else {}
         account_keys = {str(info[0]) for info in accounts_info}
         if self._usage_cache_fresh(
@@ -2189,7 +2169,7 @@ class ClaudeAccountSwitcher:
                 # cswap must not refresh them) and merge into existing entries so
                 # other accounts' rows survive.
                 usage_cache_path = self.backup_dir / "cache" / "usage.json"
-                cached, file_ts = _read_usage_cache_file(usage_cache_path)
+                cached, file_ts = read_cache_with_timestamp(usage_cache_path)
                 previous_cached = cached if cached is not None else {}
                 cached_usage = (
                     _usage_from_cache(cached[account_num])
@@ -2324,7 +2304,7 @@ class ClaudeAccountSwitcher:
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
         usage = None
         if account_num is not None:
-            cached, file_ts = _read_usage_cache_file(usage_cache_path)
+            cached, file_ts = read_cache_with_timestamp(usage_cache_path)
             if cached is not None and account_num in cached:
                 cached_usage = _usage_from_cache(cached[account_num])
                 if (
