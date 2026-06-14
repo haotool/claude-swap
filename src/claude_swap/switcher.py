@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 from claude_swap import macos_keychain
@@ -79,6 +81,76 @@ _USAGE_CACHE_TTL = 15  # seconds
 DEFAULT_AUTO_SWITCH_THRESHOLD = 95
 _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS = 3
 _BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS = 0.5
+
+# Cooldown-aware target picker (``_pick_best_switch_target``):
+# Score buckets used by ``_slot_switch_score`` — lower is better.
+# 0: unsaturated (max(5h,7d) < threshold) — within bucket, prefer lowest pct
+# 1: saturated (>= threshold) — within bucket, prefer soonest ``resets_at``
+# 2: unknown usage — worst (cold cache, no signal)
+# Named so callers don't need to reverse-engineer the magic ints.
+_SLOT_SCORE_BUCKET_UNSATURATED = 0
+_SLOT_SCORE_BUCKET_SATURATED = 1
+_SLOT_SCORE_BUCKET_UNKNOWN = 2
+
+
+def _slot_switch_score(
+    usage: object,
+    threshold: int,
+) -> tuple[int, float]:
+    """Score a slot for cooldown-aware switch target selection.
+
+    Lower scores are better.  Pure function (no I/O); easily tested in
+    isolation.  Returns a sortable ``(bucket, primary_metric)`` tuple where
+    Python's lexicographic tuple comparison gives the right total order:
+
+    * ``(0, max_pct)``        — unsaturated; within bucket, prefer lower pct
+                                 so we stay on the freshest account.
+    * ``(1, soonest_ts)``     — saturated; within bucket, prefer the soonest
+                                 ``resets_at`` so the user parks on the
+                                 account that will free up first.
+    * ``(1, math.inf)``       — saturated but no ``resets_at`` available;
+                                 ranks below any known-reset saturated slot.
+    * ``(2, math.inf)``       — unknown usage (cold cache, parse failure,
+                                 missing keys); ranks behind every signal we
+                                 actually have.
+
+    The ``threshold`` is the auto-switch threshold; an account with
+    ``max(5h, 7d) >= threshold`` is treated as "saturated" for picking
+    purposes regardless of the exact percent.
+    """
+    if not isinstance(usage, dict):
+        return (_SLOT_SCORE_BUCKET_UNKNOWN, math.inf)
+
+    pcts: list[float] = []
+    saturated_resets: list[float] = []
+    for key in ("five_hour", "seven_day"):
+        entry = usage.get(key)
+        if not isinstance(entry, dict):
+            continue
+        pct = entry.get("pct")
+        if not isinstance(pct, (int, float)):
+            continue
+        pct_f = float(pct)
+        pcts.append(pct_f)
+        if pct_f >= threshold:
+            resets_at = entry.get("resets_at")
+            if isinstance(resets_at, str):
+                try:
+                    ts = datetime.fromisoformat(resets_at).timestamp()
+                except ValueError:
+                    continue
+                saturated_resets.append(ts)
+
+    if not pcts:
+        return (_SLOT_SCORE_BUCKET_UNKNOWN, math.inf)
+
+    max_pct = max(pcts)
+    if max_pct < threshold:
+        return (_SLOT_SCORE_BUCKET_UNSATURATED, max_pct)
+    if not saturated_resets:
+        # Saturated but we don't know when it frees — worst within saturated.
+        return (_SLOT_SCORE_BUCKET_SATURATED, math.inf)
+    return (_SLOT_SCORE_BUCKET_SATURATED, min(saturated_resets))
 
 
 def _max_usage_pct(usage: dict | None) -> float | None:
@@ -771,6 +843,66 @@ class ClaudeAccountSwitcher:
         if not self._read_account_config(str(account_num), email):
             return False
         return True
+
+    def _pick_best_switch_target(
+        self,
+        threshold: int,
+        *,
+        exclude: str | None = None,
+    ) -> str | None:
+        """Pick the switchable slot with the best cooldown-aware score.
+
+        Used by the auto-switch monitor (``switch(prefer_least_busy=True)``)
+        so that when every account is over threshold, the user is parked on
+        the one whose rate-limit window resets soonest — rather than
+        bouncing through saturated accounts in round-robin order.
+
+        Strategy:
+          1. Read the shared usage cache (no network, fast).
+          2. Score every switchable slot via ``_slot_switch_score``.
+          3. If *any* slot has usable signal (not all bucket-2 unknown),
+             return the lowest-scored slot.
+          4. If every slot is cold-cache (no signal at all), return
+             ``None`` so the caller falls back to sequential rotation.
+
+        We never trigger fresh HTTP fetches here — that would add unbounded
+        latency to the hot switch path.  The monitor populates the active
+        slot's cache on every poll, and ``cswap --list`` fills the rest.
+        Stale cache (>TTL) is still used as a hint; the user can manually
+        refresh by running ``cswap --list`` before relying on this picker.
+        """
+        data = self._get_sequence_data() or {}
+        sequence = data.get("sequence", [])
+        if not sequence:
+            return None
+
+        usage_cache_path = self.backup_dir / "cache" / "usage.json"
+        cached = read_cache_data(usage_cache_path, default={}) or {}
+        if not isinstance(cached, dict):
+            cached = {}
+
+        scored: list[tuple[tuple[int, float], str]] = []
+        for num in sequence:
+            num_str = str(num)
+            if num_str == exclude:
+                continue
+            if not self._account_is_switchable(num_str):
+                continue
+            cached_entry = _usage_from_cache(cached.get(num_str))
+            score = _slot_switch_score(cached_entry, threshold)
+            scored.append((score, num_str))
+
+        if not scored:
+            return None
+
+        # Cold-cache fallback: if every candidate is bucket-2 ("unknown"),
+        # we have no signal and the caller's round-robin is the right
+        # behaviour.  Returning None preserves the historical contract.
+        if all(s[0][0] == _SLOT_SCORE_BUCKET_UNKNOWN for s in scored):
+            return None
+
+        scored.sort()
+        return scored[0][1]
 
     def _write_account_config(
         self, account_num: str, email: str, config: str
@@ -1955,7 +2087,13 @@ class ClaudeAccountSwitcher:
             return "New account active within ~30s (Claude Code's Keychain cache TTL)."
         return "New account active on the next message."
 
-    def switch(self, *, quiet: bool = False, force_refresh: bool = False) -> None:
+    def switch(
+        self,
+        *,
+        quiet: bool = False,
+        force_refresh: bool = False,
+        prefer_least_busy: bool = False,
+    ) -> None:
         """Switch to next account in sequence.
 
         Args:
@@ -1969,16 +2107,26 @@ class ClaudeAccountSwitcher:
                 activation even when not yet expired. Recommended for automated
                 switches so Claude Code's first API call against the new
                 account gets a freshly-issued token.
+            prefer_least_busy: Use cooldown-aware scoring to pick the next
+                account instead of strict round-robin.  When the user has
+                multiple accounts and several are saturated, this parks them
+                on the slot whose rate-limit window resets soonest, rather
+                than bouncing through saturated accounts in sequence order.
+                Falls back to round-robin when the usage cache is cold (e.g.
+                on first run or after ``cswap purge``).  Recommended for
+                automated switches; manual CLI / TUI switches keep the
+                predictable round-robin default.
 
-        Note: ``quiet`` and ``force_refresh`` are independent axes — every
-        combination is supported.  Today's callers use:
-          * ``quiet=False, force_refresh=False`` — manual TUI/CLI switch
-          * ``quiet=False, force_refresh=True``  — TUI auto-switch monitor
-          * ``quiet=True,  force_refresh=True``  — launchd background service
-        A future ``quiet=True, force_refresh=False`` ("silent dry-rotate")
-        is intentionally legal.  If a third orthogonal axis appears, promote
-        the kwargs to a ``SwitchOptions`` dataclass before the signature
-        ossifies.
+        Note: ``quiet``, ``force_refresh`` and ``prefer_least_busy`` are
+        independent axes — every combination is supported.  Today's callers:
+          * ``quiet=False, force_refresh=False, prefer_least_busy=False`` —
+            manual TUI/CLI switch (predictable, no API hints)
+          * ``quiet=False, force_refresh=True,  prefer_least_busy=True``  —
+            TUI auto-switch monitor (user is watching, but switch is auto)
+          * ``quiet=True,  force_refresh=True,  prefer_least_busy=True``  —
+            launchd background service (fully automated)
+        If a fourth orthogonal axis appears, promote to a ``SwitchOptions``
+        dataclass before the signature ossifies.
         """
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
@@ -2060,35 +2208,58 @@ class ClaudeAccountSwitcher:
 
         active_account = data.get("activeAccountNumber")
 
-        # Find current index and get next, skipping broken candidates.
-        # The active slot is never checked here — _perform_switch captures
-        # live state into a fresh backup before swapping, so the active
-        # slot's stored backup may be stale or absent without blocking us.
-        try:
-            current_index = sequence.index(active_account)
-        except ValueError:
-            current_index = 0
-
         next_account: str | None = None
-        for offset in range(1, len(sequence)):
-            candidate = str(sequence[(current_index + offset) % len(sequence)])
-            if self._account_is_switchable(candidate):
-                next_account = candidate
-                break
-            if quiet:
-                # Background service must not leak per-candidate prints; the
-                # structured logger is the right destination for these.
+
+        # Cooldown-aware pick: when the caller opted in (auto-switch monitor)
+        # and the usage cache has signal for at least one slot, return the
+        # lowest-scored target.  Falls back (returns None) on cold-cache so
+        # the historical round-robin path takes over below.
+        if prefer_least_busy:
+            threshold = int(
+                self.get_auto_switch_config().get("threshold")
+                or DEFAULT_AUTO_SWITCH_THRESHOLD
+            )
+            best = self._pick_best_switch_target(
+                threshold,
+                exclude=str(active_account) if active_account is not None else None,
+            )
+            if best is not None:
                 self._logger.info(
-                    "Skipping Account-%s (no stored credentials/config, "
-                    "re-add with cswap --add-account --slot %s)",
-                    candidate, candidate,
+                    "switch: cooldown-aware picker chose Account-%s "
+                    "(active=%s, threshold=%s)",
+                    best, active_account, threshold,
                 )
-            else:
-                print(
-                    f"{accent('Skipping')} Account-{candidate} "
-                    f"(no stored credentials/config, re-add with "
-                    f"cswap --add-account --slot {candidate})"
-                )
+                next_account = best
+
+        if next_account is None:
+            # Find current index and get next, skipping broken candidates.
+            # The active slot is never checked here — _perform_switch captures
+            # live state into a fresh backup before swapping, so the active
+            # slot's stored backup may be stale or absent without blocking us.
+            try:
+                current_index = sequence.index(active_account)
+            except ValueError:
+                current_index = 0
+
+            for offset in range(1, len(sequence)):
+                candidate = str(sequence[(current_index + offset) % len(sequence)])
+                if self._account_is_switchable(candidate):
+                    next_account = candidate
+                    break
+                if quiet:
+                    # Background service must not leak per-candidate prints; the
+                    # structured logger is the right destination for these.
+                    self._logger.info(
+                        "Skipping Account-%s (no stored credentials/config, "
+                        "re-add with cswap --add-account --slot %s)",
+                        candidate, candidate,
+                    )
+                else:
+                    print(
+                        f"{accent('Skipping')} Account-{candidate} "
+                        f"(no stored credentials/config, re-add with "
+                        f"cswap --add-account --slot {candidate})"
+                    )
 
         if next_account is None:
             msg = (
@@ -2101,6 +2272,21 @@ class ClaudeAccountSwitcher:
                 # report a successful rotation every poll.
                 raise SwitchError(msg)
             print(dimmed(msg))
+            return
+
+        # Same-account guard: the cooldown-aware picker excludes the active
+        # slot, but defend against any future regression where it might
+        # return the current account (would no-op _perform_switch but log a
+        # confusing "switched to Account-N → N").
+        if next_account == str(active_account):
+            if quiet:
+                raise SwitchError(
+                    f"Cooldown picker selected the active account "
+                    f"(Account-{active_account}) — nothing to switch to."
+                )
+            print(dimmed(
+                f"Already on Account-{active_account}; no switch needed."
+            ))
             return
 
         self._perform_switch(next_account, quiet=quiet, force_refresh=force_refresh)

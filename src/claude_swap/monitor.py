@@ -426,7 +426,15 @@ def run_cli_monitor(
                     # fresh OAuth token so Claude Code's first API call after
                     # picking up the new credentials has maximum remaining
                     # lifetime — production-grade seamless handoff.
-                    switcher.switch(quiet=True, force_refresh=True)
+                    # prefer_least_busy=True: when multiple accounts are over
+                    # threshold, park on the one whose window resets soonest
+                    # instead of bouncing in sequence order through saturated
+                    # slots.  Cold-cache falls back to round-robin transparently.
+                    switcher.switch(
+                        quiet=True,
+                        force_refresh=True,
+                        prefer_least_busy=True,
+                    )
                 except ClaudeSwitchError as exc:
                     print(f"  {dimmed(f'switch failed: {exc}')}", file=out, flush=True)
                     err_msg = str(exc)

@@ -3311,6 +3311,192 @@ class TestSchemaDriftWarning:
         ), warnings
 
 
+class TestSlotSwitchScore:
+    """Cooldown-aware target picker — pure scoring function.
+
+    Lock the score's total order: unsaturated (bucket 0) < saturated with
+    known reset (bucket 1) < saturated unknown reset (bucket 1, inf) <
+    unknown usage (bucket 2).  Within bucket 0, lower pct wins.  Within
+    bucket 1 with known resets, sooner timestamp wins.
+    """
+
+    def test_unknown_usage_is_worst(self):
+        from claude_swap.switcher import _slot_switch_score
+
+        # Non-dict / empty / no recognised keys all collapse to bucket 2.
+        for value in (None, {}, "not a dict", {"unexpected_field": 42}):
+            bucket, _ = _slot_switch_score(value, 95)
+            assert bucket == 2, f"{value!r} should be bucket 2, got {bucket}"
+
+    def test_unsaturated_prefers_lower_pct(self):
+        from claude_swap.switcher import _slot_switch_score
+
+        low = _slot_switch_score({"five_hour": {"pct": 30}}, 95)
+        mid = _slot_switch_score({"five_hour": {"pct": 60}}, 95)
+        high = _slot_switch_score({"five_hour": {"pct": 80}}, 95)
+        assert low < mid < high
+
+    def test_unsaturated_takes_max_of_5h_and_7d(self):
+        from claude_swap.switcher import _slot_switch_score
+
+        # The blocking limit is the higher of the two; score must reflect it.
+        out = _slot_switch_score(
+            {"five_hour": {"pct": 20}, "seven_day": {"pct": 70}}, 95,
+        )
+        assert out == (0, 70.0)
+
+    def test_saturated_with_resets_prefers_soonest(self):
+        from claude_swap.switcher import _slot_switch_score
+
+        soon = _slot_switch_score(
+            {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}}, 95,
+        )
+        later = _slot_switch_score(
+            {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}}, 95,
+        )
+        assert soon < later
+        assert soon[0] == 1 and later[0] == 1  # both saturated bucket
+
+    def test_saturated_without_resets_ranks_last_in_bucket(self):
+        from claude_swap.switcher import _slot_switch_score
+        import math
+
+        with_reset = _slot_switch_score(
+            {"five_hour": {"pct": 100, "resets_at": "2099-12-31T00:00:00+00:00"}}, 95,
+        )
+        no_reset = _slot_switch_score({"five_hour": {"pct": 100}}, 95)
+        assert with_reset < no_reset
+        assert no_reset == (1, math.inf)
+
+    def test_total_order_across_all_buckets(self):
+        """The whole point: tuple-sort gives the right global ranking."""
+        from claude_swap.switcher import _slot_switch_score
+
+        candidates = [
+            ("A-unsat-low", {"five_hour": {"pct": 30}}),
+            ("B-unsat-mid", {"five_hour": {"pct": 80}}),
+            ("C-sat-soon", {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}}),
+            ("D-sat-late", {"five_hour": {"pct": 100, "resets_at": "2026-06-14T18:00:00+00:00"}}),
+            ("E-sat-no-reset", {"five_hour": {"pct": 100}}),
+            ("F-unknown", {}),
+        ]
+        scored = sorted(
+            (_slot_switch_score(u, 95), name) for name, u in candidates
+        )
+        names_in_order = [name for _, name in scored]
+        # Loose contract: unsat comes before sat; sat-with-reset before
+        # sat-without; unknown is last.  Exact pct ordering matters within bucket.
+        assert names_in_order[:2] == ["A-unsat-low", "B-unsat-mid"]
+        assert names_in_order[2:4] == ["C-sat-soon", "D-sat-late"]
+        assert names_in_order[-2] == "E-sat-no-reset"
+        assert names_in_order[-1] == "F-unknown"
+
+    def test_invalid_resets_at_falls_to_no_reset_bucket(self):
+        """Malformed timestamps must not raise — they degrade the slot to
+        'saturated without reset' so the picker still ranks it sensibly."""
+        from claude_swap.switcher import _slot_switch_score
+        import math
+
+        out = _slot_switch_score(
+            {"five_hour": {"pct": 100, "resets_at": "not-a-timestamp"}}, 95,
+        )
+        assert out == (1, math.inf)
+
+
+class TestPickBestSwitchTarget:
+    """Cache-first picker — integration with the on-disk usage cache."""
+
+    def _bootstrap(self, temp_home: Path, num_accounts: int = 3) -> ClaudeAccountSwitcher:
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        accounts: dict = {}
+        for i in range(1, num_accounts + 1):
+            accounts[str(i)] = {"email": f"a{i}@example.com"}
+        data = {
+            "accounts": accounts,
+            "sequence": list(range(1, num_accounts + 1)),
+            "activeAccountNumber": 1,
+        }
+        s._write_json(s.sequence_file, data)
+        return s
+
+    def _seed_cache(self, switcher: ClaudeAccountSwitcher, payload: dict):
+        from claude_swap.cache import write_cache
+        cache_path = switcher.backup_dir / "cache" / "usage.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        write_cache(cache_path, payload)
+
+    def test_cold_cache_returns_none(self, temp_home: Path):
+        """No usage cache → return None so caller falls back to round-robin.
+        This is the load-bearing 'first run' contract."""
+        s = self._bootstrap(temp_home)
+        # All switchable but no cache → all bucket-2 → return None
+        with patch.object(s, "_account_is_switchable", return_value=True):
+            assert s._pick_best_switch_target(95) is None
+
+    def test_picks_unsaturated_over_saturated(self, temp_home: Path):
+        """When at least one slot is unsaturated, it wins regardless of
+        how soon a saturated slot would free up."""
+        s = self._bootstrap(temp_home, num_accounts=3)
+        self._seed_cache(s, {
+            "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
+            "2": {"five_hour": {"pct": 30}},  # the winner
+            "3": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T13:01:00+00:00"}},
+        })
+        with patch.object(s, "_account_is_switchable", return_value=True):
+            assert s._pick_best_switch_target(95, exclude="1") == "2"
+
+    def test_picks_soonest_reset_when_all_saturated(self, temp_home: Path):
+        """The headline use case: all accounts at limit, pick the one that
+        will free up first.  This is what the user explicitly asked for."""
+        s = self._bootstrap(temp_home, num_accounts=3)
+        self._seed_cache(s, {
+            "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}},
+            "2": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T13:30:00+00:00"}},  # soonest
+            "3": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
+        })
+        with patch.object(s, "_account_is_switchable", return_value=True):
+            assert s._pick_best_switch_target(95, exclude="1") == "2"
+
+    def test_excludes_specified_slot(self, temp_home: Path):
+        """The active account is excluded by the caller; without exclusion
+        a soonest-reset active account would otherwise re-pick itself."""
+        s = self._bootstrap(temp_home, num_accounts=3)
+        self._seed_cache(s, {
+            "1": {"five_hour": {"pct": 30}},   # active, best score
+            "2": {"five_hour": {"pct": 60}},
+            "3": {"five_hour": {"pct": 80}},
+        })
+        with patch.object(s, "_account_is_switchable", return_value=True):
+            # active=1 excluded → best of {2,3} is 2
+            assert s._pick_best_switch_target(95, exclude="1") == "2"
+
+    def test_skips_non_switchable_slots(self, temp_home: Path):
+        """A slot with great usage but no stored credentials must never
+        be returned — we'd raise SwitchError trying to activate it."""
+        s = self._bootstrap(temp_home, num_accounts=3)
+        self._seed_cache(s, {
+            "1": {"five_hour": {"pct": 80}},
+            "2": {"five_hour": {"pct": 10}},   # best by score, but unswitchable
+            "3": {"five_hour": {"pct": 50}},
+        })
+        def switchable(num):
+            return num != "2"
+        with patch.object(s, "_account_is_switchable", side_effect=switchable):
+            assert s._pick_best_switch_target(95, exclude="1") == "3"
+
+    def test_cold_cache_partial_falls_back_to_signal(self, temp_home: Path):
+        """When some slots have cache data and others don't, we still pick
+        the best of what we know — only ALL-cold returns None."""
+        s = self._bootstrap(temp_home, num_accounts=3)
+        # Only slot 2 has cached usage
+        self._seed_cache(s, {"2": {"five_hour": {"pct": 40}}})
+        with patch.object(s, "_account_is_switchable", return_value=True):
+            # Slot 2 has signal (bucket 0); slots 1 & 3 are bucket 2.
+            # exclude=1 (active), so candidates are {2, 3} → 2 wins.
+            assert s._pick_best_switch_target(95, exclude="1") == "2"
+
+
 class TestRefreshTargetBeforeActivation:
     """Lock both branches of ``_refresh_target_credentials_before_activation``:
     when a stored OAuth token is expired and the network refresh fails, the

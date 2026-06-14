@@ -338,9 +338,11 @@ def _auto_perform_switch(stdscr, switcher: ClaudeAccountSwitcher, pct: float | N
     try:
         try:
             # User is watching the TUI monitor (quiet=False to show the banner)
-            # but the switch is automated, so force a fresh token like the
-            # background service path does.
-            switcher.switch(force_refresh=True)
+            # but the switch is automated.  Same contract as the background
+            # service: force a fresh token AND use the cooldown-aware picker
+            # so the user gets parked on the soonest-to-free account when
+            # everything is saturated.
+            switcher.switch(force_refresh=True, prefer_least_busy=True)
         except ClaudeSwitchError as e:
             print(f"Auto-switch error: {e}")
             log.warning("monitor switch failed: pct=%s error=%s", pct, e)

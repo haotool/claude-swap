@@ -407,9 +407,14 @@ class TestCliAutoMonitor:
         assert any("monitor switched account" in m for m in msgs), msgs
         assert switched["n"] == 1
         # Production-grade seamless contract: background monitor must use the
-        # quiet + force_refresh path so launchd output stays clean and the
-        # activated account ships with a freshly-issued OAuth token.
-        assert switched["kwargs"] == {"quiet": True, "force_refresh": True}
+        # quiet + force_refresh + cooldown-aware path so launchd output stays
+        # clean, the activated token is freshly issued, AND when multiple
+        # accounts are saturated the user parks on the soonest-to-reset one.
+        assert switched["kwargs"] == {
+            "quiet": True,
+            "force_refresh": True,
+            "prefer_least_busy": True,
+        }
 
     def test_logs_warning_when_switch_fails(self, temp_home: Path, caplog):
         switcher = ClaudeAccountSwitcher()
