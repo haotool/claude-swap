@@ -21,6 +21,10 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 003 | Structured, file-based observability for the monitor | P1 | S–M | 002 | DONE (commit `1bd3c30`, 521 passed) |
 | 004 | Multi-account health + usage in the TUI (reuse CLI renderer) | P2 | M | 001 | DONE (commit `c59de9a`, 523 passed) |
 | 005 | `cswap service` launchd background monitor (macOS) | P2 | L | 002, 003 | DONE (commit `851ce81`, 546 passed, +23 new tests) |
+| 006 | Replace duplicated auto-switch loops with one monitor engine and thin adapters | P1 | M | — | DONE (630 passed) |
+| 007 | Harden automated target planning with trusted usage snapshots and live-active identity | P1 | M | 006 | DONE (630 passed) |
+| 008 | Replace `switch()`'s boolean policy matrix with explicit types and publish one beta contract | P2 | M | 006, 007 | DONE (630 passed) |
+| 009 | Clean Code / SSOT convergence audit (plans 006–008) + phased merge roadmap | P1 | L | 006, 007, 008 | DONE (Phase 1, 628 passed) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 
@@ -36,10 +40,17 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
   removes.
 - **004 needs only 001** (it reuses the post-rebase `list_accounts` renderer) and
   can run in parallel with 002/003/005.
+- **006/007/008 form the production-grade convergence track for the beta auto-switch feature.**
+  - **006 first**: although 002 previously collapsed the CLI/service monitor into one SSOT core, `dd4536f` left the TUI monitor running an independent fixed-interval loop. 006 finishes the convergence by making TUI another adapter over the same engine.
+  - **007 after 006**: hardens automated target planning once monitor decisions come from one engine snapshot; removes stale-cache / stale-active drift from unattended switching.
+  - **008 last**: replaces the growing `switch()` boolean matrix with explicit intent types and aligns docs/contracts after 006/007 settle the real architecture.
+- **009 after 006–008**: read-only 20-department audit consolidated into `plans/009-clean-code-convergence-audit.md`. Phase 1 items are merge blockers (atomic commit, TUI PID, error boundary, poll-interval fix). Phases 2–4 track adapter/cache/intent/docs/test debt — do not re-audit the same gaps ad hoc.
 
 ```
 001 ──┬──> 002 ──> 003 ──> 005
       └──> 004
+
+006 ──> 007 ──> 008 ──> 009 (audit + Phase 1 merge gate)
 ```
 
 ## Decisions taken (by the user, 2026-06-13)
@@ -89,6 +100,8 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
 - *Move threshold/usage logic out of `switcher` into the monitor core* —
   rejected: `switcher` is already the correct SSOT for account state; the core
   should call it, not absorb it (see plan 002 scope).
+- *Keep the current TUI auto-monitor loop and only copy adaptive polling into it* — rejected: this would preserve two monitor runtimes with duplicated state machines. Plan 006 requires one engine and thin adapters.
+- *Keep cold-cache automated fallback to round-robin as a silent beta convenience* — rejected: unattended credential rotation must not guess from untrusted state. Plan 007 makes degraded planning explicit instead of hidden.
 
 ## Verification baseline
 

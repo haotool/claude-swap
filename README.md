@@ -100,22 +100,28 @@ From there you can:
 
 - **Enable/Disable** automatic switching (the setting persists across runs).
 - **Set threshold** — the usage percentage that triggers a switch (default `95%`).
-- **Start monitor now** — runs a foreground watcher that polls the active
-  account's 5h/7d usage every 60 seconds. When usage reaches the threshold, it
-  rotates to the next managed account (same rotation as `cswap --switch`), then
-  keeps watching the new account. Press `s` to check immediately, or `q`/`Esc`
-  to stop.
+- **Start monitor now** — runs the same adaptive auto-switch engine as
+  `cswap --monitor` (typically 5–60s polling based on usage velocity).
+  When usage reaches the threshold, it picks the best target using trusted
+  usage snapshots: unsaturated accounts first, otherwise the soonest
+  cooldown reset. If you are already on that account, it holds until the
+  window frees. Press `s` to check immediately, or `q`/`Esc` to stop.
 
 Because switching doesn't require a Claude Code restart (see the note above),
 the new account takes effect on your next message — on macOS once the Keychain
 cache expires. For automated paths (TUI monitor + launchd service) the target
 account's OAuth token is force-refreshed *before* activation, so the first API
 call after handoff uses a freshly-issued token with maximum remaining lifetime.
-The monitor is foreground-only; `cswap --monitor` records its PID and exits
-without starting another monitor if one is already running.
+The TUI's **Start monitor now** is foreground-only; `cswap --monitor` and
+`cswap service install` run the same engine in the background. `cswap --monitor`
+records its PID and exits without starting another monitor if one is already
+running. Manual
+`cswap --switch` still uses predictable round-robin; automated paths never
+guess from stale cache — they require fresh usage snapshots (from polling or
+`cswap --list`).
 
-> **Beta:** this feature is new and runs as a foreground watcher. The usage
-> percentages come from the same API as `cswap --list`. Please report any rough
+> **Beta:** automated switching is new. Usage percentages come from the same
+> API as `cswap --list`. Please report any rough
 > edges via [Issues](https://github.com/realiti4/claude-swap/issues).
 
 #### Run it in the background (macOS)

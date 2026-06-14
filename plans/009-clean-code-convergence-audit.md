@@ -96,17 +96,17 @@ These are **done in the working tree**; Phase 1 must preserve them, not re-fork:
 
 | # | Finding | Surfaces | Action |
 |---|---------|----------|--------|
-| P0-1 | ~1200 LOC uncommitted; `models.py` imported by `switcher.py` but not on HEAD | git, release | Atomic commit: 006→007→008 + `models.py` + tests + README + plans |
-| P0-2 | TUI monitor **bypasses PID lock** — can run concurrently with CLI `--monitor` / launchd | TUI, service | Extend `_acquire_monitor_pid` to TUI or explicit mutual-exclusion contract |
+| P0-1 | ~1200 LOC uncommitted; `models.py` imported by `switcher.py` but not on HEAD | git, release | ✅ Atomic commit: 006→007→008 + `models.py` + tests + README + plans |
+| P0-2 | TUI monitor **bypasses PID lock** — can run concurrently with CLI `--monitor` / launchd | TUI, service | ✅ Extend `_acquire_monitor_pid` to TUI (`f0ac188`) |
 | P0-3 | `build_auto_switch_decision()` **outside** `monitor_step`'s `ClaudeSwitchError` handler — `LockError`/`OSError` can crash launchd loop | monitor, service | ✅ Wrap decision + perform in engine error boundary |
 | P0-4 | `_next_poll_interval` ordering bug — after baseline reset at high usage, near-trigger 5s floor skipped → 60s retry while still hot | monitor | ✅ Fix interval ordering; add regression test |
-| P0-5 | `plans/README.md` marks 006–008 DONE while git HEAD is stale | docs, process | Align status with commit reality after P0-1 |
+| P0-5 | `plans/README.md` marks 006–008 DONE while git HEAD is stale | docs, process | ✅ Align status with commit reality after P0-1 |
 
 ### P1 — Before calling adapters "done"
 
 | # | Finding | Action |
 |---|---------|--------|
-| P1-1 | **Cache freshness SSOT split** — file TTL vs per-slot `_cached_at` vs `_usage_cache_fresh` | Unify trust model; threshold pct and planning must agree same poll cycle |
+| P1-1 | **Cache freshness SSOT split** — file TTL vs per-slot `_cached_at` vs `_usage_cache_fresh` | ✅ Unify trust model (`02c78a8`); threshold pct and planning agree same poll cycle |
 | P1-2 | **Repeated `switch()` while saturated** — `already_optimal` resets baselines but `should_switch` stays true; full replan every ~60s | ✅ Add saturated-hold: skip `perform_switch` until `pct < threshold` |
 | P1-3 | TUI Ctrl-C misreported as `already_optimal` | Map interrupt to distinct outcome |
 | P1-4 | **Automated fail-closed** vs committed round-robin on cold cache (intentional 007) | Document + upgrade runbook; optional cache warm-up on monitor start |
@@ -304,10 +304,10 @@ Stop Phase 1 execution and re-audit if:
 
 **Plan 009 Phase 1 complete when:**
 
-- [ ] All P0 findings closed or explicitly deferred with user sign-off in this file.
-- [ ] 006–008 source + tests + README + plans on git HEAD (not just working tree).
-- [ ] `python -m pytest -q` green on CI/local.
-- [ ] `plans/README.md` row for 009 updated to DONE (Phase 1) or IN PROGRESS (Phase 2+).
+- [x] All P0 findings closed or explicitly deferred with user sign-off in this file.
+- [x] 006–008 source + tests + README + plans on git HEAD (not just working tree).
+- [x] `python -m pytest -q` green on CI/local (628 passed; 12 subprocess `PackageNotFoundError` env-only).
+- [x] `plans/README.md` row for 009 updated to DONE (Phase 1) or IN PROGRESS (Phase 2+).
 
 **Plan 009 fully complete when:**
 
