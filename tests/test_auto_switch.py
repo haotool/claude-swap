@@ -828,6 +828,48 @@ class TestCliAutoMonitor:
 
         assert signal.getsignal(signal.SIGTERM) == original
 
+    def test_run_cli_monitor_exits_143_on_sigterm(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """SIGTERM during the loop raises _MonitorStopped → return code 143.
+
+        Locks in the launchd-bootout contract: `launchctl bootout` sends
+        SIGTERM, and the supervised monitor must exit cleanly (not be
+        force-killed). If a future refactor removes the signal.signal()
+        installation, the previously-passing tests in this class would
+        still pass — this one would not.
+        """
+        import signal
+
+        switcher = ClaudeAccountSwitcher()
+        installed: dict[str, object] = {}
+        original = signal.getsignal(signal.SIGTERM)
+        real_signal = signal.signal
+
+        def capture_signal(signum, handler):
+            if signum == signal.SIGTERM:
+                installed["handler"] = handler
+            return real_signal(signum, handler)
+
+        # Fire SIGTERM at the first time.sleep — the captured handler
+        # raises _MonitorStopped inside the try block.
+        def fire_sigterm_then_noop(_seconds):
+            handler = installed.pop("handler", None)
+            if handler is not None:
+                handler(signal.SIGTERM, None)
+
+        monkeypatch.setattr("claude_swap.monitor.signal.signal", capture_signal)
+        monkeypatch.setattr(
+            "claude_swap.monitor.time.sleep", fire_sigterm_then_noop
+        )
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=10.0):
+            rc = monitor.run_cli_monitor(switcher, poll_seconds=1, once=False)
+
+        assert rc == 143
+        # finally-block restored the prior handler (not the test's stop_monitor).
+        assert signal.getsignal(signal.SIGTERM) == original
+
     def test_logs_poll_and_switch_at_threshold(
         self, temp_home: Path, caplog
     ):
