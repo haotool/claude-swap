@@ -103,6 +103,21 @@ _SLOT_SCORE_BUCKET_SATURATED = 1
 _SLOT_SCORE_BUCKET_UNKNOWN = 2
 
 
+def _slot_for_identity(
+    accounts: dict,
+    email: str,
+    org_uuid: str,
+) -> str | None:
+    """Map live (email, organizationUuid) to a managed slot number."""
+    for num, account in accounts.items():
+        if (
+            account.get("email") == email
+            and (account.get("organizationUuid", "") or "") == org_uuid
+        ):
+            return str(num)
+    return None
+
+
 def _slot_switch_score(
     usage: object,
     threshold: int,
@@ -929,14 +944,9 @@ class ClaudeAccountSwitcher:
         identity = self._get_current_account()
         if identity is not None:
             current_email, current_org_uuid = identity
-            for num, account in data.get("accounts", {}).items():
-                if (
-                    account.get("email") == current_email
-                    and (account.get("organizationUuid", "") or "")
-                    == current_org_uuid
-                ):
-                    live_slot = str(num)
-                    break
+            live_slot = _slot_for_identity(
+                data.get("accounts", {}), current_email, current_org_uuid,
+            )
 
         return live_slot, sequence_slot_str
 
@@ -998,14 +1008,9 @@ class ClaudeAccountSwitcher:
         active_num: str | None = None
         if current_identity is not None:
             current_email, current_org_uuid = current_identity
-            for num, account in data.get("accounts", {}).items():
-                if (
-                    account.get("email") == current_email
-                    and (account.get("organizationUuid", "") or "")
-                    == current_org_uuid
-                ):
-                    active_num = num
-                    break
+            active_num = _slot_for_identity(
+                data.get("accounts", {}), current_email, current_org_uuid,
+            )
 
         accounts_info: list[tuple[int, str, bool, str]] = []
         for num in data.get("sequence", []):
@@ -1953,16 +1958,12 @@ class ClaudeAccountSwitcher:
 
         data = self._get_sequence_data_migrated()
         current_identity = self._get_current_account()
-
-        # Find active account number by (email, organizationUuid) composite key
         active_num = None
         if current_identity is not None:
             current_email, current_org_uuid = current_identity
-            for num, account in data.get("accounts", {}).items():
-                if (account.get("email") == current_email and
-                        account.get("organizationUuid", "") == current_org_uuid):
-                    active_num = num
-                    break
+            active_num = _slot_for_identity(
+                data.get("accounts", {}), current_email, current_org_uuid,
+            )
 
         accounts_info = []
         health_notes: dict[str, list[str]] = {}
@@ -2292,14 +2293,10 @@ class ClaudeAccountSwitcher:
         if not creds or not oauth.extract_access_token(creds):
             return None
 
-        # Resolve the active account number for cache keying (best-effort).
-        account_num = None
         data = self._get_sequence_data() or {}
-        for num, account in data.get("accounts", {}).items():
-            if (account.get("email") == current_email and
-                    account.get("organizationUuid", "") == current_org_uuid):
-                account_num = num
-                break
+        account_num = _slot_for_identity(
+            data.get("accounts", {}), current_email, current_org_uuid,
+        )
 
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
         usage = None
