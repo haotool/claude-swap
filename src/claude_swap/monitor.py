@@ -191,6 +191,7 @@ class MonitorRuntimeState:
     consecutive_failures: int = 0
     last_switch_error: str | None = None
     saturated_hold: bool = False
+    usage_cache_warmed: bool = False
     idle_started_wall: float | None = None
     idle_heartbeat_at: float = 0.0
 
@@ -208,6 +209,37 @@ class MonitorStepResult:
     switch_error: str | None = None
     user_message: str = ""
     consecutive_failures: int = 0
+
+
+def _warm_usage_cache_on_first_poll(
+    switcher: ClaudeAccountSwitcher,
+    state: MonitorRuntimeState,
+    log,
+) -> None:
+    """One-shot cache refresh when monitor starts with incomplete snapshots."""
+    if state.usage_cache_warmed:
+        return
+    state.usage_cache_warmed = True
+
+    data = switcher._get_sequence_data() or {}
+    switchable = [
+        str(num)
+        for num in data.get("sequence", [])
+        if switcher._account_is_switchable(str(num))
+    ]
+    if not switchable:
+        return
+
+    snapshots = switcher._trusted_usage_snapshots()
+    if len(snapshots) >= len(switchable):
+        return
+
+    log.info(
+        "monitor: warming usage cache (%d/%d trusted snapshots)",
+        len(snapshots),
+        len(switchable),
+    )
+    switcher._refresh_switchable_usage_cache()
 
 
 def monitor_step(
@@ -275,6 +307,8 @@ def monitor_step(
 
     state.idle_started_wall = None
     state.idle_heartbeat_at = 0.0
+
+    _warm_usage_cache_on_first_poll(switcher, state, log)
 
     if (
         state.last_wall_time is not None
