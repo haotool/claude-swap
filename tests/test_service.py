@@ -191,6 +191,36 @@ class TestUninstall:
 
 
 class TestStatus:
+    def test_service_state_not_installed(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _force_darwin(monkeypatch)
+        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        assert service.service_state() == "not installed"
+
+    def test_service_state_installed_but_not_loaded(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _force_darwin(monkeypatch)
+        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path.parent.mkdir(parents=True)
+        plist_path.write_bytes(b"<plist/>")
+        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(returncode=113))
+        assert service.service_state() == "installed but not loaded"
+
+    def test_service_state_loaded(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _force_darwin(monkeypatch)
+        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path.parent.mkdir(parents=True)
+        plist_path.write_bytes(b"<plist/>")
+        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(stdout="state = running"))
+        assert service.service_state() == "loaded"
+
     def test_not_installed(
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ):

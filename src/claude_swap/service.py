@@ -178,10 +178,22 @@ def _installed_version() -> str | None:
         return None
 
 
+def service_state() -> str:
+    """Return ``not installed``, ``installed but not loaded``, or ``loaded``."""
+    _require_macos()
+    if not _plist_path().exists():
+        return "not installed"
+    proc = _launchctl("print", _launchd_service_target(), check=False)
+    if proc.returncode != 0:
+        return "installed but not loaded"
+    return "loaded"
+
+
 def status(switcher: ClaudeAccountSwitcher) -> int:
     """Print a short summary: not installed / installed-but-not-loaded / loaded."""
     _require_macos()
-    if not _plist_path().exists():
+    state = service_state()
+    if state == "not installed":
         print(f"{bolded('Service:')} {dimmed('not installed')}")
         return 0
 
@@ -195,11 +207,12 @@ def status(switcher: ClaudeAccountSwitcher) -> int:
             "Run `cswap service install` to restart on the new version."
         )
 
-    proc = _launchctl("print", _launchd_service_target(), check=False)
-    if proc.returncode != 0:
+    if state == "installed but not loaded":
         print(f"{bolded('Service:')} {accent('installed but not loaded')}")
         print(f"  {dimmed('run `cswap service install` to (re)load it')}")
         return 0
+
+    proc = _launchctl("print", _launchd_service_target(), check=False)
     # ``launchctl print`` is verbose; surface only the state / pid / last exit
     # lines so the output stays scannable.
     print(f"{bolded('Service:')} {accent('loaded')} {muted(SERVICE_LABEL)}")

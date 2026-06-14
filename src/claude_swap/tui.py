@@ -245,19 +245,17 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
                 except ClaudeSwitchError as e:
                     _show_message(stdscr, f"Invalid threshold: {e}", is_error=True)
         elif choice == "service-toggle":
-            if sys.platform != "darwin":
-                _show_message(
-                    stdscr,
-                    "Background service is currently macOS-only. "
-                    "Use the foreground monitor on this platform.",
-                    is_error=True,
-                )
-            elif service_state == "installed":
+            if service_state == "unsupported":
+                _show_service_unsupported(stdscr)
+            elif service_state in ("installed but not loaded", "loaded"):
                 _shell_out(stdscr, lambda: service.uninstall(switcher))
             else:
                 _shell_out(stdscr, lambda: service.install(switcher))
         elif choice == "service-status":
-            _shell_out(stdscr, lambda: service.status(switcher))
+            if service_state == "unsupported":
+                _show_service_unsupported(stdscr)
+            else:
+                _shell_out(stdscr, lambda: service.status(switcher))
         elif choice == "start":
             cfg = switcher.get_auto_switch_config()
             if not cfg["enabled"]:
@@ -416,16 +414,26 @@ def _service_state() -> str:
     """Return a compact background-service state for the TUI."""
     if sys.platform != "darwin":
         return "unsupported"
-    return "installed" if service._plist_path().exists() else "not installed"
+    return service.service_state()
 
 
 def _service_menu_label(service_state: str) -> str:
     """TUI label for the background-service toggle action."""
     if service_state == "unsupported":
         return "Background service: unavailable on this platform"
-    if service_state == "installed":
+    if service_state in ("installed but not loaded", "loaded"):
         return "Background service: Uninstall"
     return "Background service: Install"
+
+
+def _show_service_unsupported(stdscr) -> None:
+    """Render a consistent TUI error for macOS-only service actions."""
+    _show_message(
+        stdscr,
+        "Background service is currently macOS-only. "
+        "Use the foreground monitor on this platform.",
+        is_error=True,
+    )
 
 
 def _account_items(switcher: ClaudeAccountSwitcher) -> list[tuple[str, str]]:
