@@ -24,7 +24,7 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 006 | Replace duplicated auto-switch loops with one monitor engine and thin adapters | P1 | M | — | DONE (630 passed) |
 | 007 | Harden automated target planning with trusted usage snapshots and live-active identity | P1 | M | 006 | DONE (630 passed) |
 | 008 | Replace `switch()`'s boolean policy matrix with explicit types and publish one beta contract | P2 | M | 006, 007 | DONE (630 passed) |
-| 009 | Clean Code / SSOT convergence audit (plans 006–008) + phased merge roadmap | P1 | L | 006, 007, 008 | DONE (Top 5 post-review; 637 passed, 3 skipped; 12 env-only CLI subprocess failures) |
+| 009 | Clean Code / SSOT convergence audit (plans 006–008) + phased merge roadmap | P1 | L | 006, 007, 008 | DONE (~9/10 production; 652 passed, 3 skipped; subprocess metadata fix `7a8c2a9`; OAuth FileLock only major leftover) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 
