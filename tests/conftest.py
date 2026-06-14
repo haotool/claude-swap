@@ -9,11 +9,60 @@ import sys
 import tempfile
 import types
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from claude_swap import macos_keychain as _macos_keychain
+from claude_swap.switcher import ClaudeAccountSwitcher
+
+
+def stub_screen(rows: int = 30, cols: int = 100) -> MagicMock:
+    """Return a MagicMock that quacks like a curses window."""
+    screen = MagicMock()
+    screen.getmaxyx.return_value = (rows, cols)
+    return screen
+
+
+def bootstrap_switchable_accounts(
+    temp_home: Path,
+    num_accounts: int,
+) -> ClaudeAccountSwitcher:
+    """Seed ``num_accounts`` switchable slots plus an active login."""
+    switcher = ClaudeAccountSwitcher()
+    switcher._setup_directories()
+    accounts: dict = {}
+    sequence: list[int] = []
+    for i in range(1, num_accounts + 1):
+        accounts[str(i)] = {"email": f"a{i}@example.com"}
+        sequence.append(i)
+    data = {
+        "accounts": accounts,
+        "sequence": sequence,
+        "activeAccountNumber": 1 if sequence else None,
+    }
+    switcher._write_json(switcher.sequence_file, data)
+    (temp_home / ".claude").mkdir(parents=True, exist_ok=True)
+    (temp_home / ".claude.json").write_text(
+        json.dumps({
+            "oauthAccount": {
+                "emailAddress": "a1@example.com",
+                "accountUuid": "uuid-1",
+            },
+        })
+    )
+    return switcher
+
+
+@pytest.fixture
+def stub_live_claude():
+    """Pretend a default-mode Claude Code process is always running."""
+    with patch.object(
+        ClaudeAccountSwitcher,
+        "_live_default_mode_claude_pids",
+        return_value=[99999],
+    ):
+        yield
 
 
 class _KeychainStore:

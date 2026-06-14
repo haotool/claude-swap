@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import bootstrap_switchable_accounts, stub_screen
+
 from claude_swap import monitor, oauth, tui
 from claude_swap.exceptions import ClaudeSwitchError, SwitchError, ValidationError
 from claude_swap.models import (
@@ -28,12 +30,6 @@ from claude_swap.switcher import (
 )
 
 
-def _stub_screen(rows: int = 30, cols: int = 100) -> MagicMock:
-    screen = MagicMock()
-    screen.getmaxyx.return_value = (rows, cols)
-    return screen
-
-
 def _login(temp_home: Path, email: str = "u@example.com") -> None:
     config = {"oauthAccount": {"emailAddress": email}}
     (temp_home / ".claude.json").write_text(json.dumps(config))
@@ -42,35 +38,6 @@ def _login(temp_home: Path, email: str = "u@example.com") -> None:
 # --------------------------------------------------------------------------- #
 # SwitchIntent contract (Background vs Interactive)                             #
 # --------------------------------------------------------------------------- #
-
-
-def _bootstrap_switchable_accounts(
-    temp_home: Path,
-    num_accounts: int,
-) -> ClaudeAccountSwitcher:
-    switcher = ClaudeAccountSwitcher()
-    switcher._setup_directories()
-    accounts: dict = {}
-    sequence: list[int] = []
-    for i in range(1, num_accounts + 1):
-        accounts[str(i)] = {"email": f"a{i}@example.com"}
-        sequence.append(i)
-    data = {
-        "accounts": accounts,
-        "sequence": sequence,
-        "activeAccountNumber": 1 if sequence else None,
-    }
-    switcher._write_json(switcher.sequence_file, data)
-    (temp_home / ".claude").mkdir(parents=True, exist_ok=True)
-    (temp_home / ".claude.json").write_text(
-        json.dumps({
-            "oauthAccount": {
-                "emailAddress": "a1@example.com",
-                "accountUuid": "uuid-1",
-            },
-        })
-    )
-    return switcher
 
 
 class TestSwitchIntentContract:
@@ -87,7 +54,7 @@ class TestSwitchIntentContract:
         )
 
     def test_background_single_account_raises(self, temp_home: Path, capsys):
-        switcher = _bootstrap_switchable_accounts(temp_home, num_accounts=1)
+        switcher = bootstrap_switchable_accounts(temp_home, num_accounts=1)
         decision = self._single_account_decision()
         with pytest.raises(SwitchError, match="Only one account"):
             switcher.switch(BackgroundAutoSwitchIntent(decision=decision))
@@ -96,7 +63,7 @@ class TestSwitchIntentContract:
     def test_interactive_single_account_prints_and_returns(
         self, temp_home: Path, capsys,
     ):
-        switcher = _bootstrap_switchable_accounts(temp_home, num_accounts=1)
+        switcher = bootstrap_switchable_accounts(temp_home, num_accounts=1)
         decision = self._single_account_decision()
         switched = switcher.switch(InteractiveAutoSwitchIntent(decision=decision))
         out = capsys.readouterr().out
@@ -106,7 +73,7 @@ class TestSwitchIntentContract:
     def test_background_no_trusted_signal_raises_without_stdout(
         self, temp_home: Path, capsys,
     ):
-        switcher = _bootstrap_switchable_accounts(temp_home, num_accounts=3)
+        switcher = bootstrap_switchable_accounts(temp_home, num_accounts=3)
         decision = switcher.build_auto_switch_decision(95, 99.0)
         with pytest.raises(SwitchError, match="Cannot choose auto-switch target"):
             switcher.switch(BackgroundAutoSwitchIntent(decision=decision))
@@ -115,7 +82,7 @@ class TestSwitchIntentContract:
     def test_interactive_no_trusted_signal_prints_then_raises(
         self, temp_home: Path, capsys,
     ):
-        switcher = _bootstrap_switchable_accounts(temp_home, num_accounts=3)
+        switcher = bootstrap_switchable_accounts(temp_home, num_accounts=3)
         decision = switcher.build_auto_switch_decision(95, 99.0)
         with pytest.raises(SwitchError, match="Cannot choose auto-switch target"):
             switcher.switch(InteractiveAutoSwitchIntent(decision=decision))
@@ -263,7 +230,7 @@ class TestShouldSwitch:
 class TestDoAutoSwitch:
     def test_toggle_enables(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         # Enter on "Enable" (idx 0), then Esc to leave the settings screen.
         screen.getch.side_effect = [10, 27]
         tui._do_auto_switch(screen, switcher)
@@ -271,26 +238,27 @@ class TestDoAutoSwitch:
 
     def test_back_does_nothing(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [27]  # Esc immediately
         tui._do_auto_switch(screen, switcher)
         assert switcher.get_auto_switch_config()["enabled"] is False
 
     def test_set_threshold_via_prompt(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
-        # Down to "Set threshold" (idx 1) + Enter, type "80" + Enter, then Esc.
-        keys = [tui.curses.KEY_DOWN, 10]
-        keys += [ord("8"), ord("0"), 10]
-        keys += [27]
-        screen.getch.side_effect = keys
-        with patch("claude_swap.tui.curses.curs_set"):
+        screen = stub_screen()
+        # Select by menu value, not KEY_DOWN index — survives label reordering.
+        screen.getch.side_effect = [ord("8"), ord("0"), 10, 27]
+        with patch("claude_swap.tui.curses.curs_set"), \
+             patch(
+                 "claude_swap.tui._select_from",
+                 side_effect=["threshold", None],
+             ):
             tui._do_auto_switch(screen, switcher)
         assert switcher.get_auto_switch_config()["threshold"] == 80
 
     def test_service_toggle_installs_on_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         # Down to "Background service: Install" (idx 2) + Enter, then Esc.
         screen.getch.side_effect = [tui.curses.KEY_DOWN, tui.curses.KEY_DOWN, 10, 27]
 
@@ -307,7 +275,7 @@ class TestDoAutoSwitch:
 
     def test_service_toggle_uninstalls_on_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [tui.curses.KEY_DOWN, tui.curses.KEY_DOWN, 10, 27]
 
         with patch("claude_swap.tui.sys.platform", "darwin"), \
@@ -323,7 +291,7 @@ class TestDoAutoSwitch:
 
     def test_service_status_shells_out(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         # Down to "Background service: Show status" (idx 3) + Enter, then Esc.
         screen.getch.side_effect = [
             tui.curses.KEY_DOWN,
@@ -344,7 +312,7 @@ class TestDoAutoSwitch:
 
     def test_service_status_shows_error_off_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [
             tui.curses.KEY_DOWN,
             tui.curses.KEY_DOWN,
@@ -364,7 +332,7 @@ class TestDoAutoSwitch:
 
     def test_service_toggle_shows_error_off_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [tui.curses.KEY_DOWN, tui.curses.KEY_DOWN, 10, 27]
 
         with patch("claude_swap.tui.sys.platform", "linux"), \
@@ -385,19 +353,11 @@ class TestDoAutoSwitch:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("stub_live_claude")
 class TestRunAutoMonitor:
-    @pytest.fixture(autouse=True)
-    def _stub_live_claude(self):
-        with patch.object(
-            ClaudeAccountSwitcher,
-            "_live_default_mode_claude_pids",
-            return_value=[99999],
-        ):
-            yield
-
     def test_quits_without_switching_below_threshold(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
         with patch.object(
             switcher, "get_auto_switch_config",
@@ -412,7 +372,7 @@ class TestRunAutoMonitor:
 
     def test_switches_when_threshold_reached(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
         with patch.object(
             switcher, "get_auto_switch_config",
@@ -449,7 +409,7 @@ class TestRunAutoMonitor:
         """TUI adapter must sleep using engine-provided next_interval, not a
         fixed 60s cadence."""
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
         with patch.object(
             switcher, "get_auto_switch_config",
@@ -477,7 +437,7 @@ class TestRunAutoMonitor:
     def test_blocks_when_cli_monitor_already_running(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.return_value = ord("q")
 
         with patch("claude_swap.tui._acquire_monitor_pid", return_value=12345), \
@@ -492,7 +452,7 @@ class TestRunAutoMonitor:
 
     def test_draws_threshold_from_engine_result(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
         with patch.object(
             switcher, "get_auto_switch_config",
@@ -540,16 +500,8 @@ class TestRunAutoMonitor:
         assert result.kind != "already_optimal"
 
 
+@pytest.mark.usefixtures("stub_live_claude")
 class TestMonitorEngine:
-    @pytest.fixture(autouse=True)
-    def _stub_live_claude(self):
-        with patch.object(
-            ClaudeAccountSwitcher,
-            "_live_default_mode_claude_pids",
-            return_value=[99999],
-        ):
-            yield
-
     def test_step_already_optimal_does_not_call_switch(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
@@ -712,6 +664,44 @@ class TestMonitorEngine:
         assert result.next_interval == monitor.MONITOR_FAILURE_BACKOFF_BASE
         assert "unavailable" in result.user_message.lower()
 
+    def test_warms_usage_cache_on_first_poll_only(
+        self, temp_home: Path,
+    ):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(
+            switcher.sequence_file,
+            {
+                "accounts": {
+                    "1": {"email": "a1@example.com"},
+                    "2": {"email": "a2@example.com"},
+                },
+                "sequence": [1, 2],
+                "activeAccountNumber": 1,
+            },
+        )
+        state = monitor.MonitorRuntimeState()
+        perform = MagicMock(return_value=False)
+
+        with patch.object(
+            switcher, "get_auto_switch_config",
+            return_value={"enabled": True, "threshold": 95},
+        ), patch.object(switcher, "get_active_usage_pct", return_value=10.0), \
+             patch.object(switcher, "_account_is_switchable", return_value=True), \
+             patch.object(switcher, "_trusted_usage_snapshots", return_value={}), \
+             patch.object(
+                 switcher, "_refresh_switchable_usage_cache",
+             ) as mock_refresh:
+            monitor.monitor_step(
+                switcher, state, poll_seconds=0, perform_switch=perform,
+            )
+            monitor.monitor_step(
+                switcher, state, poll_seconds=0, perform_switch=perform,
+            )
+
+        mock_refresh.assert_called_once()
+        assert state.usage_cache_warmed is True
+
 
 # --------------------------------------------------------------------------- #
 # Monitor PID lifecycle (launchd exclusivity)                                  #
@@ -752,21 +742,8 @@ class TestMonitorPidLifecycle:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.usefixtures("stub_live_claude")
 class TestCliAutoMonitor:
-    @pytest.fixture(autouse=True)
-    def _stub_live_claude(self):
-        """The adaptive monitor short-circuits to idle when no default-mode
-        Claude Code processes are running.  These tests pretend one process
-        is always present so the usage-API path is exercised; the dedicated
-        idle test below overrides this with an empty list.
-        """
-        with patch.object(
-            ClaudeAccountSwitcher,
-            "_live_default_mode_claude_pids",
-            return_value=[99999],
-        ):
-            yield
-
     def test_does_not_start_when_existing_pid_is_running(self, temp_home: Path, capsys):
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
@@ -1108,20 +1085,12 @@ class TestNextPollInterval:
         assert out == 15
 
 
+@pytest.mark.usefixtures("stub_live_claude")
 class TestSleepWakeAndHeartbeat:
     """Round-2 review additions: sleep/wake baseline reset and idle heartbeat
     for the schema-break safety net.  Both are operational guardrails for
     monitor.err observability.
     """
-
-    @pytest.fixture(autouse=True)
-    def _stub_live_claude(self):
-        with patch.object(
-            ClaudeAccountSwitcher,
-            "_live_default_mode_claude_pids",
-            return_value=[99999],
-        ):
-            yield
 
     def test_wake_gap_resets_baseline_and_last_switch_error(
         self, temp_home: Path, caplog,

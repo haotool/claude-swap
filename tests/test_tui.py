@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import stub_screen
+
 from claude_swap import tui
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -20,13 +22,6 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
 # --------------------------------------------------------------------------- #
-
-
-def _stub_screen(rows: int = 30, cols: int = 100) -> MagicMock:
-    """Return a MagicMock that quacks like a curses window."""
-    screen = MagicMock()
-    screen.getmaxyx.return_value = (rows, cols)
-    return screen
 
 
 def _make_seq(temp_home: Path, accounts: list[tuple[str, str]] | None = None) -> Path:
@@ -104,7 +99,7 @@ class TestAccountItems:
 
 class TestSelectFrom:
     def test_returns_value_on_enter(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         # press down once, then enter
         screen.getch.side_effect = [tui.curses.KEY_DOWN, 10]
         result = tui._select_from(
@@ -115,19 +110,19 @@ class TestSelectFrom:
         assert result == "b"
 
     def test_returns_none_on_escape(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [27]  # Esc
         result = tui._select_from(screen, "t", items=[("x", "1")])
         assert result is None
 
     def test_returns_none_on_q(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
         result = tui._select_from(screen, "t", items=[("x", "1")])
         assert result is None
 
     def test_wrap_around_on_up_at_top(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [tui.curses.KEY_UP, 10]
         result = tui._select_from(
             screen, "t",
@@ -136,7 +131,7 @@ class TestSelectFrom:
         assert result == "3"  # wrapped to last
 
     def test_cancel_sentinel_returns_none(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [tui.curses.KEY_DOWN, 10]
         # second item has value=None — selecting it should return None
         result = tui._select_from(
@@ -154,7 +149,7 @@ class TestSelectFrom:
 class TestDoSwitch:
     def test_no_accounts_shows_message(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.return_value = ord("q")  # dismiss the message
         tui._do_switch(screen, switcher)
         # Should NOT call switch_to
@@ -166,7 +161,7 @@ class TestDoSwitch:
         (temp_home / ".claude.json").write_text(json.dumps(config))
         switcher = ClaudeAccountSwitcher()
 
-        screen = _stub_screen()
+        screen = stub_screen()
         # Pick the second item (slot 2) with one DOWN + ENTER
         screen.getch.side_effect = [tui.curses.KEY_DOWN, 10, ord("\n")]
 
@@ -185,7 +180,7 @@ class TestDoSwitch:
         (temp_home / ".claude.json").write_text(json.dumps(config))
         switcher = ClaudeAccountSwitcher()
 
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [27]  # Esc on selection screen
 
         with patch.object(switcher, "switch_to") as mock_switch:
@@ -197,7 +192,7 @@ class TestDoSwitch:
 class TestDoAdd:
     def test_login_path_calls_add_account(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         # First menu: Enter on "From current Claude Code login" (idx 0)
         screen.getch.side_effect = [10]
         with patch.object(switcher, "add_account") as mock_add, \
@@ -210,7 +205,7 @@ class TestDoAdd:
 
     def test_token_option_only_when_method_exists(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [27]  # cancel out
 
         with patch.object(switcher, "add_account") as _:
@@ -225,7 +220,7 @@ class TestDoAdd:
         # Stub add_account_from_token onto the instance
         switcher.add_account_from_token = MagicMock()
 
-        screen = _stub_screen()
+        screen = stub_screen()
 
         # Sequence:
         #   menu: DOWN once (to "From a setup-token") + ENTER
@@ -251,7 +246,7 @@ class TestDoAdd:
 class TestDoRemove:
     def test_no_accounts_shows_message(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.return_value = ord("q")
         with patch.object(switcher, "remove_account") as mock_rm:
             tui._do_remove(screen, switcher)
@@ -261,7 +256,7 @@ class TestDoRemove:
         _make_seq(temp_home, [("1", "a@x.com")])
         switcher = ClaudeAccountSwitcher()
 
-        screen = _stub_screen()
+        screen = stub_screen()
         # pick slot 1 + Enter, then type "n" + Enter on confirm prompt
         keys = [10]  # pick first item
         keys += [ord("n"), 10]  # confirm: "n"
@@ -277,7 +272,7 @@ class TestDoRemove:
         _make_seq(temp_home, [("3", "x@y.com")])
         switcher = ClaudeAccountSwitcher()
 
-        screen = _stub_screen()
+        screen = stub_screen()
         keys = [10]  # pick first slot
         keys += [ord("y"), 10]  # confirm: y
         screen.getch.side_effect = keys
@@ -316,7 +311,7 @@ class TestMainLoopHealth:
         switcher._get_sequence_data_migrated.return_value = None
         switcher._get_current_account.return_value = None
 
-        screen = _stub_screen(rows=40, cols=120)
+        screen = stub_screen(rows=40, cols=120)
         # Menu order (post-edit): switch, add, remove, refresh, list, health(5),
         # status, auto, quit(8). Pick "health" (idx 5), then "quit" (idx 8).
         screen.getch.side_effect = (
@@ -349,7 +344,7 @@ class TestMainLoopHealth:
         switcher._get_sequence_data_migrated.return_value = None
         switcher._get_current_account.return_value = None
 
-        screen = _stub_screen(rows=40, cols=120)
+        screen = stub_screen(rows=40, cols=120)
         # Pick "list" (idx 4), then "quit" (idx 8).
         screen.getch.side_effect = (
             self._select_keys(4) + self._select_keys(8)
