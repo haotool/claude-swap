@@ -137,6 +137,23 @@ The service runs the same `cswap --monitor` loop under launchd
 (`com.claude-swap.monitor`), restarting it if it crashes and logging to
 `<backup_dir>/logs/`. `cswap --monitor` remains available for a foreground run.
 
+#### Failure modes and upgrade
+
+Automated switching is **fail-closed**: it never guesses from stale cache.
+Manual `cswap --switch` still uses round-robin.
+
+| Symptom | Meaning | What to do |
+|---------|---------|------------|
+| `no trusted usage snapshots` / `Cannot choose auto-switch target` | Usage cache is cold or expired at threshold — the monitor will not rotate blindly | Run `cswap --list` to seed fresh snapshots (do this on every machine with auto-switch enabled **before** upgrading) |
+| `already on optimal` / hold at threshold | You are already on the soonest-to-free account; rotation would not help | Expected — wait for the cooldown window to reset |
+| `Only one account` (background monitor) | Auto-switch needs at least two managed accounts | Add another account with `cswap --add-account` |
+| Monitor idle / no switches after upgrade | Background service may still be on an old build or cold cache | After upgrading: run `cswap --list`, then `cswap service install` (macOS), then `cswap service status` |
+
+**Upgrade checklist (beta)**
+
+1. **Before deploy:** `cswap --list` on each machine with auto-switch enabled.
+2. **After deploy:** `cswap service install` (macOS background users), verify `cswap service status`, tail `monitor.err` or `claude-swap.log` for the first threshold event.
+
 ### Refresh expired tokens
 
 If an account's token expires, log back into Claude Code with that account and re-run:
