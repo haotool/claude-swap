@@ -221,7 +221,7 @@ class TestDoAutoSwitch:
         screen.getch.side_effect = [tui.curses.KEY_DOWN, tui.curses.KEY_DOWN, 10, 27]
 
         with patch("claude_swap.tui.sys.platform", "darwin"), \
-             patch("claude_swap.tui._service_state", return_value="installed"), \
+             patch("claude_swap.tui._service_state", return_value="loaded"), \
              patch("claude_swap.tui._shell_out") as mock_shell:
             tui._do_auto_switch(screen, switcher)
 
@@ -252,6 +252,26 @@ class TestDoAutoSwitch:
             fn()
         mock_status.assert_called_once_with(switcher)
 
+    def test_service_status_shows_error_off_macos(self, temp_home: Path):
+        switcher = ClaudeAccountSwitcher()
+        screen = _stub_screen()
+        screen.getch.side_effect = [
+            tui.curses.KEY_DOWN,
+            tui.curses.KEY_DOWN,
+            tui.curses.KEY_DOWN,
+            10,
+            27,
+        ]
+
+        with patch("claude_swap.tui.sys.platform", "linux"), \
+             patch("claude_swap.tui._service_state", return_value="unsupported"), \
+             patch("claude_swap.tui._show_message") as mock_message, \
+             patch("claude_swap.tui._shell_out") as mock_shell:
+            tui._do_auto_switch(screen, switcher)
+
+        mock_message.assert_called_once()
+        mock_shell.assert_not_called()
+
     def test_service_toggle_shows_error_off_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = _stub_screen()
@@ -263,6 +283,11 @@ class TestDoAutoSwitch:
             tui._do_auto_switch(screen, switcher)
 
         mock_message.assert_called_once()
+
+    def test_service_menu_label_for_installed_but_not_loaded(self):
+        assert tui._service_menu_label("installed but not loaded") == (
+            "Background service: Uninstall"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -300,6 +325,20 @@ class TestRunAutoMonitor:
 
 
 class TestCliAutoMonitor:
+    @pytest.fixture(autouse=True)
+    def _stub_live_claude(self):
+        """The adaptive monitor short-circuits to idle when no default-mode
+        Claude Code processes are running.  These tests pretend one process
+        is always present so the usage-API path is exercised; the dedicated
+        idle test below overrides this with an empty list.
+        """
+        with patch.object(
+            ClaudeAccountSwitcher,
+            "_live_default_mode_claude_pids",
+            return_value=[99999],
+        ):
+            yield
+
     def test_does_not_start_when_existing_pid_is_running(self, temp_home: Path, capsys):
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
@@ -431,3 +470,164 @@ class TestCliAutoMonitor:
 
         assert code == 0
         mock_switch.assert_called_once()
+
+    def test_monitor_idles_when_no_live_claude_sessions(
+        self, temp_home: Path, caplog,
+    ):
+        """Phase 4 short-circuit: with zero default-mode Claude Code processes
+        running there is nothing burning tokens, so the monitor skips the
+        usage API call entirely and idles at the polling ceiling.  Override
+        the class-level fixture's return value to simulate the idle state.
+        """
+        switcher = ClaudeAccountSwitcher()
+        caplog.set_level(logging.INFO, logger="claude-swap")
+
+        with patch.object(
+            ClaudeAccountSwitcher,
+            "_live_default_mode_claude_pids",
+            return_value=[],
+        ), patch.object(switcher, "get_active_usage_pct") as mock_usage, \
+           patch.object(switcher, "switch") as mock_switch:
+            monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
+
+        # Usage API is NOT consulted while idle — that's the whole point of
+        # the optimisation; otherwise we'd waste an HTTP call per cycle.
+        mock_usage.assert_not_called()
+        mock_switch.assert_not_called()
+        msgs = [r.getMessage() for r in caplog.records if r.name == "claude-swap"]
+        assert any("no live Claude Code sessions" in m for m in msgs), msgs
+
+    def test_monitor_backs_off_on_consecutive_usage_failures(
+        self, temp_home: Path, caplog,
+    ):
+        """Phase 3 backoff: when the usage API returns None, the failure
+        counter increments and the next poll interval grows exponentially.
+        We exercise the in-process counter by running the loop multiple times
+        through the (mocked) sleep boundary, verifying logged backoff values.
+        """
+        switcher = ClaudeAccountSwitcher()
+        caplog.set_level(logging.WARNING, logger="claude-swap")
+
+        sleeps: list[int] = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            # Bail out after 3 backoffs so the test always terminates.
+            if len(sleeps) >= 3:
+                raise monitor._MonitorStopped
+
+        with patch.object(switcher, "get_active_usage_pct", return_value=None), \
+             patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
+            monitor.run_cli_monitor(switcher)  # uses real MAX = 60
+
+        # Backoffs follow BASE * 2^(n-1) clamped at MAX:
+        # n=1 → 5, n=2 → 10, n=3 → 20.
+        assert sleeps == [5, 10, 20]
+
+        # Each failure is logged as a warning naming the consecutive count.
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "claude-swap" and r.levelno == logging.WARNING
+        ]
+        assert any("failures=1" in m for m in warnings), warnings
+        assert any("failures=3" in m for m in warnings), warnings
+
+
+# --------------------------------------------------------------------------- #
+# Adaptive polling pure functions                                              #
+# --------------------------------------------------------------------------- #
+
+
+class TestNextPollInterval:
+    """Lock the behaviour contract of the velocity-based interval picker.
+
+    These tests cover the design assumptions that callers (the monitor loop)
+    can safely rely on: bounds, idle handling, near-trigger override, and
+    the test-friendly t_max=0 degradation.
+    """
+
+    def test_returns_zero_when_t_max_zero(self):
+        """Test contract: poll_seconds=0 propagates as a 0-second sleep so
+        existing once=True fixtures finish in milliseconds."""
+        assert monitor._next_poll_interval(50.0, 40.0, 1.0, 95, t_max=0) == 0
+
+    def test_returns_t_max_without_baseline(self):
+        """First iteration, no previous sample → no velocity → idle at max."""
+        assert monitor._next_poll_interval(50.0, None, 0.0, 95) == monitor.MONITOR_POLL_SECONDS
+
+    def test_returns_t_max_when_velocity_zero(self):
+        """User idle: same pct, no token consumption — slow poll is correct."""
+        out = monitor._next_poll_interval(50.0, 50.0, 60.0, 95)
+        assert out == monitor.MONITOR_POLL_SECONDS
+
+    def test_returns_t_max_when_velocity_negative(self):
+        """Post-switch drop: clamps to idle rather than computing negative ETA."""
+        out = monitor._next_poll_interval(20.0, 50.0, 60.0, 95)
+        assert out == monitor.MONITOR_POLL_SECONDS
+
+    def test_returns_t_min_at_near_trigger_ratio(self):
+        """At ≥ NEAR_TRIGGER_RATIO * threshold, ignore velocity and force the
+        floor.  For threshold=95 and ratio=0.95 the override fires at 90.25%.
+        """
+        out = monitor._next_poll_interval(91.0, 50.0, 60.0, 95)
+        assert out == monitor.MONITOR_POLL_SECONDS_MIN
+
+    def test_near_trigger_override_fires_even_when_velocity_zero(self):
+        """The override doesn't care about velocity — at the final approach a
+        single bursty prompt can blow through the remaining budget."""
+        out = monitor._next_poll_interval(94.0, 94.0, 60.0, 95)
+        assert out == monitor.MONITOR_POLL_SECONDS_MIN
+
+    def test_predicted_interval_within_bounds(self):
+        """Positive velocity: schedule the next poll well before predicted
+        threshold crossing.  Result must land inside [MIN, MAX]."""
+        out = monitor._next_poll_interval(60.0, 50.0, 60.0, 95, t_max=120)
+        assert monitor.MONITOR_POLL_SECONDS_MIN <= out <= 120
+
+    def test_high_velocity_shrinks_to_t_min(self):
+        """Pathological velocity (10% in 1s) → ETA tiny → clamped to floor."""
+        out = monitor._next_poll_interval(60.0, 50.0, 1.0, 95)
+        assert out == monitor.MONITOR_POLL_SECONDS_MIN
+
+    def test_low_velocity_caps_at_t_max(self):
+        """Very slow burn → ETA huge → clamped to ceiling."""
+        out = monitor._next_poll_interval(50.0, 49.9, 60.0, 95)
+        assert out == monitor.MONITOR_POLL_SECONDS
+
+    def test_respects_custom_t_max(self):
+        """Test fixtures override t_max via the run_cli_monitor poll_seconds
+        kwarg; the picker must honour the smaller ceiling."""
+        out = monitor._next_poll_interval(50.0, 49.9, 60.0, 95, t_max=15)
+        assert out == 15
+
+
+class TestFailureBackoffSeconds:
+    def test_zero_failures_returns_min(self):
+        assert monitor._failure_backoff_seconds(0) == monitor.MONITOR_POLL_SECONDS_MIN
+
+    def test_first_failure_returns_base(self):
+        assert (
+            monitor._failure_backoff_seconds(1)
+            == monitor.MONITOR_FAILURE_BACKOFF_BASE
+        )
+
+    def test_doubles_each_failure(self):
+        # BASE=5 → 5, 10, 20, 40
+        assert monitor._failure_backoff_seconds(2) == 10
+        assert monitor._failure_backoff_seconds(3) == 20
+        assert monitor._failure_backoff_seconds(4) == 40
+
+    def test_clamps_at_t_max(self):
+        # n=5 → 80 raw, clamped to MAX=60
+        assert monitor._failure_backoff_seconds(5) == monitor.MONITOR_POLL_SECONDS
+        # Pathological n=20 stays at MAX, no integer overflow concerns.
+        assert monitor._failure_backoff_seconds(20) == monitor.MONITOR_POLL_SECONDS
+
+    def test_returns_zero_when_t_max_zero(self):
+        """Test contract: poll_seconds=0 disables sleeps everywhere."""
+        assert monitor._failure_backoff_seconds(3, t_max=0) == 0
+
+    def test_respects_custom_t_max(self):
+        """A caller-supplied t_max overrides the module default ceiling."""
+        assert monitor._failure_backoff_seconds(10, t_max=20) == 20

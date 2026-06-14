@@ -1,4 +1,18 @@
-"""Plain CLI auto-switch monitor."""
+"""Plain CLI auto-switch monitor with adaptive polling.
+
+The monitor periodically checks the active account's usage percentage and
+rotates to the next account when a configured threshold is reached.  The
+cadence is *adaptive*: when usage is far from threshold and stable, the
+monitor polls slowly (the historical 60s ceiling); as usage approaches the
+threshold or starts climbing, the interval shrinks toward a floor of 5s so
+the swap fires before the user hits a rate-limit error.
+
+Every tunable lives behind a named constant with a documented rationale —
+no inline magic numbers — so the trade-offs stay auditable.  The pure
+function ``_next_poll_interval`` and ``_failure_backoff_seconds`` are easy
+to test in isolation; ``run_cli_monitor`` wires them into the existing
+PID-file + SIGTERM-handling skeleton.
+"""
 
 from __future__ import annotations
 
@@ -13,10 +27,38 @@ from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.printer import accent, bolded, dimmed, muted
 from claude_swap.switcher import ClaudeAccountSwitcher
 
-# The single source of truth for the auto-switch monitor's cadence and rule.
-# Both the CLI monitor (cswap --monitor), the TUI monitor, and the launchd
-# service import these — do not redefine the interval or the rule elsewhere.
+# ----------------------------------------------------------------------------
+# Polling cadence — all tunables live here so the trade-offs are auditable.
+# ----------------------------------------------------------------------------
+
+# Ceiling on the polling interval.  Historical default; preserved as the
+# canonical name so the TUI's ``MONITOR_POLL_SECONDS`` import keeps working.
+# Used as ``t_max`` in the adaptive algorithm.
 MONITOR_POLL_SECONDS = 60
+
+# Floor on the polling interval.  Below this, we risk overwhelming the usage
+# API and producing log noise without meaningful gain in detection latency.
+# 5s ≈ one Claude Code API round-trip plus margin: the monitor can react
+# within a single user message of the threshold being crossed.
+MONITOR_POLL_SECONDS_MIN = 5
+
+# Safety factor for the time-to-threshold prediction.  If velocity says we
+# hit the threshold in T seconds, schedule the next poll at T / FACTOR so
+# we get at least FACTOR polls before the predicted crossing.  3 is the
+# smallest value that tolerates one noisy delta without overshooting.
+MONITOR_POLL_SAFETY_FACTOR = 3
+
+# When ``current_pct`` reaches this fraction of ``threshold``, stop trusting
+# the velocity model and force the floor.  A single bursty prompt at the end
+# of the budget can eat the remaining few percent faster than any predictor
+# can react.  0.95 → for threshold=95 the override fires at ≥90.25%.
+MONITOR_POLL_NEAR_TRIGGER_RATIO = 0.95
+
+# Base for the usage-API failure backoff sequence: BASE, 2·BASE, 4·BASE, …
+# up to the polling ceiling.  Starts at the floor so a transient blip costs
+# only one normal interval before retry; doubles on each consecutive failure
+# so a persistent outage stops hammering the API.
+MONITOR_FAILURE_BACKOFF_BASE = MONITOR_POLL_SECONDS_MIN
 
 
 def should_switch(pct: float | None, threshold: int) -> bool:
@@ -28,6 +70,70 @@ def should_switch(pct: float | None, threshold: int) -> bool:
     caller (CLI, TUI, service) shares one definition.
     """
     return pct is not None and pct >= threshold
+
+
+def _next_poll_interval(
+    current_pct: float | None,
+    last_pct: float | None,
+    elapsed: float,
+    threshold: int,
+    *,
+    t_min: int = MONITOR_POLL_SECONDS_MIN,
+    t_max: int = MONITOR_POLL_SECONDS,
+) -> int:
+    """Pick the next poll interval based on velocity-to-threshold.
+
+    Pure function — no I/O, no module state.  Behaviour summary:
+
+    * ``t_max <= 0`` (test path): always return 0 so ``time.sleep(0)`` is a
+      no-op and existing ``once=True`` test fixtures still finish in millis.
+    * No baseline yet (first iteration, or just after a switch reset):
+      return ``t_max`` since we have nothing to predict from.
+    * Usage at or above ``NEAR_TRIGGER_RATIO * threshold``: override to
+      ``t_min`` regardless of velocity — final-approach guard rail.
+    * Velocity ≤ 0 (idle, plateaued, or post-switch drop): return ``t_max``.
+    * Positive velocity: compute ETA to threshold, schedule next poll at
+      ``ETA / SAFETY_FACTOR``, clamped to ``[t_min, t_max]``.
+    """
+    if t_max <= 0:
+        # Test contract: poll_seconds=0 disables real sleeps everywhere.
+        return 0
+
+    if current_pct is None or last_pct is None or elapsed <= 0:
+        return t_max
+
+    # Final-approach override — see NEAR_TRIGGER_RATIO docstring.
+    if current_pct >= threshold * MONITOR_POLL_NEAR_TRIGGER_RATIO:
+        return max(min(t_min, t_max), 0)
+
+    # Velocity in pct-points per second.  Negative values (post-switch drop)
+    # and exact zero collapse to "idle" — slow polling is correct.
+    delta = current_pct - last_pct
+    velocity = delta / elapsed
+    if velocity <= 0.0:
+        return t_max
+
+    eta_to_threshold = (threshold - current_pct) / velocity
+    target = eta_to_threshold / MONITOR_POLL_SAFETY_FACTOR
+    return int(max(t_min, min(target, t_max)))
+
+
+def _failure_backoff_seconds(
+    consecutive_failures: int,
+    *,
+    t_max: int = MONITOR_POLL_SECONDS,
+) -> int:
+    """Exponential backoff for consecutive usage-API failures.
+
+    Returns ``BASE * 2^(n-1)`` clamped to ``t_max``.  ``n=0`` collapses to
+    ``MIN`` so the first successful recovery does not pay any extra delay.
+    """
+    if t_max <= 0:
+        return 0
+    if consecutive_failures <= 0:
+        return MONITOR_POLL_SECONDS_MIN
+    raw = MONITOR_FAILURE_BACKOFF_BASE * (2 ** (consecutive_failures - 1))
+    return int(min(raw, t_max))
 
 
 def _logger(switcher: ClaudeAccountSwitcher):
@@ -88,7 +194,12 @@ def run_cli_monitor(
     once: bool = False,
     stream: TextIO | None = None,
 ) -> int:
-    """Run the foreground auto-switch monitor from the CLI."""
+    """Run the foreground auto-switch monitor from the CLI.
+
+    ``poll_seconds`` is the *ceiling* on the adaptive interval (not the
+    fixed cadence).  Tests pass ``poll_seconds=0`` to disable sleeps and the
+    adaptive algorithm degrades cleanly to "no sleep" in that case.
+    """
     out = stream or sys.stdout
     log = _logger(switcher)
     cfg = switcher.get_auto_switch_config()
@@ -108,13 +219,14 @@ def run_cli_monitor(
 
     print(bolded("Auto-switch monitor (Beta)"), file=out)
     print(
-        f"  {dimmed(f'threshold {threshold}% · polling every {poll_seconds}s')}",
+        f"  {dimmed(f'threshold {threshold}% · adaptive {MONITOR_POLL_SECONDS_MIN}–{poll_seconds}s')}",
         file=out,
     )
     print(f"  {dimmed(f'pid {os.getpid()}')}", file=out)
     log.info(
-        "monitor start: threshold=%s poll=%ss pid=%s",
+        "monitor start: threshold=%s adaptive=%s-%ss pid=%s",
         threshold,
+        MONITOR_POLL_SECONDS_MIN,
         poll_seconds,
         os.getpid(),
     )
@@ -125,6 +237,14 @@ def run_cli_monitor(
         raise _MonitorStopped
 
     signal.signal(signal.SIGTERM, stop_monitor)
+
+    # Adaptive-polling state.  Reset to None after a switch (or whenever the
+    # baseline becomes meaningless) so the next iteration falls back to t_max
+    # rather than computing velocity from a stale reference point.
+    last_pct: float | None = None
+    last_poll_time: float | None = None
+    consecutive_failures = 0
+
     try:
         while True:
             # Re-read config each cycle so TUI changes (threshold, disable)
@@ -138,11 +258,73 @@ def run_cli_monitor(
                 continue
             threshold = int(cfg["threshold"])
 
+            # Phase 4 short-circuit: if no default-mode Claude Code is running
+            # the active account cannot be burning tokens, so skip the usage
+            # API call entirely and idle at t_max.  Reset the velocity baseline
+            # too — once a session reappears, we want a clean delta from the
+            # fresh sample, not one across a long inactivity gap.
+            live_pids = switcher._live_default_mode_claude_pids()
+            if not live_pids:
+                log.info(
+                    "monitor poll: no live Claude Code sessions — idle at %ds",
+                    poll_seconds,
+                )
+                last_pct = None
+                last_poll_time = None
+                consecutive_failures = 0
+                if once:
+                    return 0
+                time.sleep(poll_seconds)
+                continue
+
+            now = time.monotonic()
             pct = switcher.get_active_usage_pct()
             pct_text = "unavailable" if pct is None else f"{pct:.0f}%"
-            print(f"  {muted('active usage:')} {pct_text}", file=out, flush=True)
+
+            if pct is None:
+                # Phase 3: usage API failed → exponential backoff.  The previous
+                # velocity baseline is now stale; drop it so a recovery doesn't
+                # compute a misleading delta.
+                consecutive_failures += 1
+                interval = _failure_backoff_seconds(
+                    consecutive_failures, t_max=poll_seconds,
+                )
+                print(
+                    f"  {muted('active usage:')} {pct_text} "
+                    f"{muted(f'· backoff {interval}s ({consecutive_failures} consecutive failures)')}",
+                    file=out,
+                    flush=True,
+                )
+                log.warning(
+                    "monitor poll: active_usage_pct=None failures=%d backoff=%ds",
+                    consecutive_failures,
+                    interval,
+                )
+                last_pct = None
+                last_poll_time = None
+                if once:
+                    return 0
+                time.sleep(interval)
+                continue
+
+            consecutive_failures = 0
+
+            # Compute the adaptive interval *before* the switch decision so we
+            # log a consistent "next poll" value even on threshold iterations.
+            elapsed = (now - last_poll_time) if last_poll_time is not None else 0.0
+            interval = _next_poll_interval(
+                pct, last_pct, elapsed, threshold,
+                t_max=poll_seconds,
+            )
+            print(
+                f"  {muted('active usage:')} {pct_text} "
+                f"{muted(f'· next poll {interval}s')}",
+                file=out,
+                flush=True,
+            )
             log.info(
-                "monitor poll: active_usage_pct=%s threshold=%s", pct, threshold
+                "monitor poll: active_usage_pct=%s threshold=%s next_poll=%ds",
+                pct, threshold, interval,
             )
 
             if should_switch(pct, threshold):
@@ -170,10 +352,18 @@ def run_cli_monitor(
                     )
                 else:
                     log.info("monitor switched account at pct=%s", pct)
+                # The active account just changed — the previous pct sample
+                # belongs to the old account.  Reset baseline so we don't
+                # compute a wildly negative velocity on the next iteration.
+                last_pct = None
+                last_poll_time = None
+            else:
+                last_pct = pct
+                last_poll_time = now
 
             if once:
                 return 0
-            time.sleep(poll_seconds)
+            time.sleep(interval)
     except KeyboardInterrupt:
         print(f"\n{dimmed('Monitor stopped')}", file=out)
         return 130
