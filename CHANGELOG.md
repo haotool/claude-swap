@@ -4,6 +4,17 @@ All notable user-facing changes to claude-swap are documented here.
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-06-14
+
+### Added
+
+- **Auto-switch at usage limit (Beta):** TUI menu, `cswap --monitor`, and macOS launchd background service. Fail-closed target selection from trusted usage snapshots; manual `cswap --switch` still uses round-robin.
+- **`cswap --health`:** account health, usage, and OAuth token status.
+
+### Fixed
+
+- **Session mode on Windows:** session validation now resolves `claude` via `shutil.which` so `.cmd` shims are found (upstream PR #54).
+
 ### Breaking — `switch()` API (auto-switch beta)
 
 Automated switching now uses explicit **SwitchIntent** types instead of boolean kwargs.
