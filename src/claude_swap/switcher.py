@@ -28,10 +28,20 @@ from claude_swap.exceptions import (
     ValidationError,
 )
 from claude_swap import oauth
-from claude_swap.cache import MISSING, read_cache, read_cache_data, write_cache
+from claude_swap.cache import read_cache_data, write_cache
 from claude_swap.locking import FileLock
 from claude_swap.logging_config import setup_logging
-from claude_swap.models import Platform, SwitchTransaction, get_timestamp
+from claude_swap.models import (
+    AutoSwitchDecisionContext,
+    BackgroundAutoSwitchIntent,
+    InteractiveAutoSwitchIntent,
+    ManualSwitchIntent,
+    Platform,
+    SwitchIntent,
+    SwitchPlanResult,
+    SwitchTransaction,
+    get_timestamp,
+)
 from claude_swap.printer import (
     abbreviate_path,
     accent,
@@ -74,10 +84,10 @@ CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 SETUP_TOKEN_SCOPES = ("user:inference",)
 
 # Usage cache
-_USAGE_CACHE_TTL = 15  # seconds
+_USAGE_CACHE_TTL = 15  # seconds; per-slot freshness for automated planning
 
 # Auto-switch (Beta): when the active account's 5h/7d usage reaches this
-# percentage, the TUI monitor rotates to the next managed account.
+# percentage, automated paths pick the cooldown-aware best target.
 DEFAULT_AUTO_SWITCH_THRESHOLD = 95
 _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS = 3
 _BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS = 0.5
@@ -243,6 +253,10 @@ def _usage_from_cache(value):
 def _usage_to_cache(value):
     if isinstance(value, oauth.UsageFetchError):
         return _usage_error_to_cache(value)
+    if isinstance(value, dict):
+        stamped = dict(value)
+        stamped["_cached_at"] = time.time()
+        return stamped
     return value
 
 
@@ -255,6 +269,85 @@ def _merge_usage_with_previous(current, previous):
     if (current is None or isinstance(current, oauth.UsageFetchError)) and _is_usage_dict(previous):
         return previous, current
     return current, None
+
+
+def _persist_usage_cache_entry(
+    existing: dict,
+    key: str,
+    current,
+    previous,
+) -> None:
+    """Write one cache row without re-stamping stale data after fetch failures."""
+    merged, note = _merge_usage_with_previous(current, previous)
+    if merged is None:
+        if current is None:
+            existing[key] = None
+        return
+    if isinstance(current, oauth.UsageFetchError):
+        if isinstance(previous, dict) and _is_usage_dict(previous):
+            existing[key] = previous
+        else:
+            existing[key] = _usage_to_cache(current)
+        return
+    if current is None and isinstance(previous, dict) and _is_usage_dict(previous):
+        existing[key] = previous
+        return
+    if isinstance(current, str):
+        existing[key] = current
+        return
+    if _is_usage_dict(current):
+        existing[key] = _usage_to_cache(current)
+        return
+    if _is_usage_dict(merged):
+        existing[key] = _usage_to_cache(merged)
+
+
+def _read_usage_cache_file(path: Path) -> tuple[dict | None, float | None]:
+    """Read usage cache rows and the wrapper file timestamp."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        data = raw["data"]
+        ts = raw["timestamp"]
+        if isinstance(data, dict) and isinstance(ts, (int, float)):
+            return data, float(ts)
+    except (
+        OSError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        pass
+    return None, None
+
+
+def _resolve_slot_cached_at(entry: dict, file_timestamp: float | None) -> float | None:
+    """Resolve when a cache row was last known-good.
+
+    Legacy rows without ``_cached_at`` inherit the wrapper file timestamp so
+    pre-007 caches remain trusted until the file TTL expires.
+    """
+    if not isinstance(entry, dict):
+        return None
+    cached_at = entry.get("_cached_at")
+    if isinstance(cached_at, (int, float)) and float(cached_at) > 0:
+        return float(cached_at)
+    if file_timestamp is not None and file_timestamp > 0:
+        return file_timestamp
+    return None
+
+
+def _usage_slot_trusted(
+    entry: dict,
+    now: float,
+    file_timestamp: float | None = None,
+) -> bool:
+    """True when a single usage cache row is within the per-slot TTL."""
+    cached_at = _resolve_slot_cached_at(entry, file_timestamp)
+    if cached_at is None:
+        return False
+    return now - cached_at < _USAGE_CACHE_TTL
 
 
 class ClaudeAccountSwitcher:
@@ -844,6 +937,252 @@ class ClaudeAccountSwitcher:
             return False
         return True
 
+    def _resolve_active_slots(self) -> tuple[str | None, str | None]:
+        """Return ``(live_active_slot, sequence_active_slot)``."""
+        data = self._get_sequence_data() or {}
+        sequence_slot = data.get("activeAccountNumber")
+        sequence_slot_str = (
+            str(sequence_slot) if sequence_slot is not None else None
+        )
+
+        live_slot: str | None = None
+        identity = self._get_current_account()
+        if identity is not None:
+            current_email, current_org_uuid = identity
+            for num, account in data.get("accounts", {}).items():
+                if (
+                    account.get("email") == current_email
+                    and (account.get("organizationUuid", "") or "")
+                    == current_org_uuid
+                ):
+                    live_slot = str(num)
+                    break
+
+        return live_slot, sequence_slot_str
+
+    def _usage_cache_fresh(
+        self,
+        cached: dict,
+        account_keys: set[str],
+        *,
+        file_timestamp: float | None = None,
+    ) -> bool:
+        """True when every account row is within the shared per-slot TTL."""
+        if not isinstance(cached, dict) or set(cached.keys()) != account_keys:
+            return False
+        now = time.time()
+        for key in account_keys:
+            entry = cached.get(key)
+            usage = _usage_from_cache(entry)
+            if not isinstance(usage, dict) or not _usage_slot_trusted(
+                usage, now, file_timestamp,
+            ):
+                return False
+        return True
+
+    def _trusted_usage_snapshots(self) -> dict[str, dict]:
+        """Usage entries with per-slot freshness — safe for unattended planning."""
+        usage_cache_path = self.backup_dir / "cache" / "usage.json"
+        cached, file_ts = _read_usage_cache_file(usage_cache_path)
+        if cached is None:
+            return {}
+
+        data = self._get_sequence_data() or {}
+        switchable = [
+            str(num)
+            for num in data.get("sequence", [])
+            if self._account_is_switchable(str(num))
+        ]
+        if not switchable:
+            return {}
+
+        now = time.time()
+        snapshots: dict[str, dict] = {}
+        for slot in switchable:
+            if slot not in cached:
+                return {}
+            usage = _usage_from_cache(cached[slot])
+            if not isinstance(usage, dict):
+                return {}
+            if not _usage_slot_trusted(usage, now, file_ts):
+                return {}
+            snapshots[slot] = {
+                k: v for k, v in usage.items() if k != "_cached_at"
+            }
+        return snapshots
+
+    def _refresh_switchable_usage_cache(self) -> None:
+        """Fetch usage for every switchable slot before automated planning."""
+        data = self._get_sequence_data_migrated() or {}
+        current_identity = self._get_current_account()
+        active_num: str | None = None
+        if current_identity is not None:
+            current_email, current_org_uuid = current_identity
+            for num, account in data.get("accounts", {}).items():
+                if (
+                    account.get("email") == current_email
+                    and (account.get("organizationUuid", "") or "")
+                    == current_org_uuid
+                ):
+                    active_num = num
+                    break
+
+        accounts_info: list[tuple[int, str, bool, str]] = []
+        for num in data.get("sequence", []):
+            num_str = str(num)
+            if not self._account_is_switchable(num_str):
+                continue
+            account = data.get("accounts", {}).get(num_str, {})
+            email = account.get("email", "unknown")
+            is_active = num_str == active_num
+            creds = (
+                self._read_credentials() or ""
+                if is_active
+                else self._read_account_credentials(num_str, email)
+            )
+            accounts_info.append((num, email, is_active, creds))
+
+        def fetch(
+            item: tuple[int, str, bool, str],
+        ) -> tuple[str, dict | oauth.UsageFetchError | None | str]:
+            num, email, is_active, creds = item
+            num_str = str(num)
+            if not creds or not oauth.extract_access_token(creds):
+                return num_str, None
+
+            def persist(acct_num: str, acct_email: str, new_creds: str) -> None:
+                with FileLock(self.lock_file):
+                    self._write_account_credentials(acct_num, acct_email, new_creds)
+
+            has_live_session = bool(self._live_session_pids(num_str, email))
+            return num_str, oauth.fetch_usage_for_account(
+                num_str,
+                email,
+                creds,
+                is_active=is_active or has_live_session,
+                persist_credentials=persist,
+            )
+
+        usage_cache_path = self.backup_dir / "cache" / "usage.json"
+        max_workers = min(4, max(len(accounts_info), 1))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(fetch, accounts_info))
+
+        with FileLock(self.lock_file):
+            previous_cached = read_cache_data(usage_cache_path, default={})
+            existing = previous_cached if isinstance(previous_cached, dict) else {}
+            for num_str, usage in results:
+                _persist_usage_cache_entry(
+                    existing, num_str, usage, existing.get(num_str),
+                )
+            write_cache(usage_cache_path, existing)
+
+    def build_auto_switch_decision(
+        self,
+        threshold: int,
+        active_usage_pct: float | None,
+    ) -> AutoSwitchDecisionContext:
+        """Build the poll-cycle decision snapshot for automated switching."""
+        live_slot, sequence_slot = self._resolve_active_slots()
+        if (
+            live_slot
+            and sequence_slot
+            and live_slot != sequence_slot
+        ):
+            drift_key = (live_slot, sequence_slot)
+            if getattr(self, "_logged_active_drift", None) != drift_key:
+                self._logger.warning(
+                    "auto-switch active slot drift: live=Account-%s "
+                    "sequence=Account-%s — using live identity",
+                    live_slot,
+                    sequence_slot,
+                )
+                self._logged_active_drift = drift_key
+
+        data = self._get_sequence_data() or {}
+        switchable = [
+            str(num)
+            for num in data.get("sequence", [])
+            if self._account_is_switchable(str(num))
+        ]
+        snapshots = self._trusted_usage_snapshots()
+        if switchable and len(snapshots) < len(switchable):
+            self._refresh_switchable_usage_cache()
+            snapshots = self._trusted_usage_snapshots()
+
+        return AutoSwitchDecisionContext(
+            threshold=threshold,
+            active_usage_pct=active_usage_pct,
+            live_active_slot=live_slot,
+            sequence_active_slot=sequence_slot,
+            usage_by_slot=snapshots,
+        )
+
+    def _pick_best_from_snapshots(
+        self,
+        threshold: int,
+        snapshots: dict[str, object],
+        *,
+        exclude: str | None = None,
+    ) -> str | None:
+        """Score switchable slots from trusted usage snapshots only."""
+        data = self._get_sequence_data() or {}
+        sequence = data.get("sequence", [])
+        if not sequence:
+            return None
+
+        scored: list[tuple[tuple[int, float], str]] = []
+        for num in sequence:
+            num_str = str(num)
+            if exclude is not None and num_str == exclude:
+                continue
+            if not self._account_is_switchable(num_str):
+                continue
+            cached_entry = snapshots.get(num_str)
+            score = _slot_switch_score(cached_entry, threshold)
+            scored.append((score, num_str))
+
+        if not scored:
+            return None
+        if all(s[0][0] == _SLOT_SCORE_BUCKET_UNKNOWN for s in scored):
+            return None
+
+        scored.sort()
+        return scored[0][1]
+
+    def _plan_automated_switch(
+        self,
+        decision: AutoSwitchDecisionContext,
+    ) -> SwitchPlanResult:
+        """Choose an automated switch target from a trusted decision snapshot."""
+        active = decision.live_active_slot or decision.sequence_active_slot
+        best = self._pick_best_from_snapshots(
+            decision.threshold,
+            decision.usage_by_slot,
+        )
+
+        if best is None:
+            return SwitchPlanResult(
+                outcome="no_trusted_signal",
+                reason=(
+                    "no trusted usage snapshots — run `cswap --list` or wait "
+                    "for the monitor to refresh cache"
+                ),
+            )
+
+        if active is not None and best == active:
+            return SwitchPlanResult(
+                outcome="already_optimal",
+                target=best,
+                reason=f"already on optimal Account-{best}",
+            )
+
+        return SwitchPlanResult(
+            outcome="chosen",
+            target=best,
+            reason=f"cooldown-aware pick Account-{best}",
+        )
+
     def _pick_best_switch_target(
         self,
         threshold: int,
@@ -852,57 +1191,21 @@ class ClaudeAccountSwitcher:
     ) -> str | None:
         """Pick the switchable slot with the best cooldown-aware score.
 
-        Used by the auto-switch monitor (``switch(prefer_least_busy=True)``)
-        so that when every account is over threshold, the user is parked on
-        the one whose rate-limit window resets soonest — rather than
-        bouncing through saturated accounts in round-robin order.
-
-        Strategy:
-          1. Read the shared usage cache (no network, fast).
-          2. Score every switchable slot via ``_slot_switch_score``.
-          3. If *any* slot has usable signal (not all bucket-2 unknown),
-             return the lowest-scored slot.
-          4. If every slot is cold-cache (no signal at all), return
-             ``None`` so the caller falls back to sequential rotation.
-
-        We never trigger fresh HTTP fetches here — that would add unbounded
-        latency to the hot switch path.  The monitor populates the active
-        slot's cache on every poll, and ``cswap --list`` fills the rest.
-        Stale cache (>TTL) is still used as a hint; the user can manually
-        refresh by running ``cswap --list`` before relying on this picker.
+        Test helper: reads the on-disk cache without TTL enforcement.
+        Production automated paths must use ``_plan_automated_switch`` with
+        ``build_auto_switch_decision`` instead.
         """
-        data = self._get_sequence_data() or {}
-        sequence = data.get("sequence", [])
-        if not sequence:
-            return None
-
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
         cached = read_cache_data(usage_cache_path, default={}) or {}
         if not isinstance(cached, dict):
             cached = {}
-
-        scored: list[tuple[tuple[int, float], str]] = []
-        for num in sequence:
-            num_str = str(num)
-            if num_str == exclude:
-                continue
-            if not self._account_is_switchable(num_str):
-                continue
-            cached_entry = _usage_from_cache(cached.get(num_str))
-            score = _slot_switch_score(cached_entry, threshold)
-            scored.append((score, num_str))
-
-        if not scored:
-            return None
-
-        # Cold-cache fallback: if every candidate is bucket-2 ("unknown"),
-        # we have no signal and the caller's round-robin is the right
-        # behaviour.  Returning None preserves the historical contract.
-        if all(s[0][0] == _SLOT_SCORE_BUCKET_UNKNOWN for s in scored):
-            return None
-
-        scored.sort()
-        return scored[0][1]
+        snapshots = {
+            str(k): _usage_from_cache(v)
+            for k, v in cached.items()
+        }
+        return self._pick_best_from_snapshots(
+            threshold, snapshots, exclude=exclude,
+        )
 
     def _write_account_config(
         self, account_num: str, email: str, config: str
@@ -1747,11 +2050,17 @@ class ClaudeAccountSwitcher:
             return result
 
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
-        cached = read_cache(usage_cache_path, _USAGE_CACHE_TTL)
-        previous_cached = read_cache_data(usage_cache_path, default={})
+        cached_data, file_ts = _read_usage_cache_file(usage_cache_path)
+        previous_cached = cached_data if cached_data is not None else {}
         account_keys = {str(info[0]) for info in accounts_info}
-        if cached is not MISSING and isinstance(cached, dict) and cached.keys() == account_keys:
-            usages = [_usage_from_cache(cached.get(str(info[0]))) for info in accounts_info]
+        if self._usage_cache_fresh(
+            previous_cached, account_keys, file_timestamp=file_ts,
+        ):
+            cached_data = previous_cached
+            usages = [
+                _usage_from_cache(cached_data.get(str(info[0])))
+                for info in accounts_info
+            ]
             usage_notes = [None for _ in accounts_info]
         else:
             with ThreadPoolExecutor() as executor:
@@ -1760,9 +2069,9 @@ class ClaudeAccountSwitcher:
             usage_notes = []
             for info, usage in zip(accounts_info, usages):
                 key = str(info[0])
-                previous = previous_cached.get(key) if isinstance(previous_cached, dict) else None
-                merged_usage, note = _merge_usage_with_previous(usage, previous)
-                merged_usages[key] = _usage_to_cache(merged_usage)
+                previous = previous_cached.get(key)
+                _, note = _merge_usage_with_previous(usage, previous)
+                _persist_usage_cache_entry(merged_usages, key, usage, previous)
                 usage_notes.append(note)
             usages = [_usage_from_cache(merged_usages[str(info[0])]) for info in accounts_info]
             write_cache(usage_cache_path, merged_usages)
@@ -1880,11 +2189,18 @@ class ClaudeAccountSwitcher:
                 # cswap must not refresh them) and merge into existing entries so
                 # other accounts' rows survive.
                 usage_cache_path = self.backup_dir / "cache" / "usage.json"
-                cached = read_cache(usage_cache_path, _USAGE_CACHE_TTL)
-                previous_cached = read_cache_data(usage_cache_path, default={})
-                if (cached is not MISSING and isinstance(cached, dict)
-                        and account_num in cached):
-                    usage = _usage_from_cache(cached[account_num])
+                cached, file_ts = _read_usage_cache_file(usage_cache_path)
+                previous_cached = cached if cached is not None else {}
+                cached_usage = (
+                    _usage_from_cache(cached[account_num])
+                    if cached is not None and account_num in cached
+                    else None
+                )
+                if (
+                    isinstance(cached_usage, dict)
+                    and _usage_slot_trusted(cached_usage, time.time(), file_ts)
+                ):
+                    usage = cached_usage
                     usage_note = None
                 else:
                     fetched_usage = oauth.fetch_usage_for_account(
@@ -1909,7 +2225,9 @@ class ClaudeAccountSwitcher:
                         fetched_usage,
                         previous_usage,
                     )
-                    existing[account_num] = _usage_to_cache(usage)
+                    _persist_usage_cache_entry(
+                        existing, account_num, fetched_usage, previous_usage,
+                    )
                     write_cache(usage_cache_path, existing)
                 if isinstance(usage, dict):
                     lines = _format_usage_lines(usage)
@@ -2006,10 +2324,14 @@ class ClaudeAccountSwitcher:
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
         usage = None
         if account_num is not None:
-            cached = read_cache(usage_cache_path, _USAGE_CACHE_TTL)
-            if (cached is not MISSING and isinstance(cached, dict)
-                    and account_num in cached):
-                usage = _usage_from_cache(cached[account_num])
+            cached, file_ts = _read_usage_cache_file(usage_cache_path)
+            if cached is not None and account_num in cached:
+                cached_usage = _usage_from_cache(cached[account_num])
+                if (
+                    isinstance(cached_usage, dict)
+                    and _usage_slot_trusted(cached_usage, time.time(), file_ts)
+                ):
+                    usage = cached_usage
 
         if usage is None:
             fetched_usage = oauth.fetch_usage_for_account(
@@ -2031,7 +2353,12 @@ class ClaudeAccountSwitcher:
                     if isinstance(existing, dict)
                     else {}
                 )
-                existing[account_num] = _usage_to_cache(usage)
+                _persist_usage_cache_entry(
+                    existing,
+                    account_num,
+                    fetched_usage,
+                    previous_usage if account_num is not None else None,
+                )
                 write_cache(usage_cache_path, existing)
 
         # Schema-drift detection: a non-error dict that lacks BOTH expected
@@ -2087,47 +2414,33 @@ class ClaudeAccountSwitcher:
             return "New account active within ~30s (Claude Code's Keychain cache TTL)."
         return "New account active on the next message."
 
-    def switch(
-        self,
-        *,
-        quiet: bool = False,
-        force_refresh: bool = False,
-        prefer_least_busy: bool = False,
-    ) -> None:
-        """Switch to next account in sequence.
+    def switch(self, intent: SwitchIntent | None = None) -> bool:
+        """Switch to another managed account.
 
-        Args:
-            quiet: Suppress informational console output. Used by the background
-                auto-switch monitor where there is no interactive user to read
-                banners; errors still propagate and are logged. Also makes the
-                "no managed accounts to switch to" guards RAISE instead of
-                silently printing — the monitor must see those as failures
-                so it does not falsely log a successful rotation.
-            force_refresh: Refresh the target account's OAuth token before
-                activation even when not yet expired. Recommended for automated
-                switches so Claude Code's first API call against the new
-                account gets a freshly-issued token.
-            prefer_least_busy: Use cooldown-aware scoring to pick the next
-                account instead of strict round-robin.  When the user has
-                multiple accounts and several are saturated, this parks them
-                on the slot whose rate-limit window resets soonest, rather
-                than bouncing through saturated accounts in sequence order.
-                Falls back to round-robin when the usage cache is cold (e.g.
-                on first run or after ``cswap purge``).  Recommended for
-                automated switches; manual CLI / TUI switches keep the
-                predictable round-robin default.
+        Returns ``True`` when credentials were activated on a different slot,
+        ``False`` when no switch was needed.
 
-        Note: ``quiet``, ``force_refresh`` and ``prefer_least_busy`` are
-        independent axes — every combination is supported.  Today's callers:
-          * ``quiet=False, force_refresh=False, prefer_least_busy=False`` —
-            manual TUI/CLI switch (predictable, no API hints)
-          * ``quiet=False, force_refresh=True,  prefer_least_busy=True``  —
-            TUI auto-switch monitor (user is watching, but switch is auto)
-          * ``quiet=True,  force_refresh=True,  prefer_least_busy=True``  —
-            launchd background service (fully automated)
-        If a fourth orthogonal axis appears, promote to a ``SwitchOptions``
-        dataclass before the signature ossifies.
+        Pass an explicit intent:
+          * ``ManualSwitchIntent()`` — interactive round-robin (default)
+          * ``InteractiveAutoSwitchIntent(decision=...)`` — TUI monitor
+          * ``BackgroundAutoSwitchIntent(decision=...)`` — CLI / launchd
         """
+        if intent is None:
+            intent = ManualSwitchIntent()
+
+        quiet = isinstance(intent, BackgroundAutoSwitchIntent)
+        force_refresh = isinstance(
+            intent, (InteractiveAutoSwitchIntent, BackgroundAutoSwitchIntent),
+        )
+        automated = isinstance(
+            intent, (InteractiveAutoSwitchIntent, BackgroundAutoSwitchIntent),
+        )
+        decision = (
+            intent.decision
+            if isinstance(intent, (InteractiveAutoSwitchIntent, BackgroundAutoSwitchIntent))
+            else None
+        )
+
         if not self.sequence_file.exists():
             raise ConfigError("No accounts are managed yet")
 
@@ -2177,7 +2490,7 @@ class ClaudeAccountSwitcher:
                     )
                 target = fallback
             self._perform_switch(target, quiet=quiet, force_refresh=force_refresh)
-            return
+            return True
 
         current_email, current_org_uuid = identity
 
@@ -2189,7 +2502,7 @@ class ClaudeAccountSwitcher:
             account_num = data.get("activeAccountNumber")
             print(f"It has been automatically added as Account-{account_num}.")
             print(dimmed("Please run the switch command again to switch to the next account."))
-            return
+            return False
 
         data = self._get_sequence_data()
         sequence = data.get("sequence", [])
@@ -2204,34 +2517,43 @@ class ClaudeAccountSwitcher:
                 # can dedup the actionable error.
                 raise SwitchError(msg)
             print(dimmed(msg))
-            return
+            return False
 
-        active_account = data.get("activeAccountNumber")
+        active_account = (
+            decision.live_active_slot
+            if automated and decision is not None and decision.live_active_slot
+            else data.get("activeAccountNumber")
+        )
 
         next_account: str | None = None
 
-        # Cooldown-aware pick: when the caller opted in (auto-switch monitor)
-        # and the usage cache has signal for at least one slot, return the
-        # lowest-scored target.  Falls back (returns None) on cold-cache so
-        # the historical round-robin path takes over below.
-        if prefer_least_busy:
-            threshold = int(
-                self.get_auto_switch_config().get("threshold")
-                or DEFAULT_AUTO_SWITCH_THRESHOLD
-            )
-            best = self._pick_best_switch_target(
-                threshold,
-                exclude=str(active_account) if active_account is not None else None,
-            )
-            if best is not None:
+        if automated and decision is not None:
+            plan = self._plan_automated_switch(decision)
+            if plan.outcome == "chosen":
                 self._logger.info(
-                    "switch: cooldown-aware picker chose Account-%s "
-                    "(active=%s, threshold=%s)",
-                    best, active_account, threshold,
+                    "switch: %s (active=%s threshold=%s)",
+                    plan.reason,
+                    active_account,
+                    decision.threshold,
                 )
-                next_account = best
+                next_account = plan.target
+            elif plan.outcome == "already_optimal":
+                msg = f"{plan.reason}; waiting for cooldown."
+                if quiet:
+                    self._logger.info("switch: %s", msg)
+                else:
+                    print(dimmed(msg))
+                return False
+            else:
+                msg = (
+                    "Cannot choose auto-switch target safely: "
+                    f"{plan.reason}"
+                )
+                if not quiet:
+                    print(dimmed(msg))
+                raise SwitchError(msg)
 
-        if next_account is None:
+        if next_account is None and not automated:
             # Find current index and get next, skipping broken candidates.
             # The active slot is never checked here — _perform_switch captures
             # live state into a fresh backup before swapping, so the active
@@ -2272,12 +2594,8 @@ class ClaudeAccountSwitcher:
                 # report a successful rotation every poll.
                 raise SwitchError(msg)
             print(dimmed(msg))
-            return
+            return False
 
-        # Same-account guard: the cooldown-aware picker excludes the active
-        # slot, but defend against any future regression where it might
-        # return the current account (would no-op _perform_switch but log a
-        # confusing "switched to Account-N → N").
         if next_account == str(active_account):
             if quiet:
                 raise SwitchError(
@@ -2287,9 +2605,10 @@ class ClaudeAccountSwitcher:
             print(dimmed(
                 f"Already on Account-{active_account}; no switch needed."
             ))
-            return
+            return False
 
         self._perform_switch(next_account, quiet=quiet, force_refresh=force_refresh)
+        return True
 
     def switch_to(self, identifier: str) -> None:
         """Switch to specific account."""
