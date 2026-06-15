@@ -25,11 +25,16 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 007 | Harden automated target planning with trusted usage snapshots and live-active identity | P1 | M | 006 | DONE (630 passed) |
 | 008 | Replace `switch()`'s boolean policy matrix with explicit types and publish one beta contract | P2 | M | 006, 007 | DONE (630 passed) |
 | 009 | Clean Code / SSOT convergence audit (plans 006–008) + phased merge roadmap | P1 | L | 006, 007, 008 | DONE (~9/10 production; 652 passed, 3 skipped; subprocess metadata fix `7a8c2a9`; OAuth FileLock only major leftover) |
-| 010 | Inline `_resolve_slot_cached_at` into its single caller | P1 | S | — | DONE (branch `advisor/010-inline-resolve-slot-cached-at`, commit `5eeabc2`, net −6 lines, 653 passed, 3 skipped) |
-| 011 | Remove `# ----` banner divider comments to match upstream style | P1 | S | — | DONE (net −28 lines across 3 files, 653 passed, 3 skipped) |
-| 012 | Replace brittle TUI menu KEY_DOWN counts with `_select_from` patching | P1 | S | — | DONE (5 tests migrated, KEY_DOWN count 10→1, 653 passed, 3 skipped) |
-| 013 | Add regression test for SIGTERM → clean monitor exit (launchd contract) | P1 | S | — | DONE (+1 test, 654 passed, 3 skipped) |
-| 014 | Make `cache.write_cache` atomic with mode 0o600 | P1 | S | — | DONE (+4 tests, 658 passed, 3 skipped) |
+| 010 | Inline `_resolve_slot_cached_at` into its single caller | P1 | S | — | DONE (commit `c0a5355` on `improve/p1-clean-code-convergence`, net −6 lines) |
+| 011 | Remove `# ----` banner divider comments to match upstream style | P1 | S | — | DONE (commits `196a146` + `563a4dc` — redundant pair, squashable; net −28 lines across 3 files; tui.py blank-line spacing collapsed by hook — P3 cosmetic) |
+| 012 | Replace brittle TUI menu KEY_DOWN counts with `_select_from` patching | P1 | S | — | DONE (commit `228994c`, 5 tests migrated, KEY_DOWN occurrences 10→1) |
+| 013 | Add regression test for SIGTERM → clean monitor exit (launchd contract) | P1 | S | — | DONE (commit `936a294`, +1 test) |
+| 014 | Make `cache.write_cache` atomic with mode 0o600 | P1 | S | — | DONE (commit `8d305d1`, atomic mkstemp+os.replace+chmod 0o600, +4 tests) |
+| 015 | Boundary-case tests for `oauth.build_usage_result` (resets_at preservation, missing extra_usage, malformed resets_at) | P2 | S | — | TODO |
+| 016 | Replace `SwitchIntent` `@property` indirection with `ClassVar` (preserves typed dispatch) | P2 | S | — | TODO |
+| 017 | Serialize inactive-account OAuth refresh under FileLock (close plan 009 final leftover) | P2 | S–M | — | TODO |
+
+**Full P1 convergence verified 2026-06-15: 658 passed, 3 skipped, 0 failed on `improve/p1-clean-code-convergence` (HEAD `8d305d1`). Final base→HEAD: 7 commits (1 plans-add + 6 fixes). Orphan duplicates: `advisor/010-...` `5eeabc2`, `advisor/011-...` `a0ab742`/`6d23318` — superseded, deletable.**
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale).
 
