@@ -31,7 +31,7 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 013 | Add regression test for SIGTERM → clean monitor exit (launchd contract) | P1 | S | — | DONE (commit `936a294`, +1 test) |
 | 014 | Make `cache.write_cache` atomic with mode 0o600 | P1 | S | — | DONE (commit `8d305d1`, atomic mkstemp+os.replace+chmod 0o600, +4 tests) |
 | 015 | Boundary-case tests for `oauth.build_usage_result` (resets_at preservation, missing extra_usage, malformed resets_at) | P2 | S | — | DONE (+3 tests, 661 passed, 3 skipped) |
-| 016 | Replace `SwitchIntent` `@property` indirection with `ClassVar` (preserves typed dispatch) | P2 | S | — | TODO |
+| 016 | Replace `SwitchIntent` `@property` indirection with `ClassVar` (preserves typed dispatch) | P2 | S | — | DONE (net −18 lines, 661 passed, 3 skipped, zero behavior change) |
 | 017 | Serialize inactive-account OAuth refresh under FileLock (close plan 009 final leftover) | P2 | S–M | — | TODO |
 
 **Full P1 convergence verified 2026-06-15: 658 passed, 3 skipped, 0 failed on `improve/p1-clean-code-convergence` (HEAD `8d305d1`). Final base→HEAD: 7 commits (1 plans-add + 6 fixes). Orphan duplicates: `advisor/010-...` `5eeabc2`, `advisor/011-...` `a0ab742`/`6d23318` — superseded, deletable.**

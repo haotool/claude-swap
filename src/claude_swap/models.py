@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 SwitchPlanOutcome = Literal["no_trusted_signal", "already_optimal", "chosen"]
 
@@ -161,13 +161,8 @@ class SwitchPlanResult:
 class ManualSwitchIntent:
     """Interactive manual rotation (round-robin)."""
 
-    @property
-    def quiet(self) -> bool:
-        return False
-
-    @property
-    def force_refresh(self) -> bool:
-        return False
+    quiet: ClassVar[bool] = False
+    force_refresh: ClassVar[bool] = False
 
 
 @dataclass(frozen=True)
@@ -176,13 +171,8 @@ class InteractiveAutoSwitchIntent:
 
     decision: AutoSwitchDecisionContext
 
-    @property
-    def quiet(self) -> bool:
-        return False
-
-    @property
-    def force_refresh(self) -> bool:
-        return True
+    quiet: ClassVar[bool] = False
+    force_refresh: ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
@@ -191,13 +181,8 @@ class BackgroundAutoSwitchIntent:
 
     decision: AutoSwitchDecisionContext
 
-    @property
-    def quiet(self) -> bool:
-        return True
-
-    @property
-    def force_refresh(self) -> bool:
-        return True
+    quiet: ClassVar[bool] = True
+    force_refresh: ClassVar[bool] = True
 
 
 SwitchIntent = ManualSwitchIntent | InteractiveAutoSwitchIntent | BackgroundAutoSwitchIntent
