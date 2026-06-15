@@ -273,6 +273,38 @@ class TestFetchUsage:
         assert result["seven_day"]["pct"] == 61.0
         assert "spend" not in result
 
+    def test_resets_at_preserved_when_utilization_null(self):
+        """Cooldown-aware target picker needs resets_at even when utilization is null."""
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": None, "resets_at": "2026-06-15T12:00:00+00:00"},
+            "seven_day": {"utilization": 50.0, "resets_at": "2026-06-22T00:00:00+00:00"},
+        })
+        assert result is not None
+        assert result["five_hour"]["pct"] is None
+        assert result["five_hour"]["resets_at"] == "2026-06-15T12:00:00+00:00"
+        assert "countdown" in result["five_hour"]
+        assert "clock" in result["five_hour"]
+        assert result["seven_day"]["pct"] == 50.0
+
+    def test_missing_extra_usage_key_keeps_other_rows(self):
+        """API omits extra_usage entirely → five_hour/seven_day still rendered."""
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": 22.0, "resets_at": None},
+            "seven_day": {"utilization": 61.0, "resets_at": None},
+        })
+        assert result is not None
+        assert result["five_hour"]["pct"] == 22.0
+        assert result["seven_day"]["pct"] == 61.0
+        assert "spend" not in result
+
+    def test_malformed_resets_at_propagates_as_none(self):
+        """A bad resets_at raises ValueError inside format_reset; fetch_usage
+        swallows it and returns None. Pins today's behavior."""
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": 22.0, "resets_at": "not-an-iso-string"},
+        })
+        assert result is None
+
 
 class TestRefreshOAuthCredentials:
     """Test direct OAuth refresh requests."""
