@@ -90,6 +90,7 @@ _USAGE_CACHE_TTL = 15  # seconds; per-slot freshness for automated planning
 # percentage, automated paths pick the cooldown-aware best target.
 DEFAULT_AUTO_SWITCH_THRESHOLD = 95
 _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS = 3
+_SATURATED_SWITCH_MARGIN_S = 300  # minimum reset-time lead before switching between two saturated accounts
 
 
 def auto_switch_display(cfg: dict) -> tuple[bool, int, str, str]:
@@ -843,7 +844,15 @@ class ClaudeAccountSwitcher:
         email: str,
         credentials: str,
     ) -> tuple[str, str | None]:
-        """Refresh an inactive backup token before it reaches expiry."""
+        """Refresh an inactive backup token before it reaches expiry.
+
+        Acquires the file lock for the refresh + persist step and re-reads
+        the on-disk credentials under the lock. If another process already
+        refreshed this slot since the caller's read, the on-disk fresh
+        token is returned without a redundant network call. Anthropic's
+        refresh tokens are single-use (claude-code#24317); a double
+        refresh would brick the slot with invalid_grant.
+        """
         oauth_data = oauth.extract_oauth_data(credentials)
         if (
             not oauth_data
@@ -853,18 +862,34 @@ class ClaudeAccountSwitcher:
         ):
             return credentials, None
 
-        refreshed = oauth.refresh_oauth_credentials(credentials)
-        if not refreshed:
-            self._logger.info(
-                "OAuth refresh unavailable: account=%s email=%s",
-                account_num,
-                email,
-            )
-            return credentials, "token refresh failed"
+        with FileLock(self.lock_file):
+            # Re-read under the lock — another process may have refreshed
+            # while we were waiting.
+            latest = self._read_account_credentials(account_num, email) or credentials
+            latest_oauth = oauth.extract_oauth_data(latest)
+            if (
+                latest_oauth
+                and latest_oauth.get("accessToken")
+                and not oauth.is_oauth_token_expired(latest_oauth.get("expiresAt"))
+            ):
+                self._logger.info(
+                    "OAuth refresh skipped (already fresh on disk): account=%s",
+                    account_num,
+                )
+                return latest, "token already fresh on disk"
 
-        self._write_account_credentials(account_num, email, refreshed)
-        self._logger.info("Refreshed inactive credentials for account %s", account_num)
-        return refreshed, "token refreshed"
+            refreshed = oauth.refresh_oauth_credentials(latest)
+            if not refreshed:
+                self._logger.info(
+                    "OAuth refresh unavailable: account=%s email=%s",
+                    account_num,
+                    email,
+                )
+                return latest, "token refresh failed"
+
+            self._write_account_credentials(account_num, email, refreshed)
+            self._logger.info("Refreshed inactive credentials for account %s", account_num)
+            return refreshed, "token refreshed"
 
     def _delete_account_credentials(self, account_num: str, email: str) -> None:
         """Delete account credentials from backup.
@@ -1166,6 +1191,33 @@ class ClaudeAccountSwitcher:
                 target=best,
                 reason=f"already on optimal Account-{best}",
             )
+
+        # When both the active account and the best candidate are saturated,
+        # only switch if the candidate resets at least this many seconds sooner.
+        # Without this guard, continued use on the active account pushes its
+        # resets_at forward on every poll, making the idle account always
+        # appear "better" — causing indefinite oscillation between two accounts
+        # that are both rate-limited. 5 minutes is enough to outweigh API
+        # timestamp jitter while still reacting to meaningful reset differences.
+        if active is not None and best is not None:
+            best_score = _slot_switch_score(
+                decision.usage_by_slot.get(best), decision.threshold
+            )
+            if best_score[0] == _SLOT_SCORE_BUCKET_SATURATED:
+                active_score = _slot_switch_score(
+                    decision.usage_by_slot.get(active), decision.threshold
+                )
+                if active_score[0] == _SLOT_SCORE_BUCKET_SATURATED:
+                    if best_score[1] >= active_score[1] - _SATURATED_SWITCH_MARGIN_S:
+                        return SwitchPlanResult(
+                            outcome="already_optimal",
+                            target=active,
+                            reason=(
+                                f"both accounts saturated; staying on "
+                                f"Account-{active} (target resets at most "
+                                f"{_SATURATED_SWITCH_MARGIN_S}s sooner)"
+                            ),
+                        )
 
         return SwitchPlanResult(
             outcome="chosen",

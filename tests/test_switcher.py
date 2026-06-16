@@ -3558,6 +3558,80 @@ class TestPickBestSwitchTarget:
         assert plan.outcome == "chosen"
         assert plan.target == "2"
 
+    def test_plan_stays_put_when_both_accounts_saturated_similar_resets(
+        self, temp_home: Path,
+    ):
+        """When BOTH accounts are saturated and the target resets at most
+        _SATURATED_SWITCH_MARGIN_S=300s sooner, the plan must return
+        already_optimal to prevent indefinite oscillation.
+
+        Root cause: continued use on the active account advances its resets_at
+        forward on every poll, making the idle account always appear marginally
+        'better'.  Without the margin guard the monitor switches back and forth
+        every 60s triggering the multi-session race warning on every swap."""
+        s = self._bootstrap(temp_home, num_accounts=2)
+        # Both saturated; Account-2 resets only 60s sooner — within 300s margin.
+        self._seed_cache(s, {
+            "1": {
+                "five_hour": {
+                    "pct": 100,
+                    "resets_at": "2026-06-14T16:01:00+00:00",
+                }
+            },
+            "2": {
+                "five_hour": {
+                    "pct": 100,
+                    "resets_at": "2026-06-14T16:00:00+00:00",  # 60s sooner
+                }
+            },
+        })
+        data = s._get_sequence_data()
+        data["activeAccountNumber"] = 1
+        s._write_json(s.sequence_file, data)
+        with patch.object(s, "_account_is_switchable", return_value=True), \
+             patch.object(
+                 s, "_get_current_account", return_value=("a1@example.com", ""),
+             ):
+            decision = s.build_auto_switch_decision(95, 100.0)
+            plan = s._plan_automated_switch(decision)
+        assert plan.outcome == "already_optimal", (
+            "must not oscillate when target resets < 300s sooner"
+        )
+
+    def test_plan_switches_when_target_resets_meaningfully_sooner(
+        self, temp_home: Path,
+    ):
+        """When the best target is saturated but resets >300s sooner than the
+        active account, the switch IS worth making — the user will get capacity
+        back meaningfully earlier on the target account."""
+        s = self._bootstrap(temp_home, num_accounts=2)
+        # Account-2 resets 10 minutes (600s) sooner — outside the 300s margin.
+        self._seed_cache(s, {
+            "1": {
+                "five_hour": {
+                    "pct": 100,
+                    "resets_at": "2026-06-14T16:10:00+00:00",
+                }
+            },
+            "2": {
+                "five_hour": {
+                    "pct": 100,
+                    "resets_at": "2026-06-14T16:00:00+00:00",  # 600s sooner
+                }
+            },
+        })
+        data = s._get_sequence_data()
+        data["activeAccountNumber"] = 1
+        s._write_json(s.sequence_file, data)
+        with patch.object(s, "_account_is_switchable", return_value=True), \
+             patch.object(
+                 s, "_get_current_account", return_value=("a1@example.com", ""),
+             ):
+            decision = s.build_auto_switch_decision(95, 100.0)
+            plan = s._plan_automated_switch(decision)
+        assert plan.outcome == "chosen"
+        assert plan.target == "2"
+
     def test_trusted_snapshots_require_all_switchable_slots(self, temp_home: Path):
         s = self._bootstrap(temp_home, num_accounts=3)
         self._seed_cache(s, {"2": {"five_hour": {"pct": 40}}})

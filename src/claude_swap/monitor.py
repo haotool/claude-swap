@@ -409,7 +409,7 @@ def monitor_step(
                 kind="already_optimal",
                 threshold=threshold,
                 pct=pct,
-                next_interval=interval,
+                next_interval=poll_seconds,
                 pct_text=pct_text,
                 user_message=(
                     f"Reached {pct:.0f}% — already on soonest-to-free account."
@@ -490,7 +490,7 @@ def monitor_step(
             kind="already_optimal",
             threshold=threshold,
             pct=pct,
-            next_interval=interval,
+            next_interval=poll_seconds,
             pct_text=pct_text,
             user_message=(
                 f"Reached {pct:.0f}% — already on soonest-to-free account."

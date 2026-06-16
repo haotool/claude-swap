@@ -638,6 +638,42 @@ class TestMonitorEngine:
         assert result2.kind == "already_optimal"
         perform.assert_called_once()
 
+    def test_saturated_hold_uses_t_max_not_near_trigger_floor(
+        self, temp_home: Path,
+    ):
+        """saturated_hold must poll at t_max (60s), not at the 5s near-trigger
+        floor.  Bug: both the first already_optimal result and subsequent
+        saturated-hold results returned next_interval=interval, which collapsed
+        to t_min=5 when pct>=threshold*NEAR_TRIGGER_RATIO.  Fix: both branches
+        now return poll_seconds (t_max)."""
+        switcher = ClaudeAccountSwitcher()
+        state = monitor.MonitorRuntimeState()
+        perform = MagicMock(return_value=False)
+
+        with patch.object(
+            switcher, "get_auto_switch_config",
+            return_value={"enabled": True, "threshold": 95},
+        ), patch.object(switcher, "get_active_usage_pct", return_value=100.0), \
+             patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+            # First call: perform_switch returns False → sets saturated_hold=True
+            result1 = monitor.monitor_step(
+                switcher, state, poll_seconds=60, perform_switch=perform,
+            )
+            # Second call: saturated_hold is already True → skips switch
+            result2 = monitor.monitor_step(
+                switcher, state, poll_seconds=60, perform_switch=perform,
+            )
+
+        assert result1.kind == "already_optimal"
+        assert result1.next_interval == 60, (
+            f"first already_optimal must use t_max=60, got {result1.next_interval}"
+        )
+        assert result2.kind == "already_optimal"
+        assert result2.next_interval == 60, (
+            f"saturated-hold path must use t_max=60, got {result2.next_interval}"
+        )
+        perform.assert_called_once()
+
     def test_saturated_hold_clears_when_below_threshold(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
