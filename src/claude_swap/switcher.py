@@ -145,6 +145,15 @@ class ClaudeAccountSwitcher:
         self.lock_file = self.backup_dir / ".lock"
         self._logger = setup_logging(self.backup_dir, debug=debug)
 
+        # macOS Keychain usability, learned per-process from real `security`
+        # calls (see _kc_call / _use_keychain). None = not yet probed; True/False
+        # once an op has run. Must be set BEFORE run_migrations(), which performs
+        # Keychain ops on macOS. _last_active_credentials_backend records where the
+        # most recent active-credential write landed ("keychain" | "file"), for the
+        # post-switch follow-up message.
+        self._keychain_usable_cache: bool | None = None
+        self._last_active_credentials_backend: str | None = None
+
         # Run any pending one-time data migrations (e.g. relocating Windows
         # backup credentials out of Credential Manager into files). Imported
         # lazily to avoid a circular import, and self-contained so it never
@@ -238,154 +247,284 @@ class ClaudeAccountSwitcher:
         if sys.platform != "win32":
             os.chmod(path, 0o600)
 
-    def _read_credentials(self) -> str | None:
-        """Read credentials from Claude Code's storage.
+    def _kc_call(self, fn, *args):
+        """Run a ``macos_keychain`` wrapper call, learning Keychain usability.
 
-        Claude Code stores credentials in:
-        - macOS: Keychain with service "Claude Code-credentials"
-        - Linux/WSL/Windows: File at ~/.claude/.credentials.json
+        A success (including ``get_password`` returning ``None`` for a missing
+        item) marks the Keychain usable — but only flips the cache ``None -> True``,
+        never ``False -> True``: once a call has failed this run we stay in file
+        mode so one invocation can't split-brain between backends. A
+        ``KeychainError`` / ``TimeoutExpired`` / ``OSError`` (binary missing) marks
+        it unusable and re-raises so the caller can fall back. Only those three are
+        caught — a programming error propagates.
+
+        Do NOT route ``item_exists`` through here: it returns ``False`` for both
+        "absent" and "failed", so a timeout would be misread as a usable Keychain.
+        """
+        try:
+            result = fn(*args)
+        except macos_keychain.KEYCHAIN_ERRORS:
+            self._keychain_usable_cache = False
+            raise
+        if self._keychain_usable_cache is None:
+            self._keychain_usable_cache = True
+        return result
+
+    def _use_keychain(self) -> bool:
+        """Whether credential *writes* should target the macOS Keychain this run.
+
+        ``False`` off macOS. On macOS, ``True`` until a Keychain op has failed this
+        process (the cache flips to ``False`` and sticks). Unknown (``None``) is
+        optimistic — the first real op tries the Keychain and records the outcome.
+        """
+        if self.platform != Platform.MACOS:
+            return False
+        return self._keychain_usable_cache is not False
+
+    def _read_credentials(self) -> str | None:
+        """Read Claude Code's active credentials.
+
+        macOS reads the Keychain (service "Claude Code-credentials") when it's
+        usable — mirroring Claude Code's keychain-first read — and an empty or
+        failed Keychain falls through to the plaintext file
+        ``~/.claude/.credentials.json`` (where Claude Code itself falls back).
+        Linux/WSL/Windows always read the file. Non-mutating.
 
         Returns:
-            Credentials string if found, empty string if not found, None on error.
+            Credentials string if found, "" if not found, None on a file read error.
         """
-        if self.platform == Platform.MACOS:
+        if self._use_keychain():
             try:
-                val = macos_keychain.get_password(
-                    CLAUDE_CODE_KEYCHAIN_SERVICE, os.environ.get("USER", "user")
+                val = self._kc_call(
+                    macos_keychain.get_password,
+                    CLAUDE_CODE_KEYCHAIN_SERVICE,
+                    macos_keychain.keychain_account_name(),
                 )
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                # Locked / denied / unavailable Keychain (rc-44 "not found" comes
+                # back as None, not raised). _kc_call has flipped routing to file
+                # mode; fall through to the plaintext file Claude Code uses too.
+                # (A programming error is NOT caught here — it propagates.)
+                self._logger.warning(f"Keychain read failed, trying file: {e}")
+                val = None
+            if val:
+                return val
+            # Keychain empty (rc-44) or failed → read the plaintext fallback file.
+
+        cred_file = get_credentials_path()
+        if cred_file.exists():
+            try:
+                return cred_file.read_text(encoding="utf-8")
             except Exception as e:
-                # rc-44 (not found) is returned as None by the wrapper, not raised;
-                # anything raised here is a genuine error (locked / denied / etc.).
-                self._logger.error(f"Failed to read credentials: {e}")
+                self._logger.error(f"Failed to read credentials file: {e}")
                 return None
-            return val if val is not None else ""
-        else:  # Linux/WSL/Windows - credentials stored in file
-            cred_file = get_credentials_path()
-            if cred_file.exists():
-                try:
-                    return cred_file.read_text(encoding="utf-8")
-                except Exception as e:
-                    self._logger.error(f"Failed to read credentials file: {e}")
-                    return None
-            return ""
+        return ""
+
+    def _write_active_credentials_file(self, credentials: str) -> None:
+        """Atomically write Claude Code's plaintext active-credentials file."""
+        cred_dir = get_claude_config_home()
+        cred_dir.mkdir(parents=True, exist_ok=True)
+        cred_file = cred_dir / ".credentials.json"
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(dir=str(cred_dir), suffix=".tmp")
+        try:
+            os.write(fd, credentials.encode("utf-8"))
+            os.close(fd)
+            fd = -1
+            os.replace(tmp_path, str(cred_file))
+            if sys.platform != "win32":
+                os.chmod(str(cred_file), 0o600)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _delete_active_keychain_entry(self) -> None:
+        """Best-effort removal of the active-credential Keychain item (macOS only).
+
+        Claude Code reads the Keychain before the plaintext file, so once we fall
+        back to the file we must clear any stale Keychain entry or Claude Code would
+        resurrect it (#30337). Best-effort: when the Keychain is down the delete
+        can't run, which is the documented recovery residual.
+        """
+        if self.platform != Platform.MACOS:
+            return
+        try:
+            macos_keychain.delete_password(
+                CLAUDE_CODE_KEYCHAIN_SERVICE, macos_keychain.keychain_account_name()
+            )
+        except Exception:
+            pass  # best-effort; a down Keychain can't be cleaned now
 
     def _write_credentials(self, credentials: str) -> None:
-        """Write credentials to Claude Code's storage.
+        """Write Claude Code's active credentials.
 
-        Claude Code stores credentials in:
-        - macOS: Keychain with service "Claude Code-credentials"
-        - Linux/WSL/Windows: File at ~/.claude/.credentials.json
+        macOS writes the Keychain when usable (recording backend ``"keychain"``)
+        and **leaves the plaintext file untouched**, mirroring Claude Code, which
+        preserves the file alongside a populated Keychain for container ``~/.claude``
+        sharing (#1414): cswap can't prove an existing file is its own stale fallback
+        vs. a credential another consumer relies on. If the Keychain write fails — or
+        the Keychain is already known unusable — it writes the plaintext file and
+        best-effort clears any stale Keychain entry (#30337), recording backend
+        ``"file"``. Linux/WSL/Windows always write the file.
 
         Raises:
             CredentialWriteError: If writing credentials fails.
         """
-        if self.platform == Platform.MACOS:
+        if self._use_keychain():
             try:
-                macos_keychain.set_password(
+                self._kc_call(
+                    macos_keychain.set_password,
                     CLAUDE_CODE_KEYCHAIN_SERVICE,
-                    os.environ.get("USER", "user"),
+                    macos_keychain.keychain_account_name(),
                     credentials,
                 )
-            except Exception as e:
-                raise CredentialWriteError(f"Failed to write credentials: {e}")
-        else:  # Linux/WSL/Windows - credentials stored in file
-            cred_dir = get_claude_config_home()
-            cred_dir.mkdir(parents=True, exist_ok=True)
-            cred_file = cred_dir / ".credentials.json"
-            try:
-                import tempfile
-                fd, tmp_path = tempfile.mkstemp(dir=str(cred_dir), suffix=".tmp")
-                try:
-                    os.write(fd, credentials.encode("utf-8"))
-                    os.close(fd)
-                    fd = -1
-                    os.replace(tmp_path, str(cred_file))
-                    if sys.platform != "win32":
-                        os.chmod(str(cred_file), 0o600)
-                except BaseException:
-                    if fd >= 0:
-                        os.close(fd)
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-                    raise
-            except Exception as e:
-                raise CredentialWriteError(f"Failed to write credentials: {e}")
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                # _kc_call flipped routing to file mode; fall through to the file.
+                # (A programming error is NOT caught here — it propagates.)
+                self._logger.warning(f"Keychain write failed, falling back to file: {e}")
+            else:
+                self._last_active_credentials_backend = "keychain"
+                return
+
+        # File mode: non-macOS, macOS Keychain known unusable, or a Keychain write
+        # that just failed. Write the plaintext file and (macOS) best-effort clear
+        # any stale Keychain entry so Claude Code's keychain-first read can't shadow
+        # it (#30337).
+        try:
+            self._write_active_credentials_file(credentials)
+        except Exception as e:
+            raise CredentialWriteError(f"Failed to write credentials: {e}")
+        self._delete_active_keychain_entry()
+        self._last_active_credentials_backend = "file"
 
     def _uses_file_backup_backend(self) -> bool:
-        """Whether per-account backup credentials live in files vs. the Keychain.
+        """Whether per-account backup *writes* go to files vs. the Keychain.
 
-        Linux/WSL/Windows store them as base64 files under ``credentials_dir``;
-        macOS (and any UNKNOWN platform) use the macOS Keychain (via the
-        ``security`` CLI). Windows moved to files because the Windows Credential
-        Manager rejects entries over ~2,500 bytes, which Claude Code session
-        credentials can exceed (#45).
+        Linux/WSL/Windows always use base64 ``.enc`` files under ``credentials_dir``
+        (Windows moved off the Credential Manager because it rejects entries over
+        ~2,500 bytes, #45). macOS uses the Keychain while it's usable and falls back
+        to ``.enc`` files when it isn't (headless/SSH/locked); UNKNOWN platforms have
+        no Keychain, so they use files too. Backup *reads* are ``.enc``-wins
+        regardless (see ``_read_account_credentials``).
         """
-        return self.platform in (Platform.LINUX, Platform.WSL, Platform.WINDOWS)
+        return not self._use_keychain()
 
-    def _read_account_credentials(self, account_num: str, email: str) -> str:
-        """Read account credentials from backup.
+    # -- backup credential backends ---------------------------------------
+    #
+    # Two backends for per-account backups: base64 ``.enc`` files under
+    # ``credentials_dir`` and the macOS Keychain (``SECURITY_SERVICE``). On macOS
+    # reads are ``.enc``-wins: a fallback ``.enc`` (written while the Keychain was
+    # unusable) is authoritative over a possibly-stale Keychain copy, so a Keychain
+    # that recovers can't shadow a newer file. A successful Keychain write
+    # therefore reconciles the ``.enc`` away (correctness-critical, not best-effort).
 
-        On Linux/WSL/Windows: Uses file-based storage (base64 files under
-        ``credentials_dir``). On macOS: Uses the Keychain via the ``security`` CLI.
+    def _backup_enc_path(self, account_num: str, email: str) -> Path:
+        return self.credentials_dir / f".creds-{account_num}-{email}.enc"
+
+    def _backup_username(self, account_num: str, email: str) -> str:
+        return f"account-{account_num}-{email}"
+
+    def _kc_read_backup(self, account_num: str, email: str) -> str:
+        """Read a per-account backup from the Keychain only (no file fallback).
+
+        Routes through ``_kc_call`` (so a failure flips the capability cache).
+        Returns ``""`` when the item is absent; raises on a Keychain failure so
+        the caller decides (normal reads swallow it; the migration defers).
         """
-        if self._uses_file_backup_backend():
-            cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
-            if cred_file.exists():
-                try:
-                    encoded = cred_file.read_text(encoding="utf-8")
-                    return base64.b64decode(encoded).decode("utf-8")
-                except Exception as e:
-                    self._logger.warning(f"Failed to read credentials file: {e}")
-                    return ""
-            return ""
-        else:
-            # macOS: per-account backup credentials in the Keychain via `security`.
-            username = f"account-{account_num}-{email}"
+        creds = self._kc_call(
+            macos_keychain.get_password,
+            SECURITY_SERVICE,
+            self._backup_username(account_num, email),
+        )
+        return creds or ""
+
+    def _kc_write_backup(self, account_num: str, email: str, credentials: str) -> None:
+        """Write a per-account backup to the Keychain only. Raises on failure."""
+        self._kc_call(
+            macos_keychain.set_password,
+            SECURITY_SERVICE,
+            self._backup_username(account_num, email),
+            credentials,
+        )
+
+    def _kc_delete_backup(self, account_num: str, email: str) -> None:
+        """Delete a per-account backup Keychain item only. Raises on failure."""
+        self._kc_call(
+            macos_keychain.delete_password,
+            SECURITY_SERVICE,
+            self._backup_username(account_num, email),
+        )
+
+    def _delete_backup_keychain_quiet(self, account_num: str, email: str) -> None:
+        """Best-effort backup Keychain delete (never raises)."""
+        try:
+            self._kc_delete_backup(account_num, email)
+        except Exception as e:
+            self._logger.warning(f"Failed to delete credentials from Keychain: {e}")
+
+    def _write_backup_enc(self, account_num: str, email: str, credentials: str) -> None:
+        """Atomically write a per-account backup ``.enc`` (base64) file."""
+        self.credentials_dir.mkdir(parents=True, exist_ok=True)
+        enc_file = self._backup_enc_path(account_num, email)
+        encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(dir=str(self.credentials_dir), suffix=".tmp")
+        try:
+            os.write(fd, encoded.encode("utf-8"))
+            os.close(fd)
+            fd = -1
+            os.replace(tmp_path, str(enc_file))
+            if sys.platform != "win32":
+                os.chmod(str(enc_file), 0o600)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
             try:
-                creds = macos_keychain.get_password(SECURITY_SERVICE, username)
-                return creds if creds else ""
-            except Exception as e:
-                self._logger.warning(f"Failed to read credentials from Keychain: {e}")
-                return ""
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
-    def _write_account_credentials(
+    def _reconcile_enc_after_keychain_write(
         self, account_num: str, email: str, credentials: str
     ) -> None:
-        """Write account credentials to backup.
+        """Stop a leftover ``.enc`` from shadowing a just-written Keychain backup.
 
-        On Linux/WSL/Windows: Uses file-based storage (base64 files under
-        ``credentials_dir``). On macOS: Uses the Keychain via the ``security`` CLI.
+        ``.enc``-wins reads make this correctness-critical: delete the ``.enc``; if
+        the delete fails, atomically rewrite it with the same fresh creds; if that
+        also fails, raise so the inconsistency surfaces rather than serving stale.
         """
-        if self._uses_file_backup_backend():
-            cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
-            try:
-                encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-                cred_file.write_text(encoded, encoding="utf-8")
-                if sys.platform != "win32":
-                    os.chmod(cred_file, 0o600)
-            except Exception as e:
-                self._logger.warning(f"Failed to write credentials file: {e}")
-                raise
-        else:
-            # macOS: per-account backup credentials in the Keychain via `security`.
-            username = f"account-{account_num}-{email}"
-            try:
-                macos_keychain.set_password(SECURITY_SERVICE, username, credentials)
-            except Exception as e:
-                self._logger.warning(f"Failed to write credentials to Keychain: {e}")
-                raise
-        # Backup credentials changed (re-login via --add-account, --add-token,
-        # import, switch backing up, or a usage-refresh rotation): a session
-        # profile seeded from the old credentials may now hold a stale or
-        # rotated-out token that still passes the local reuse check. Drop the
-        # profile's credential material so the next `cswap run` re-bootstraps
-        # from this fresh backup (history is preserved). A LIVE session keeps
-        # its own copy untouched — claude manages it; pulling credentials out
-        # from under a running process would be worse than the drift caveat —
-        # but gets a stale marker so setup_session re-bootstraps it once it
-        # is no longer live, instead of trusting the local reuse check.
+        enc_file = self._backup_enc_path(account_num, email)
+        if not enc_file.exists():
+            return
+        try:
+            enc_file.unlink()
+            return
+        except Exception as e:
+            self._logger.warning(
+                f"Could not delete .enc after Keychain backup write ({e}); "
+                "rewriting it with the fresh credentials to keep both consistent"
+            )
+        self._write_backup_enc(account_num, email, credentials)
+
+    def _post_backup_write(self, account_num: str, email: str) -> None:
+        """Invalidate the slot's session profile after backup credentials change.
+
+        Backup credentials changed (re-login via --add-account, --add-token,
+        import, switch backing up, or a usage-refresh rotation): a session profile
+        seeded from the old credentials may now hold a stale or rotated-out token
+        that still passes the local reuse check. Drop the profile's credential
+        material so the next `cswap run` re-bootstraps from this fresh backup
+        (history is preserved). A LIVE session keeps its own copy untouched — claude
+        manages it; pulling credentials out from under a running process would be
+        worse than the drift caveat — but gets a stale marker so setup_session
+        re-bootstraps it once it is no longer live.
+        """
         if self._live_session_pids(account_num, email):
             from claude_swap.session import mark_session_stale
 
@@ -393,32 +532,92 @@ class ClaudeAccountSwitcher:
         else:
             self._invalidate_session_credentials(account_num, email)
 
-    def _delete_account_credentials(self, account_num: str, email: str) -> None:
-        """Delete account credentials from backup.
+    def _read_account_credentials(self, account_num: str, email: str) -> str:
+        """Read account credentials from backup. ``""`` when missing.
 
-        On Linux/WSL/Windows: Deletes file-based credential storage.
-        On macOS: Removes from the Keychain via the ``security`` CLI.
+        macOS is ``.enc``-wins (a fallback file beats a possibly-stale Keychain
+        copy); only an absent or corrupt ``.enc`` falls through to the Keychain.
+        Linux/WSL/Windows read the ``.enc`` only.
         """
-        if self._uses_file_backup_backend():
-            cred_files = [self.credentials_dir / f".creds-{account_num}-{email}.enc"]
-            if str(account_num) != "None":
-                cred_files.append(self.credentials_dir / f".creds-None-{email}.enc")
-            for cred_file in cred_files:
-                try:
-                    if cred_file.exists():
-                        cred_file.unlink()
-                except Exception as e:
-                    self._logger.warning(f"Failed to delete credentials file: {e}")
-        else:
-            # macOS: per-account backup credentials in the Keychain via `security`.
-            usernames = [f"account-{account_num}-{email}"]
-            if str(account_num) != "None":
-                usernames.append(f"account-None-{email}")
-            for username in usernames:
-                try:
-                    macos_keychain.delete_password(SECURITY_SERVICE, username)
-                except Exception as e:
-                    self._logger.warning(f"Failed to delete credentials from Keychain: {e}")
+        enc_file = self._backup_enc_path(account_num, email)
+        if enc_file.exists():
+            try:
+                encoded = enc_file.read_text(encoding="utf-8").strip()
+                # validate=True: reject non-alphabet junk (e.g. "!!!!") instead of
+                # silently discarding it to empty bytes, which would let a corrupt
+                # .enc shadow a valid Keychain copy.
+                decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            except Exception as e:
+                # Corrupt/garbled .enc → on macOS fall through to the Keychain copy.
+                self._logger.warning(f"Failed to read credentials file: {e}")
+            else:
+                if decoded:
+                    return decoded
+                # Empty/whitespace .enc is not a real backup → try the Keychain.
+        if self.platform == Platform.MACOS:
+            try:
+                return self._kc_read_backup(account_num, email)
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                self._logger.warning(f"Failed to read credentials from Keychain: {e}")
+        return ""
+
+    def _write_account_credentials(
+        self, account_num: str, email: str, credentials: str
+    ) -> None:
+        """Write account credentials to backup.
+
+        macOS writes the Keychain when usable, then reconciles the ``.enc`` away
+        (see ``_reconcile_enc_after_keychain_write``). When the Keychain is unusable
+        it writes the ``.enc`` atomically, then best-effort deletes any stale
+        Keychain copy so a recovered Keychain can't shadow the fresh file.
+        Linux/WSL/Windows write the ``.enc`` only.
+        """
+        if self._use_keychain():
+            try:
+                self._kc_write_backup(account_num, email, credentials)
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                # Keychain unusable; _kc_call flipped routing to file mode.
+                # (A programming error is NOT caught here — it propagates.)
+                self._logger.warning(
+                    f"Keychain backup write failed, falling back to file: {e}"
+                )
+            else:
+                self._reconcile_enc_after_keychain_write(account_num, email, credentials)
+                self._post_backup_write(account_num, email)
+                return
+
+        # File mode: write the .enc atomically, then (macOS) best-effort drop the
+        # stale Keychain copy so a recovered Keychain can't shadow the fresh file.
+        try:
+            self._write_backup_enc(account_num, email, credentials)
+        except Exception as e:
+            self._logger.warning(f"Failed to write credentials file: {e}")
+            raise
+        if self.platform == Platform.MACOS:
+            self._delete_backup_keychain_quiet(account_num, email)
+        self._post_backup_write(account_num, email)
+
+    def _delete_account_credentials(self, account_num: str, email: str) -> None:
+        """Delete account credentials from backup (both backends on macOS).
+
+        Removes the ``.enc`` file(s) and, on macOS, the Keychain item(s). The
+        Keychain delete is best-effort: if it's locked the item may linger as
+        harmless unreferenced cruft (the slot is gone from sequence.json; a re-add
+        overwrites it via ``-U``; purge sweeps it). Includes the legacy
+        ``account-None-{email}`` alias.
+        """
+        nums = [account_num]
+        if str(account_num) != "None":
+            nums.append("None")
+        for num in nums:
+            enc_file = self._backup_enc_path(num, email)
+            try:
+                if enc_file.exists():
+                    enc_file.unlink()
+            except Exception as e:
+                self._logger.warning(f"Failed to delete credentials file: {e}")
+            if self.platform == Platform.MACOS:
+                self._delete_backup_keychain_quiet(num, email)
 
     def _delete_account_files(self, account_num: str, email: str) -> None:
         """Delete all backup files for an account (credentials + config).
@@ -1957,15 +2156,21 @@ class ClaudeAccountSwitcher:
         print()
 
     def _print_switch_followup(self) -> None:
-        """Print the platform-appropriate note after a successful switch.
+        """Print the note after a successful switch, keyed to where the active
+        credential write actually landed.
 
-        A restart is never required: Claude Code clears its cached OAuth token
-        when ``.credentials.json`` changes (Linux/WSL/Windows — effective on the
-        next message) or when the macOS Keychain cache TTL (~30s) expires. Both
-        lines are therefore dim informational hints, not warnings; macOS adds
-        that a restart skips the ~30s wait.
+        A restart is never required: Claude Code clears its cached OAuth token when
+        ``.credentials.json`` changes (file storage — effective on the next message)
+        or when the macOS Keychain cache TTL (~30s) expires. Both lines are dim
+        hints, not warnings; the Keychain line adds that a restart skips the wait.
+        The file line also covers macOS when the Keychain was unavailable and the
+        switch fell back to the file.
         """
-        if self.platform == Platform.MACOS:
+        backend = self._last_active_credentials_backend
+        if backend is None:
+            # No write happened this run; fall back to the routing hint.
+            backend = "keychain" if self._use_keychain() else "file"
+        if backend == "keychain":
             print(dimmed(
                 "Switch takes effect within about 30 seconds — "
                 "restart Claude Code to apply immediately."
@@ -1977,9 +2182,10 @@ class ClaudeAccountSwitcher:
         """Remove all traces of claude-swap from the system.
 
         This removes:
-        - All stored account credentials (files on Linux/WSL/Windows, macOS
-          Keychain items via ``security`` on macOS), plus a best-effort sweep of
-          any pre-migration keyring / Windows Credential Manager entries left behind
+        - All stored account credentials (``.enc`` files on Linux/WSL/Windows; on
+          macOS both the Keychain items via ``security`` and any fallback ``.enc``
+          files), plus a best-effort sweep of any pre-migration keyring / Windows
+          Credential Manager entries left behind
         - The active backup directory (XDG path on Linux/WSL, ~/.claude-swap-backup elsewhere)
         - Any stale legacy ~/.claude-swap-backup directory left around from
           before the XDG migration
@@ -2016,10 +2222,10 @@ class ClaudeAccountSwitcher:
         print(f"  - Backup directory: {self.backup_dir}")
         if legacy_distinct and legacy.exists():
             print(f"  - Legacy backup directory: {legacy}")
-        if self._uses_file_backup_backend():
-            print("  - All stored account credential files")
+        if self.platform == Platform.MACOS:
+            print("  - All stored account credentials (macOS Keychain and/or files)")
         else:
-            print("  - All stored account credentials from the macOS Keychain")
+            print("  - All stored account credential files")
         if session_dirs:
             print("  - All session profiles and their Keychain entries")
         print()
@@ -2033,49 +2239,41 @@ class ClaudeAccountSwitcher:
 
         removed_items = []
 
-        # Remove credentials
+        # Remove credentials. On macOS backups may be in the Keychain and/or .enc
+        # files (auto-fallback), so clean both; Linux/WSL/Windows are file-only.
         data = self._get_sequence_data()
         if data:
             for account_num, account_info in data.get("accounts", {}).items():
                 email = account_info.get("email", "")
-                if self._uses_file_backup_backend():
-                    # Remove credential files (Linux/WSL/Windows)
-                    cred_files = [
-                        self.credentials_dir / f".creds-{account_num}-{email}.enc"
-                    ]
-                    if str(account_num) != "None":
-                        cred_files.append(
-                            self.credentials_dir / f".creds-None-{email}.enc"
-                        )
-                    for cred_file in cred_files:
-                        try:
-                            if cred_file.exists():
-                                cred_file.unlink()
-                                removed_items.append(f"Credential file: {cred_file.name}")
-                        except Exception:
-                            pass  # Ignore errors during purge
-                    if self.platform == Platform.WINDOWS:
-                        # Best-effort cleanup of any pre-migration Credential
-                        # Manager entries left behind if the keyring → file
-                        # migration never completed. Files are authoritative
-                        # now; these are just stale cruft.
-                        usernames = [f"account-{account_num}-{email}"]
-                        if str(account_num) != "None":
-                            usernames.append(f"account-None-{email}")
-                        _sweep_legacy_keyring(usernames, removed_items)
-                else:
-                    # macOS: remove the Keychain items via `security`.
-                    usernames = [f"account-{account_num}-{email}"]
-                    if str(account_num) != "None":
-                        usernames.append(f"account-None-{email}")
+                nums = [account_num]
+                if str(account_num) != "None":
+                    nums.append("None")
+                usernames = [f"account-{num}-{email}" for num in nums]
+
+                # .enc files (Linux/WSL/Windows always; macOS fallback copies).
+                for num in nums:
+                    cred_file = self.credentials_dir / f".creds-{num}-{email}.enc"
+                    try:
+                        if cred_file.exists():
+                            cred_file.unlink()
+                            removed_items.append(f"Credential file: {cred_file.name}")
+                    except Exception:
+                        pass  # Ignore errors during purge
+
+                # macOS Keychain items via `security` (current macOS backend).
+                if self.platform == Platform.MACOS:
                     for username in usernames:
                         try:
                             macos_keychain.delete_password(SECURITY_SERVICE, username)
                             removed_items.append(f"Credential: {username}")
                         except Exception:
                             pass  # Ignore errors during purge
-                    # Best-effort cleanup of any pre-migration keyring entries left
-                    # behind if the keyring → security migration never completed.
+
+                # Best-effort sweep of any pre-migration keyring / Credential
+                # Manager entries left behind by an incomplete keyring → files
+                # (Windows) or keyring → security (macOS) migration. Linux/WSL
+                # never used a keyring backend.
+                if self.platform in (Platform.MACOS, Platform.WINDOWS):
                     _sweep_legacy_keyring(usernames, removed_items)
 
         # Session-profile keychain entries must go BEFORE the backup dir:
