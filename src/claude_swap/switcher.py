@@ -25,6 +25,8 @@ from claude_swap import oauth
 from claude_swap.cache import MISSING, read_cache, write_cache
 from claude_swap.json_output import (
     SCHEMA_VERSION,
+    USAGE_NO_CREDENTIALS,
+    USAGE_TOKEN_EXPIRED,
     account_ref,
     account_row,
     usage_fields,
@@ -1129,6 +1131,106 @@ class ClaudeAccountSwitcher:
             accounts_info.append((num, email, org_name, org_uuid, is_active, creds))
         return accounts_info
 
+    def _active_cc_running(self) -> bool:
+        """Whether any default-profile Claude Code instance is running.
+
+        Fails closed: if instance detection raises, assume an owner may exist so we
+        never refresh the live credential out from under a running Claude Code.
+        """
+        try:
+            sessions, ides = get_running_instances()
+            return bool(sessions or ides)
+        except Exception:
+            self._logger.debug("Failed to detect running Claude instances", exc_info=True)
+            return True
+
+    def _fetch_active_usage(
+        self, account_num: str, email: str, creds: str
+    ) -> dict | str | None:
+        """Usage for the active/default account, refreshing its token only when safe.
+
+        The active credential is the one Claude Code concurrently owns, so cswap
+        normally leaves it alone (issue #62). But when no *owner* is detected —
+        neither a default-profile Claude Code (``_active_cc_running``) nor a live
+        ``cswap run`` session for this same account (``_live_session_pids``) — there
+        is no concurrent refresher, so an expired token can be refreshed and written
+        back to the **active** store (Claude Code reads the rotated credential on its
+        next start).
+
+        When an owner *is* present and the token is expired, returns the
+        ``USAGE_TOKEN_EXPIRED`` sentinel so the UI shows an intentional line rather
+        than a bare "usage unavailable".
+        """
+        oauth_data = oauth.extract_oauth_data(creds)
+        if not oauth_data or not oauth_data.get("accessToken"):
+            return USAGE_NO_CREDENTIALS
+
+        owned = self._active_cc_running() or bool(
+            self._live_session_pids(account_num, email)
+        )
+        if owned:
+            usage = oauth.fetch_usage_for_account(
+                account_num, email, creds, is_active=True,
+            )
+            if usage is None and oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
+                return USAGE_TOKEN_EXPIRED
+            return usage
+
+        # No owner detected → safe to refresh the active token. Reuse the inactive
+        # refresh machinery (proactive refresh + 401 retry), persisting the rotated
+        # credential to BOTH the active store and the backup. Do NOT hold the lock
+        # across the network refresh: FileLock is non-reentrant and persist_active
+        # re-acquires it (regressing commit a07c767 would deadlock and silently drop
+        # the refreshed token).
+        original_refresh = oauth_data.get("refreshToken")
+        persist_skipped = False
+
+        def persist_active(num: str, acct_email: str, new_creds: str) -> None:
+            nonlocal persist_skipped
+            with FileLock(self.lock_file):
+                live = self._read_credentials() or ""
+                live_oauth = oauth.extract_oauth_data(live) if live else None
+                live_refresh = live_oauth.get("refreshToken") if live_oauth else None
+                # Re-check owners + refresh-token lineage under the lock. If a Claude
+                # Code / session appeared, or an external write (e.g. a user /login)
+                # replaced the credential since we read it, skip rather than clobber a
+                # live process's newer credential. Best effort, not perfectly atomic.
+                if (
+                    self._active_cc_running()
+                    or self._live_session_pids(num, acct_email)
+                    or live_refresh != original_refresh
+                ):
+                    persist_skipped = True
+                    self._logger.warning(
+                        "Active-account refresh for %s (%s): owner appeared or refresh "
+                        "token changed mid-refresh; discarding rotated credential.",
+                        num, acct_email,
+                    )
+                    return
+                # A write failure leaves the live store holding the now-consumed
+                # original refresh token, so mark the persist as skipped (never show
+                # usage for it) and re-raise — oauth._persist swallows the exception
+                # but logs its "failed to persist" warning first.
+                try:
+                    self._write_credentials(new_creds)  # active store — Claude Code reads this
+                    self._write_account_credentials(num, acct_email, new_creds)  # backup in sync
+                except Exception:
+                    persist_skipped = True
+                    raise
+
+        usage = oauth.fetch_usage_for_account(
+            account_num, email, creds,
+            is_active=False, persist_credentials=persist_active,
+        )
+        # If we refreshed but discarded the rotated credential, never show usage for
+        # a credential we didn't keep — surface the expired state and let Claude Code
+        # settle it.
+        if persist_skipped:
+            return USAGE_TOKEN_EXPIRED
+        if usage is None and oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
+            return USAGE_TOKEN_EXPIRED
+        return usage
+
     def _collect_usage(
         self, accounts_info: list[tuple[int, str, str, str, bool, str]]
     ) -> list[dict | str | None]:
@@ -1144,7 +1246,13 @@ class ClaudeAccountSwitcher:
         ) -> dict | str | None:
             num, email, _, _, is_active, creds = account_info
             if not creds or not oauth.extract_access_token(creds):
-                return "no credentials"
+                return USAGE_NO_CREDENTIALS
+
+            # The active/default account owns the live credential — route it through
+            # the owner-aware path that refreshes only when no Claude Code/session is
+            # running and writes the rotated credential back to the active store.
+            if is_active:
+                return self._fetch_active_usage(str(num), email, creds)
 
             def persist(acct_num: str, acct_email: str, new_creds: str) -> None:
                 with FileLock(self.lock_file):
@@ -1160,7 +1268,7 @@ class ClaudeAccountSwitcher:
 
             return oauth.fetch_usage_for_account(
                 str(num), email, creds,
-                is_active=is_active or has_live_session,
+                is_active=has_live_session,
                 persist_credentials=persist,
             )
 
@@ -1306,7 +1414,9 @@ class ClaudeAccountSwitcher:
                 print(f"  {num}: {email} {muted(f'[{tag}]')}{marker}")
             else:
                 print(f"  {num}: {email} {muted(f'[{tag}]')}")
-            if isinstance(usage, str):
+            if usage == USAGE_TOKEN_EXPIRED:
+                print(f"     {dimmed('token expired — Claude Code refreshes the active account')}")
+            elif isinstance(usage, str):
                 print(f"     {dimmed(usage)}")
             elif usage is None:
                 print(f"     {dimmed('usage unavailable')}")
@@ -1361,23 +1471,21 @@ class ClaudeAccountSwitcher:
     ) -> dict | str | None:
         """Usage for the active account as a ``_collect_usage``-style entry.
 
-        Returns ``"no credentials"`` when the live store has no usable token, a
-        usage dict on success, or ``None`` when the fetch fails. Reuses (and
-        refreshes) the same ``cache/usage.json`` list_accounts writes — cache-first,
-        fetching with ``is_active=True`` so cswap never refreshes Claude Code's live
-        credentials, and merging into existing entries so other rows survive.
+        Returns ``USAGE_NO_CREDENTIALS`` when the live store has no usable token, a
+        usage dict on success, ``USAGE_TOKEN_EXPIRED`` when the token is expired and
+        Claude Code owns it, or ``None`` when the fetch fails. Reuses the same
+        ``cache/usage.json`` list_accounts writes — cache-first — and delegates the
+        owner-aware refresh decision to ``_fetch_active_usage``.
         """
         creds = self._read_credentials() or ""
         if not creds or not oauth.extract_access_token(creds):
-            return "no credentials"
+            return USAGE_NO_CREDENTIALS
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
         cached = read_cache(usage_cache_path, _USAGE_CACHE_TTL)
         if (cached is not MISSING and isinstance(cached, dict)
                 and account_num in cached):
             return cached[account_num]
-        usage = oauth.fetch_usage_for_account(
-            account_num, current_email, creds, is_active=True,
-        )
+        usage = self._fetch_active_usage(account_num, current_email, creds)
         existing = cached if (cached is not MISSING and isinstance(cached, dict)) else {}
         existing[account_num] = usage
         write_cache(usage_cache_path, existing)
@@ -1460,6 +1568,8 @@ class ClaudeAccountSwitcher:
                 for j, line in enumerate(lines):
                     connector = "└" if j == len(lines) - 1 else "├"
                     print(f"  {dimmed(connector)} {muted(line)}")
+            elif usage == USAGE_TOKEN_EXPIRED:
+                print(f"  {dimmed('token expired — Claude Code refreshes the active account')}")
         else:
             print(f"{bolded('Status:')} {current_email} {dimmed('(not managed)')}")
         return None

@@ -11,6 +11,12 @@ from __future__ import annotations
 # Bump only on a breaking change to any payload shape. Scripts key off this.
 SCHEMA_VERSION = 1
 
+# Sentinel entries that ``_collect_usage`` / ``_fetch_active_usage`` yield in place
+# of a usage dict. Kept here (the serialization hub) so the human renderer and the
+# JSON projection agree instead of scattering raw strings.
+USAGE_NO_CREDENTIALS = "no credentials"
+USAGE_TOKEN_EXPIRED = "token expired"
+
 
 def _window_to_json(entry: dict) -> dict:
     """Project a 5h/7d usage window to JSON, preserving raw ``resetsAt``."""
@@ -56,11 +62,14 @@ def usage_to_json(usage: dict) -> dict:
 def usage_fields(entry: dict | str | None) -> tuple[str, dict | None]:
     """Map a collected usage entry to ``(usageStatus, usage|None)``.
 
-    ``_collect_usage`` yields one of: a usage dict, the string ``"no credentials"``,
-    or ``None`` (fetch failed).
+    A collected entry is one of: a usage dict, the ``USAGE_TOKEN_EXPIRED`` sentinel
+    (active token expired while Claude Code owns it), the ``USAGE_NO_CREDENTIALS``
+    sentinel, or ``None`` (fetch failed).
     """
     if isinstance(entry, dict):
         return "ok", usage_to_json(entry)
+    if entry == USAGE_TOKEN_EXPIRED:
+        return "token_expired", None
     if isinstance(entry, str):
         return "no_credentials", None
     return "unavailable", None
