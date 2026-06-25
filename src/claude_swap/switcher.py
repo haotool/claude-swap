@@ -1986,26 +1986,11 @@ class ClaudeAccountSwitcher:
         self._logger.info(f"Removed account {account_num}: {email}")
         print(f"{accent('Removed')} Account-{account_num} ({email})")
 
-    def list_accounts(
-        self,
-        show_token_status: bool = False,
-        show_health: bool = False,
-    ) -> None:
-        """List all managed accounts."""
-        if not self.sequence_file.exists():
-            print(dimmed("No accounts are managed yet."))
-            self._first_run_setup()
-            return
-
-        data = self._get_sequence_data_migrated()
-        current_identity = self._get_current_account()
-        active_num = None
-        if current_identity is not None:
-            current_email, current_org_uuid = current_identity
-            active_num = _slot_for_identity(
-                data.get("accounts", {}), current_email, current_org_uuid,
-            )
-
+    def _collect_accounts_info(
+        self, data: dict, active_num: str | None
+    ) -> tuple[list[tuple[int, str, str, str, bool, str]], dict[str, list[str]]]:
+        """Build per-account rows, syncing the live account and refreshing
+        inactive backups. Returns (accounts_info, health_notes)."""
         accounts_info = []
         health_notes: dict[str, list[str]] = {}
         for num in data.get("sequence", []):
@@ -2035,42 +2020,49 @@ class ClaudeAccountSwitcher:
                         health_notes.setdefault(str(num), []).append(refresh_note)
 
             accounts_info.append((num, email, org_name, org_uuid, is_active, creds))
+        return accounts_info, health_notes
 
-        def fetch(
-            account_info: tuple[int, str, str, str, bool, str]
-        ):
-            num, email, _, _, is_active, creds = account_info
-            if not creds or not oauth.extract_access_token(creds):
-                return "no credentials"
+    def _fetch_account_usage(
+        self, account_info: tuple[int, str, str, str, bool, str]
+    ):
+        """Fetch live usage for one account row (used by the thread pool)."""
+        num, email, _, _, is_active, creds = account_info
+        if not creds or not oauth.extract_access_token(creds):
+            return "no credentials"
 
-            def persist(acct_num: str, acct_email: str, new_creds: str) -> None:
-                with FileLock(self.lock_file):
-                    self._write_account_credentials(acct_num, acct_email, new_creds)
+        def persist(acct_num: str, acct_email: str, new_creds: str) -> None:
+            with FileLock(self.lock_file):
+                self._write_account_credentials(acct_num, acct_email, new_creds)
 
-            # An account running in session mode is "inactive" here but live
-            # in its own config dir, where claude manages the token. Treat it
-            # like the active account (no proactive refresh / 401-retry):
-            # refreshing the backup copy could rotate the refresh token out
-            # from under the live session. Worst case its usage shows as
-            # unavailable until the session exits.
-            has_live_session = bool(self._live_session_pids(str(num), email))
+        # An account running in session mode is "inactive" here but live
+        # in its own config dir, where claude manages the token. Treat it
+        # like the active account (no proactive refresh / 401-retry):
+        # refreshing the backup copy could rotate the refresh token out
+        # from under the live session. Worst case its usage shows as
+        # unavailable until the session exits.
+        has_live_session = bool(self._live_session_pids(str(num), email))
 
-            result = oauth.fetch_usage_for_account(
-                str(num), email, creds,
-                is_active=is_active or has_live_session,
-                persist_credentials=persist,
+        result = oauth.fetch_usage_for_account(
+            str(num), email, creds,
+            is_active=is_active or has_live_session,
+            persist_credentials=persist,
+        )
+        if isinstance(result, oauth.UsageFetchError):
+            self._logger.info(
+                "Usage fetch unavailable: account=%s email=%s active=%s reason=%s status=%s",
+                num,
+                email,
+                is_active,
+                result.reason,
+                result.status_code,
             )
-            if isinstance(result, oauth.UsageFetchError):
-                self._logger.info(
-                    "Usage fetch unavailable: account=%s email=%s active=%s reason=%s status=%s",
-                    num,
-                    email,
-                    is_active,
-                    result.reason,
-                    result.status_code,
-                )
-            return result
+        return result
 
+    def _resolve_usages(
+        self, accounts_info: list[tuple[int, str, str, str, bool, str]]
+    ) -> tuple[list, list]:
+        """Return (usages, usage_notes): the fresh cache when trusted, else a
+        live fetch that is merged back into the cache."""
         usage_cache_path = self.backup_dir / "cache" / "usage.json"
         cached_data, file_ts = read_cache_with_timestamp(usage_cache_path)
         previous_cached = cached_data if cached_data is not None else {}
@@ -2086,7 +2078,7 @@ class ClaudeAccountSwitcher:
             usage_notes = [None for _ in accounts_info]
         else:
             with ThreadPoolExecutor() as executor:
-                usages = list(executor.map(fetch, accounts_info))
+                usages = list(executor.map(self._fetch_account_usage, accounts_info))
             merged_usages = {}
             usage_notes = []
             for info, usage in zip(accounts_info, usages):
@@ -2097,7 +2089,19 @@ class ClaudeAccountSwitcher:
                 usage_notes.append(note)
             usages = [_usage_from_cache(merged_usages[str(info[0])]) for info in accounts_info]
             write_cache(usage_cache_path, merged_usages)
+        return usages, usage_notes
 
+    def _print_account_rows(
+        self,
+        accounts_info: list[tuple[int, str, str, str, bool, str]],
+        usages: list,
+        usage_notes: list,
+        health_notes: dict[str, list[str]],
+        *,
+        show_health: bool,
+        show_token_status: bool,
+    ) -> None:
+        """Render the per-account usage/health/token block."""
         print(bolded("Accounts:"))
         for i, ((num, email, org_name, org_uuid, is_active, _), usage) in enumerate(zip(accounts_info, usages)):
             tag = self._get_display_tag(email, org_name, org_uuid)
@@ -2135,7 +2139,8 @@ class ClaudeAccountSwitcher:
             if i < len(accounts_info) - 1:
                 print()
 
-        # Running instances
+    def _print_running_instances(self) -> None:
+        """Render the grouped 'Running instances' block (best-effort)."""
         try:
             sessions, ide_instances = get_running_instances()
 
@@ -2167,6 +2172,38 @@ class ClaudeAccountSwitcher:
                     print(f"  {dimmed('●')} {muted(label)}   {muted(cwd)}  {dimmed(f'({", ".join(parts)})')}")
         except Exception:
             self._logger.debug("Failed to detect running instances", exc_info=True)
+
+    def list_accounts(
+        self,
+        show_token_status: bool = False,
+        show_health: bool = False,
+    ) -> None:
+        """List all managed accounts."""
+        if not self.sequence_file.exists():
+            print(dimmed("No accounts are managed yet."))
+            self._first_run_setup()
+            return
+
+        data = self._get_sequence_data_migrated()
+        current_identity = self._get_current_account()
+        active_num = None
+        if current_identity is not None:
+            current_email, current_org_uuid = current_identity
+            active_num = _slot_for_identity(
+                data.get("accounts", {}), current_email, current_org_uuid,
+            )
+
+        accounts_info, health_notes = self._collect_accounts_info(data, active_num)
+        usages, usage_notes = self._resolve_usages(accounts_info)
+        self._print_account_rows(
+            accounts_info,
+            usages,
+            usage_notes,
+            health_notes,
+            show_health=show_health,
+            show_token_status=show_token_status,
+        )
+        self._print_running_instances()
 
     def status(self) -> None:
         """Display current account status."""
