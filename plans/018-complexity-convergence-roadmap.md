@@ -17,7 +17,18 @@
 ## Status
 
 - **Track B (B1–B4): DONE** — 2026-06-25; see "Outcome" below.
-- **Track C: not started** (deferred; see section below).
+- **Track C: partially DONE** — 2026-06-26. Both named seams now landed as
+  cohesive modules with switcher keeping thin delegators / re-exports:
+  - `CredentialIO` → `credentials.py` `CredentialStore` + `credential_refresh.py`
+    `CredentialRefresher` (plans 020/021).
+  - `UsageCache` **codec layer** → `usage_cache.py` (the 7 pure
+    `_usage_*` serialization/freshness functions + `_USAGE_CACHE_TTL`). The
+    *orchestration* methods (`_refresh_switchable_usage_cache` — 7-method
+    coupling to creds/session/account; `_trusted_usage_snapshots`) deliberately
+    stay in switcher: they are credential/session orchestration, not cache
+    codec, and extracting them would create a chatty back-referencing
+    collaborator (anemic-module anti-pattern). This is the evidence-based stop
+    point for safe extraction; no circular coupling was introduced.
 - **Priority**: P2
 - **Effort**: L (split across sub-steps)
 - **Risk**: MED — touches the critical switch path; guard with the suite
