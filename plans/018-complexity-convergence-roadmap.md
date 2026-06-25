@@ -16,6 +16,8 @@
 
 ## Status
 
+- **Track B (B1–B4): DONE** — 2026-06-25; see "Outcome" below.
+- **Track C: not started** (deferred; see section below).
 - **Priority**: P2
 - **Effort**: L (split across sub-steps)
 - **Risk**: MED — touches the critical switch path; guard with the suite
@@ -51,7 +53,12 @@ harness.
 
 ## Sequencing (each = own commit, suite green between)
 
-### Step B1 — decompose `_perform_switch` (highest risk first, smallest blast)
+> **All four steps landed 2026-06-25, each fast-forwarded into
+> `improve/p1-clean-code-convergence` with the full suite (660 passed / 3
+> skipped) green between merges. See "Outcome" for the as-built result, which
+> diverged from the helper names guessed below.**
+
+### Step B1 — decompose `_perform_switch` (highest risk first, smallest blast) ✅ DONE (`59257a0`)
 Extract cohesive, already-commented phases into private methods on the
 switcher, preserving call order and side effects exactly:
 - readback verification → `_verify_switch_readback(...)`
@@ -61,18 +68,43 @@ Leave the orchestration body as a linear sequence of named calls.
 **STOP** if any extraction changes the number/order of credential writes —
 diff `git log -p` against the `_write_*credentials` call sequence.
 
-### Step B2 — decompose `list_accounts`
+### Step B2 — decompose `list_accounts` ✅ DONE (`bf577ab`)
 Split the row-building (per-account usage/health assembly) from the
 rendering. The renderer is SSOT for the TUI (plan 004) — do **not** fork it;
 extract `_build_account_rows(...)` returning data, keep one print path.
 
-### Step B3 — `cli.main` dispatch table
+### Step B3 — `cli.main` dispatch table ✅ DONE (`34ecc42`)
 Replace the if/elif command chain with a `{command: handler}` mapping.
 Pure control-flow flattening; each handler keeps its current body.
 
-### Step B4 (optional) — `add_account` / `add_account_from_token`
+### Step B4 (optional) — `add_account` / `add_account_from_token` ✅ DONE (`88057ff`)
 Factor the shared "persist new slot + sequence bookkeeping" tail into one
 helper both call.
+
+## Outcome (as built, 2026-06-25)
+
+All four hotspots cleared their statement/branch budgets; behavior held
+constant (660 passed throughout; live switch round-trips for B1/B3).
+
+| Step | Commit | Before (stmt/cyclo) | As-built helpers |
+|---|---|---|---|
+| B1 | `59257a0` | 149 / 35 | `_warn_switch_session_hazards`, `_activate_target_directly`, `_swap_target_transactional`, `_print_switch_result` |
+| B2 | `bf577ab` | 115 / 33 | `_collect_accounts_info`, `_fetch_account_usage`, `_resolve_usages`, `_print_account_rows`, `_print_running_instances` |
+| B3 | `34ecc42` | 103 / 32 | `_build_parser`, `_validate_args`, `_dispatch_action`, `_cmd_export/import/tui/monitor`, `_SUBCOMMANDS` |
+| B4 | `88057ff` | 24 / 22 | `_resolve_target_slot`, `_apply_slot_displacement`, `_register_account_slot` (**net −29 LOC**, slot logic now SSOT) |
+
+Residual over-budget functions left for a future pass: `switch` (27),
+`purge` (28), `_activate_target_directly` (17, B1 by-product),
+`migrations.*` (18/22), `monitor.monitor_step` (17),
+`session._sync_sharing` (18). None block Track C.
+
+Notes from execution:
+- The B1 helper names above differ from the pre-work guesses
+  (`_verify_switch_readback` etc.) — the real seams were the two activation
+  paths plus the pre/post-lock blocks, not the readback step.
+- B3 surfaced a regression: a `{cmd: function}` table binds handlers at import
+  time and breaks `monkeypatch.setattr(cli, "_service_command", ...)`. Fixed by
+  mapping to names and resolving via `globals()` at call time.
 
 ## Track C (deferred, separate plan when B lands)
 
