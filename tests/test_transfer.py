@@ -435,7 +435,8 @@ class TestValidation:
         f = temp_home / "c.cswap"
         f.write_text(json.dumps(env))
 
-        with pytest.raises(TransferError, match="must be JSON objects"):
+        # A non-api-key string credential is a malformed OAuth payload.
+        with pytest.raises(TransferError, match="must be a JSON object"):
             import_accounts(s, str(f))
 
     @pytest.mark.parametrize(

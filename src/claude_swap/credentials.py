@@ -27,6 +27,7 @@ upstream.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import sys
@@ -40,6 +41,7 @@ from claude_swap.models import Platform
 from claude_swap.paths import (
     get_claude_config_home,
     get_credentials_path,
+    get_global_config_path,
 )
 
 # Service name under which the legacy ``keyring`` backend stored per-account
@@ -51,9 +53,40 @@ from claude_swap.paths import (
 # keyring items and new security items coexist during migration.
 SECURITY_SERVICE = "claude-swap"
 
-# Service name of Claude Code's *active* credential in the macOS Keychain (read
-# by Claude Code itself; we read/write it when switching accounts).
+# Service name of Claude Code's *active* OAuth credential in the macOS Keychain
+# (read by Claude Code itself; we read/write it when switching accounts).
 CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+# Service name of Claude Code's *active* managed API key (``/login`` with an
+# ``sk-ant-api…`` key) in the macOS Keychain. Distinct from the OAuth service
+# above (no ``-credentials`` suffix); Claude Code resolves it on a separate auth
+# axis. On non-macOS the managed key instead lives in ``~/.claude.json`` as
+# ``primaryApiKey``.
+CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE = "Claude Code"
+
+
+def looks_like_api_key(credentials: str | None) -> bool:
+    """Whether a stored active credential is a raw managed API key vs OAuth JSON.
+
+    Strict on purpose: a managed key is a bare ``sk-ant-api…`` string, while every
+    OAuth/setup-token credential is a JSON object (``{"claudeAiOauth": …}``).
+    Requiring the ``sk-ant-api`` prefix (and that it isn't JSON) keeps a
+    raw/garbled ``sk-ant-oat…`` setup token from ever being misclassified.
+    """
+    if not credentials:
+        return False
+    text = credentials.strip()
+    return text.startswith("sk-ant-api") and not text.startswith("{")
+
+
+def approved_form(api_key: str) -> str:
+    """The value Claude Code stores in ``customApiKeyResponses.approved``.
+
+    Mirrors Claude Code's ``normalizeApiKeyForConfig`` (``apiKey.slice(-20)``):
+    the last 20 chars. Storing anything else makes Claude Code's "is this key
+    approved?" check miss and re-prompt the user to approve the key.
+    """
+    return api_key.strip()[-20:]
 
 
 class _StoreHost(Protocol):
@@ -83,11 +116,29 @@ class CredentialStore:
     # -- active credential (Claude Code's own store) ----------------------
 
     def _read_credentials(self) -> str | None:
-        """Read credentials from Claude Code's storage.
+        """Read Claude Code's active credential — OAuth *or* managed API key.
 
-        Claude Code stores credentials in:
-        - macOS: Keychain with service "Claude Code-credentials"
-        - Linux/WSL/Windows: File at ~/.claude/.credentials.json
+        Tries the OAuth credential fully first (macOS Keychain
+        "Claude Code-credentials", else ``~/.claude/.credentials.json``), then
+        the managed-key locations (macOS Keychain "Claude Code", then
+        ``~/.claude.json`` ``primaryApiKey``). Trying OAuth fully first means an
+        OAuth login is never misread as an API key. A returned managed key is a
+        raw ``sk-ant-api…`` string — callers distinguish it via
+        ``looks_like_api_key``.
+
+        Returns:
+            Credential string if found, "" if not found, None on a read error.
+        """
+        oauth_val = self._read_oauth_credentials()
+        if oauth_val is None:
+            return None
+        if oauth_val:
+            return oauth_val
+        # OAuth empty → fall through to the managed API key.
+        return self._read_managed_key()
+
+    def _read_oauth_credentials(self) -> str | None:
+        """Read Claude Code's active OAuth credential (no managed-key fallback).
 
         Returns:
             Credentials string if found, empty string if not found, None on error.
@@ -113,28 +164,123 @@ class CredentialStore:
                     return None
             return ""
 
-    def _write_credentials(self, credentials: str, *, verify: bool = False) -> None:
-        """Write credentials to Claude Code's storage.
+    def _read_managed_key(self) -> str:
+        """Read the active managed API key, or "" when absent. Non-mutating.
 
-        Claude Code stores credentials in:
-        - macOS: Keychain with service "Claude Code-credentials"
-        - Linux/WSL/Windows: File at ~/.claude/.credentials.json
+        macOS Keychain "Claude Code" first, then ``~/.claude.json``
+        ``primaryApiKey`` — mirroring Claude Code's resolution order.
+        """
+        if self._host.platform == Platform.MACOS:
+            try:
+                val = macos_keychain.get_password(
+                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                    os.environ.get("USER", "user"),
+                )
+            except Exception as e:
+                self._host._logger.warning(f"Managed-key Keychain read failed: {e}")
+                val = None
+            if val:
+                return val
+        cfg = self._read_global_config()
+        if cfg:
+            key = cfg.get("primaryApiKey")
+            if isinstance(key, str) and key:
+                return key
+        return ""
+
+    def _read_global_config(self) -> dict | None:
+        """Read and parse ``~/.claude.json``, or None when absent/unreadable."""
+        path = get_global_config_path()
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._host._logger.warning(f"Failed to read global config: {e}")
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _update_global_config(self, mutator) -> None:
+        """Atomically apply ``mutator(dict)`` to ``~/.claude.json``, key-scoped.
+
+        Reads the current config, lets ``mutator`` change only the keys it owns
+        (``primaryApiKey`` / ``customApiKeyResponses``), and writes it back
+        atomically — preserving every other key (``oauthAccount``, projects,
+        settings). 0o600 mirrors the switcher's write path.
+        """
+        path = get_global_config_path()
+        try:
+            data = self._read_global_config() or {}
+        except Exception as e:  # pragma: no cover - defensive
+            raise CredentialWriteError(f"Failed to read global config for update: {e}")
+        mutator(data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            os.write(fd, json.dumps(data, indent=2).encode("utf-8"))
+            os.close(fd)
+            fd = -1
+            os.replace(tmp_path, str(path))
+            if sys.platform != "win32":
+                os.chmod(str(path), 0o600)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    def _write_credentials(self, credentials: str, *, verify: bool = False) -> None:
+        """Write Claude Code's active credential, enforcing a single auth axis.
+
+        Detects the kind from the payload (raw ``sk-ant-api…`` key vs OAuth JSON)
+        and mirrors Claude Code's own save/remove: activating one axis clears the
+        other so a stale credential can't shadow the switch.
+
+        - **OAuth** → write the OAuth credential, then clear any managed key.
+        - **API key** → store the key (macOS Keychain "Claude Code", else
+          ``~/.claude.json`` ``primaryApiKey``) and record ``key[-20:]`` in
+          ``customApiKeyResponses.approved``, then clear the OAuth credential.
 
         Args:
             credentials: The credential payload to persist (raw string).
-            verify: When True, immediately read the credentials back from the
-                storage layer and confirm the readback matches what was
-                written. Defends against silent Keychain ACL corruption and
-                concurrent overwrites by other processes between our write and
-                the next operation. Recommended for activation-path writes;
-                left False on rollback writes where verification failure would
-                mask the original cause of the rollback. (claude-swap addition;
-                not present in upstream.)
+            verify: When True (OAuth path only), read the credential back and
+                confirm it matches — defends against silent Keychain ACL
+                corruption / concurrent overwrite on the activation path.
+                A no-op on the API-key path (no OAuth activation corruption to
+                guard; the managed write already persisted and cleared OAuth).
+                (claude-swap addition; not present in upstream.)
 
         Raises:
-            CredentialWriteError: If writing credentials fails, or if
-                ``verify=True`` and the readback does not match the intended
-                payload.
+            CredentialWriteError: If writing fails, or if ``verify=True`` (OAuth)
+                and the readback does not match the intended payload.
+        """
+        if looks_like_api_key(credentials):
+            self._write_managed_credentials(credentials.strip())
+            return
+
+        self._write_oauth_credentials(credentials)
+        # Mutual exclusion: drop any managed key so it can't shadow OAuth.
+        self._clear_managed_key()
+
+        if verify:
+            readback = self._read_credentials()
+            if readback != credentials:
+                # We deliberately do NOT include credential payloads in the
+                # error message (avoid leaking secrets into logs).
+                raise CredentialWriteError(
+                    "Credential write verification failed: readback differs "
+                    "from intended payload. Possible silent Keychain corruption "
+                    "or concurrent overwrite. Aborting switch."
+                )
+
+    def _write_oauth_credentials(self, credentials: str) -> None:
+        """Write Claude Code's active OAuth credential (no axis clearing).
+
+        - macOS: Keychain with service "Claude Code-credentials"
+        - Linux/WSL/Windows: File at ~/.claude/.credentials.json
         """
         if self._host.platform == Platform.MACOS:
             try:
@@ -169,16 +315,109 @@ class CredentialStore:
             except Exception as e:
                 raise CredentialWriteError(f"Failed to write credentials: {e}")
 
-        if verify:
-            readback = self._read_credentials()
-            if readback != credentials:
-                # We deliberately do NOT include credential payloads in the
-                # error message (avoid leaking secrets into logs).
-                raise CredentialWriteError(
-                    "Credential write verification failed: readback differs "
-                    "from intended payload. Possible silent Keychain corruption "
-                    "or concurrent overwrite. Aborting switch."
+    def _write_managed_credentials(self, api_key: str) -> None:
+        """Activate a managed API key, then clear OAuth (mutual exclusion).
+
+        Always records ``key[-20:]`` in ``customApiKeyResponses.approved`` (Claude
+        Code does this on every platform — otherwise it re-prompts to approve the
+        key). Stores the key in the macOS Keychain when on macOS, else
+        ``~/.claude.json`` ``primaryApiKey``. Finally clears the OAuth credential.
+
+        Raises:
+            CredentialWriteError: If persisting the key fails.
+        """
+        wrote_to_keychain = False
+        if self._host.platform == Platform.MACOS:
+            try:
+                macos_keychain.set_password(
+                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                    os.environ.get("USER", "user"),
+                    api_key,
                 )
+            except Exception as e:
+                self._host._logger.warning(
+                    f"Managed-key Keychain write failed, falling back to config: {e}"
+                )
+            else:
+                wrote_to_keychain = True
+
+        approved = approved_form(api_key)
+
+        def _mutate(cfg: dict) -> None:
+            responses = cfg.get("customApiKeyResponses")
+            if not isinstance(responses, dict):
+                responses = {}
+            approved_list = responses.get("approved")
+            if not isinstance(approved_list, list):
+                approved_list = []
+            if approved not in approved_list:
+                approved_list.append(approved)
+            responses["approved"] = approved_list
+            responses.setdefault("rejected", [])
+            cfg["customApiKeyResponses"] = responses
+            if wrote_to_keychain:
+                # Keychain holds the key; keep it out of plaintext config.
+                cfg.pop("primaryApiKey", None)
+            else:
+                cfg["primaryApiKey"] = api_key
+
+        try:
+            self._update_global_config(_mutate)
+        except CredentialWriteError:
+            raise
+        except Exception as e:
+            raise CredentialWriteError(f"Failed to write managed API key: {e}")
+
+        # Mutual exclusion: drop the OAuth credential so it can't shadow the key.
+        self._clear_oauth_credential()
+
+    def _clear_managed_key(self) -> None:
+        """Clear any active managed API key (Claude Code ``removeApiKey`` semantics).
+
+        Deletes the macOS Keychain "Claude Code" item (best-effort) and drops
+        ``primaryApiKey`` from ``~/.claude.json``. Leaves
+        ``customApiKeyResponses.approved`` untouched — removing it would force
+        recovering ``key[-20:]`` from the Keychain for no benefit. A no-op (no
+        config rewrite) when no key is present.
+        """
+        if self._host.platform == Platform.MACOS:
+            try:
+                macos_keychain.delete_password(
+                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                    os.environ.get("USER", "user"),
+                )
+            except Exception:
+                pass  # best-effort; a down Keychain can't be cleaned now
+        cfg = self._read_global_config()
+        if cfg is not None and cfg.get("primaryApiKey") is not None:
+            def _drop(c: dict) -> None:
+                c.pop("primaryApiKey", None)
+
+            try:
+                self._update_global_config(_drop)
+            except Exception as e:
+                self._host._logger.warning(f"Failed to clear primaryApiKey: {e}")
+
+    def _clear_oauth_credential(self) -> None:
+        """Clear the active OAuth credential — Keychain item and plaintext file.
+
+        Best-effort: a down Keychain or missing file is fine. Removing
+        ``.credentials.json`` stops Claude Code from falling back to a stale
+        OAuth login over the just-activated API key.
+        """
+        if self._host.platform == Platform.MACOS:
+            try:
+                macos_keychain.delete_password(
+                    CLAUDE_CODE_KEYCHAIN_SERVICE, os.environ.get("USER", "user")
+                )
+            except Exception:
+                pass  # best-effort
+        cred_file = get_credentials_path()
+        try:
+            if cred_file.exists():
+                cred_file.unlink()
+        except OSError as e:
+            self._host._logger.warning(f"Failed to remove credentials file: {e}")
 
     # -- per-account backup credentials -----------------------------------
 

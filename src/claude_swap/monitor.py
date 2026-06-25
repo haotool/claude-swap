@@ -376,6 +376,25 @@ def monitor_step(
     pct = switcher.get_active_usage_pct()
     pct_text = "unavailable" if pct is None else f"{pct:.0f}%"
 
+    if pct is None and switcher.active_account_is_api_key():
+        # Managed API-key active account: no subscription quota to monitor.
+        # Treat as idle (infinite headroom) — NOT a usage fetch failure: no
+        # backoff sequence and no "observably-silent" warning, and never switch
+        # away (an API-key account can't hit a rate limit).
+        state.consecutive_failures = 0
+        state.reset_pcts()
+        state.last_poll_time = None
+        state.last_wall_time = wall
+        log.info("monitor poll: active account is API-key (no quota) — idle")
+        return MonitorStepResult(
+            kind="idle",
+            threshold=threshold,
+            pct=None,
+            next_interval=poll_seconds,
+            pct_text="api-key",
+            user_message="Active account is an API-key account (no quota to monitor).",
+        )
+
     if pct is None:
         state.consecutive_failures += 1
         interval = _failure_backoff_seconds(

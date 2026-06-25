@@ -36,7 +36,7 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 018 | Complexity convergence roadmap | P1 | L | — | TODO |
 | 019 | Per-window usage tracking for the auto-switch monitor | P1 | M | — | DONE (commit `200ff22`) |
 | 020 | Extract credential storage + freshness out of switcher.py (align to upstream) | P1 | M | — | DONE (credentials.py 299 `CredentialStore` + credential_refresh.py 266 `CredentialRefresher`; switcher 3238→2863, comparable to upstream's 2543 domain-orchestrator core; +9 boundary tests; 676 passed, 3 skipped, ruff F clean) |
-| 021 | Managed API-key (sk-ant-api) accounts on the extracted CredentialStore | P2 | M | 020 | TODO |
+| 021 | Managed API-key (sk-ant-api) accounts on the extracted CredentialStore | P2 | M | 020 | DONE (mutual-axis storage in CredentialStore; `kind` field + collision/live-capture guards; "API key (no quota)" usage; monitor treats active API-key as idle not usage_unavailable; session reject; transfer round-trip; +20 tests, 696 passed, 3 skipped, ruff F clean) |
 
 **Full P1 convergence verified 2026-06-15: 658 passed, 3 skipped, 0 failed on `improve/p1-clean-code-convergence` (HEAD `8d305d1`). Final base→HEAD: 7 commits (1 plans-add + 6 fixes). Orphan duplicates: `advisor/010-...` `5eeabc2`, `advisor/011-...` `a0ab742`/`6d23318` — superseded, deletable.**
 
