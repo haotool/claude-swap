@@ -1221,6 +1221,40 @@ class TestNextPollInterval:
         assert out == 15
 
 
+class TestNextPollIntervalMulti:
+    """Per-window interval picker (plan 019) — the most-urgent window wins."""
+
+    def test_fast_window_not_masked_by_flat_higher_window(self):
+        """The 2026-06-24 bug: a flat, higher 7d window must not hide a fast 5h
+        climb. The aggregate max would sit at 87% (flat → t_max); per-window the
+        rising 5h must drive a short interval."""
+        current = {"seven_day": 87.0, "five_hour": 90.0}
+        last = {"seven_day": 87.0, "five_hour": 75.0}  # 5h +15 over the gap
+        out = monitor._next_poll_interval_multi(current, last, 60.0, 98)
+        # The old collapsed max(5h,7d)=87 (flat) would have returned t_max(60).
+        assert out < monitor.MONITOR_POLL_SECONDS, (
+            f"fast 5h climb must shorten the interval, got {out}"
+        )
+
+    def test_matches_single_window_when_one_window(self):
+        """With a lone aggregate window it equals the scalar picker."""
+        multi = monitor._next_poll_interval_multi(
+            {"max": 60.0}, {"max": 50.0}, 60.0, 95,
+        )
+        single = monitor._next_poll_interval(60.0, 50.0, 60.0, 95)
+        assert multi == single
+
+    def test_empty_falls_back_to_t_max(self):
+        out = monitor._next_poll_interval_multi({}, {}, 60.0, 95)
+        assert out == monitor.MONITOR_POLL_SECONDS
+
+    def test_near_trigger_in_any_window_forces_floor(self):
+        """A 5h in the near-trigger band forces the floor even if 7d is calm."""
+        current = {"seven_day": 40.0, "five_hour": 94.0}
+        out = monitor._next_poll_interval_multi(current, {}, 0.0, 95)
+        assert out == monitor.MONITOR_POLL_SECONDS_MIN
+
+
 @pytest.mark.usefixtures("stub_live_claude")
 class TestSleepWakeAndHeartbeat:
     """Sleep/wake baseline reset and idle heartbeat for the schema-break safety

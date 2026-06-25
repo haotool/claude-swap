@@ -22,7 +22,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TextIO
 
@@ -58,6 +58,7 @@ PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
 # Ceiling on the polling interval.  Historical default; preserved as the
 # canonical name so the TUI's ``MONITOR_POLL_SECONDS`` import keeps working.
 # Used as ``t_max`` in the adaptive algorithm.
+_WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d"}
 MONITOR_POLL_SECONDS = 60
 
 # Floor on the polling interval.  Below this, we risk overwhelming the usage
@@ -164,6 +165,35 @@ def _next_poll_interval(
     return int(max(t_min, min(round(target), t_max)))
 
 
+def _next_poll_interval_multi(
+    current: dict[str, float],
+    last: dict[str, float],
+    elapsed: float,
+    threshold: int,
+    *,
+    t_min: int = MONITOR_POLL_SECONDS_MIN,
+    t_max: int = MONITOR_POLL_SECONDS,
+) -> int:
+    """Adaptive poll interval across all usage windows — most urgent wins.
+
+    Computes ``_next_poll_interval`` per window (each against its own previous
+    reading) and returns the minimum, so a fast-climbing 5h window drives a
+    short interval even while a higher but flat 7d window would, alone, sit at
+    ``t_max``. This is the fix for the masking bug where ``max(5h, 7d)`` hid the
+    faster window's velocity (plan 019). Falls back to ``t_max`` when no window
+    has a usable reading.
+    """
+    if t_max <= 0:
+        return 0
+    intervals = [
+        _next_poll_interval(
+            pct, last.get(window), elapsed, threshold, t_min=t_min, t_max=t_max,
+        )
+        for window, pct in current.items()
+    ]
+    return min(intervals) if intervals else t_max
+
+
 def _failure_backoff_seconds(
     consecutive_failures: int,
     *,
@@ -192,6 +222,7 @@ class MonitorRuntimeState:
     """Mutable monitor runtime — owned exclusively by ``monitor_step``."""
 
     last_pct: float | None = None
+    last_pcts: dict[str, float] = field(default_factory=dict)
     last_poll_time: float | None = None
     last_wall_time: float | None = None
     consecutive_failures: int = 0
@@ -200,6 +231,16 @@ class MonitorRuntimeState:
     usage_cache_warmed: bool = False
     idle_started_wall: float | None = None
     idle_heartbeat_at: float = 0.0
+
+    def record_pcts(self, pct: float, windows: dict[str, float] | None) -> None:
+        """Record this poll's readings as the velocity baseline."""
+        self.last_pct = pct
+        self.last_pcts = dict(windows) if windows else {}
+
+    def reset_pcts(self) -> None:
+        """Clear the velocity baseline (after a switch, failure, or wake-gap)."""
+        self.last_pct = None
+        self.last_pcts = {}
 
 
 @dataclass(frozen=True)
@@ -298,7 +339,7 @@ def monitor_step(
             "monitor poll: no live Claude Code sessions — idle at %ds",
             poll_seconds,
         )
-        state.last_pct = None
+        state.reset_pcts()
         state.last_poll_time = None
         state.last_wall_time = None
         state.consecutive_failures = 0
@@ -325,7 +366,7 @@ def monitor_step(
             "monitor: wake-gap %ds detected — resetting baselines",
             int(wall - state.last_wall_time),
         )
-        state.last_pct = None
+        state.reset_pcts()
         state.last_poll_time = None
         state.last_switch_error = None
         state.saturated_hold = False
@@ -345,7 +386,7 @@ def monitor_step(
             state.consecutive_failures,
             interval,
         )
-        state.last_pct = None
+        state.reset_pcts()
         state.last_poll_time = None
         state.last_wall_time = wall
         return MonitorStepResult(
@@ -362,9 +403,17 @@ def monitor_step(
         )
 
     state.consecutive_failures = 0
+    # Per-window breakdown drives velocity; one fetch per poll because the
+    # get_active_usage_pct() call above warmed the short-lived usage cache this
+    # reads back. Fall back to the aggregate when a per-window split isn't
+    # available so behavior matches the old single-metric path exactly.
+    breakdown = switcher.get_active_usage_breakdown()
+    windows = breakdown or {"max": pct}
     elapsed = (now - state.last_poll_time) if state.last_poll_time is not None else 0.0
-    interval = _next_poll_interval(
-        pct, state.last_pct, elapsed, threshold,
+    # Per-window adaptive interval: the soonest-to-cross window wins, so a fast
+    # 5h climb is not masked by a flat, higher 7d window (plan 019).
+    interval = _next_poll_interval_multi(
+        windows, state.last_pcts, elapsed, threshold,
         t_max=poll_seconds,
     )
     reached = should_switch(pct, threshold)
@@ -373,9 +422,12 @@ def monitor_step(
     # the "— switching" line would both misrepresent the next action. Reflect
     # the real cadence here and defer the switching log until we actually do.
     holding = reached and perform_switch is not None and state.saturated_hold
+    windows_text = " ".join(
+        f"{_WINDOW_LABELS.get(k, k)}={v:.0f}%" for k, v in windows.items()
+    )
     log.info(
-        "monitor poll: active_usage_pct=%s threshold=%s next_poll=%ds",
-        pct, threshold, poll_seconds if holding else interval,
+        "monitor poll: active_usage_pct=%s (%s) threshold=%s next_poll=%ds",
+        pct, windows_text, threshold, poll_seconds if holding else interval,
     )
 
     if reached:
@@ -385,7 +437,7 @@ def monitor_step(
                 pct,
                 threshold,
             )
-            state.last_pct = None
+            state.reset_pcts()
             state.last_poll_time = None
             state.last_wall_time = wall
             return MonitorStepResult(
@@ -404,7 +456,7 @@ def monitor_step(
                 pct,
                 poll_seconds,
             )
-            state.last_pct = pct
+            state.record_pcts(pct, windows)
             state.last_poll_time = now
             state.last_wall_time = wall
             return MonitorStepResult(
@@ -431,7 +483,7 @@ def monitor_step(
         except SwitchCancelled:
             log.info("monitor switch cancelled at pct=%s", pct)
             state.saturated_hold = False
-            state.last_pct = pct
+            state.record_pcts(pct, windows)
             state.last_poll_time = now
             state.last_wall_time = wall
             return MonitorStepResult(
@@ -466,7 +518,7 @@ def monitor_step(
                 )
         state.last_wall_time = wall
         if switch_error is not None:
-            state.last_pct = None
+            state.reset_pcts()
             state.last_poll_time = None
             return MonitorStepResult(
                 kind="switch_failed",
@@ -479,7 +531,7 @@ def monitor_step(
             )
         if switched:
             state.saturated_hold = False
-            state.last_pct = None
+            state.reset_pcts()
             state.last_poll_time = None
             return MonitorStepResult(
                 kind="switched",
@@ -491,7 +543,7 @@ def monitor_step(
                 user_message=f"Reached {pct:.0f}% — switched account.",
             )
         state.saturated_hold = True
-        state.last_pct = pct
+        state.record_pcts(pct, windows)
         state.last_poll_time = now
         return MonitorStepResult(
             kind="already_optimal",
@@ -505,7 +557,7 @@ def monitor_step(
         )
 
     state.saturated_hold = False
-    state.last_pct = pct
+    state.record_pcts(pct, windows)
     state.last_poll_time = now
     state.last_wall_time = wall
     return MonitorStepResult(

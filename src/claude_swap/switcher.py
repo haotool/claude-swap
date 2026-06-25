@@ -2333,11 +2333,13 @@ class ClaudeAccountSwitcher:
             cfg = self.set_auto_switch_config(enabled=True)
         return cfg
 
-    def get_active_usage_pct(self) -> float | None:
-        """Return the highest 5h/7d utilization pct for the active account.
+    def _resolve_active_usage(self) -> dict | None:
+        """Return the active account's usage dict (cached or freshly fetched).
 
-        Used by the auto-switch monitor. Returns ``None`` when there is no
-        active login, no usable credentials, or the usage API is unreachable.
+        Returns ``None`` when there is no active login, no usable credentials,
+        or the usage API is unreachable / returned an error. Shared single
+        source for ``get_active_usage_pct`` and ``get_active_usage_breakdown``
+        so a monitor poll performs exactly one fetch.
 
         Reuses the same short-lived usage cache as ``list_accounts()`` /
         ``status()`` so repeated polling stays cheap and consistent. The active
@@ -2417,7 +2419,36 @@ class ClaudeAccountSwitcher:
                 keys_seen,
             )
 
-        return _max_usage_pct(usage)
+        return usage if isinstance(usage, dict) else None
+
+    def get_active_usage_pct(self) -> float | None:
+        """Return the highest 5h/7d utilization pct for the active account.
+
+        Used by the auto-switch monitor and CLI/TUI. Returns ``None`` when no
+        usage is available. Thin ``max`` over ``get_active_usage_breakdown``'s
+        source so all callers share one fetch path.
+        """
+        return _max_usage_pct(self._resolve_active_usage())
+
+    def get_active_usage_breakdown(self) -> dict[str, float] | None:
+        """Return per-window utilization for the active account.
+
+        ``{"five_hour": 72.0, "seven_day": 87.0}`` — windows without a usable
+        pct are omitted; returns ``None`` when no usage is available. Lets the
+        monitor track each window's velocity independently so a fast 5h climb
+        is not masked by a flat, higher 7d value (plan 019).
+        """
+        usage = self._resolve_active_usage()
+        if not isinstance(usage, dict):
+            return None
+        out: dict[str, float] = {}
+        for key in ("five_hour", "seven_day"):
+            entry = usage.get(key)
+            if isinstance(entry, dict):
+                pct = entry.get("pct")
+                if isinstance(pct, (int, float)):
+                    out[key] = float(pct)
+        return out or None
 
     def _first_run_setup(self) -> None:
         """First-run setup workflow."""

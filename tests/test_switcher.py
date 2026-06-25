@@ -3815,6 +3815,52 @@ class TestUsageCacheFreshness:
 
         mock_fetch.assert_called_once()
 
+    def test_get_active_usage_breakdown_returns_per_window(
+        self, temp_home: Path,
+    ):
+        """Breakdown exposes each window separately (plan 019) so the monitor
+        can track 5h velocity independently of a flat 7d, and stays a strict
+        superset of get_active_usage_pct (max of the same values)."""
+        import json
+
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        (temp_home / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {
+                "emailAddress": "a1@example.com",
+                "accountUuid": "uuid-1",
+            },
+        }))
+        data = {
+            "accounts": {
+                "1": {"email": "a1@example.com", "organizationUuid": "uuid-1"},
+            },
+            "sequence": [1],
+            "activeAccountNumber": 1,
+        }
+        s._write_json(s.sequence_file, data)
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        live_usage = {"five_hour": {"pct": 72}, "seven_day": {"pct": 87}}
+
+        with patch.object(s, "_read_credentials", return_value=creds), \
+             patch("claude_swap.oauth.extract_access_token", return_value="tok"), \
+             patch(
+                 "claude_swap.oauth.fetch_usage_for_account",
+                 return_value=live_usage,
+             ):
+            breakdown = s.get_active_usage_breakdown()
+
+        assert breakdown == {"five_hour": 72.0, "seven_day": 87.0}
+        assert max(breakdown.values()) == 87.0  # equals get_active_usage_pct
+
+    def test_get_active_usage_breakdown_none_when_unavailable(
+        self, temp_home: Path,
+    ):
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        with patch.object(s, "_get_current_account", return_value=None):
+            assert s.get_active_usage_breakdown() is None
+
     def test_fetch_failure_does_not_restamp_stale_entry(self, temp_home: Path):
         import time
         from claude_swap import oauth
