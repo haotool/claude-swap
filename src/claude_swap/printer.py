@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from pathlib import Path
 
 # ANSI escape codes
@@ -153,15 +152,3 @@ def abbreviate_path(path: str) -> str:
     if path.startswith(home):
         return "~" + path[len(home):]
     return path
-
-
-def format_age(started_at_ms: int) -> str:
-    """Format a millisecond epoch timestamp as a human-readable age."""
-    elapsed = int(time.time()) - (started_at_ms // 1000)
-    if elapsed < 60:
-        return "just now"
-    if elapsed < 3600:
-        return f"{elapsed // 60}m ago"
-    if elapsed < 86400:
-        return f"{elapsed // 3600}h ago"
-    return f"{elapsed // 86400}d ago"
