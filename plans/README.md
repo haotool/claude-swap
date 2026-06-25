@@ -33,6 +33,10 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 015 | Boundary-case tests for `oauth.build_usage_result` (resets_at preservation, missing extra_usage, malformed resets_at) | P2 | S | — | DONE (+3 tests, 661 passed, 3 skipped) |
 | 016 | Replace `SwitchIntent` `@property` indirection with `ClassVar` (preserves typed dispatch) | P2 | S | — | DONE (net −18 lines, 661 passed, 3 skipped, zero behavior change) |
 | 017 | Serialize inactive-account OAuth refresh under FileLock (close plan 009 final leftover) | P2 | S–M | — | TODO |
+| 018 | Complexity convergence roadmap | P1 | L | — | TODO |
+| 019 | Per-window usage tracking for the auto-switch monitor | P1 | M | — | DONE (commit `200ff22`) |
+| 020 | Extract credential storage + freshness out of switcher.py (align to upstream) | P1 | M | — | DONE (credentials.py 299 `CredentialStore` + credential_refresh.py 266 `CredentialRefresher`; switcher 3238→2863, comparable to upstream's 2543 domain-orchestrator core; +9 boundary tests; 676 passed, 3 skipped, ruff F clean) |
+| 021 | Managed API-key (sk-ant-api) accounts on the extracted CredentialStore | P2 | M | 020 | TODO |
 
 **Full P1 convergence verified 2026-06-15: 658 passed, 3 skipped, 0 failed on `improve/p1-clean-code-convergence` (HEAD `8d305d1`). Final base→HEAD: 7 commits (1 plans-add + 6 fixes). Orphan duplicates: `advisor/010-...` `5eeabc2`, `advisor/011-...` `a0ab742`/`6d23318` — superseded, deletable.**
 
