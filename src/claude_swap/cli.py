@@ -213,20 +213,17 @@ Examples:
         sys.exit(130)
 
 
-def main() -> None:
-    """Main entry point for the CLI."""
-    if len(sys.argv) > 1 and sys.argv[1] == "run":
-        _run_command(sys.argv[2:])
-        return  # only reachable in tests where exec/exit is mocked
+# Map subcommand -> handler name; resolved via globals() at call time so tests
+# can monkeypatch the module-level handler (e.g. cli._service_command).
+_SUBCOMMANDS = {
+    "run": "_run_command",
+    "service": "_service_command",
+    "auto-switch": "_auto_switch_command",
+}
 
-    if len(sys.argv) > 1 and sys.argv[1] == "service":
-        _service_command(sys.argv[2:])
-        return  # only reachable in tests where sys.exit is mocked
 
-    if len(sys.argv) > 1 and sys.argv[1] == "auto-switch":
-        _auto_switch_command(sys.argv[2:])
-        return  # only reachable in tests where sys.exit is mocked
-
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the top-level flag parser (the bare-flag, non-subcommand UI)."""
     parser = argparse.ArgumentParser(
         description="Multi-Account Switcher for Claude Code",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -380,26 +377,96 @@ Examples:
             "Pass '-' to read from stdin or omit the value to be prompted securely."
         ),
     )
+    return parser
 
-    args = parser.parse_args()
 
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Enforce cross-flag constraints argparse cannot express directly."""
     if args.token_status and not (args.list or args.health):
         parser.error("--token-status can only be used with --list or --health")
-
     if args.slot is not None and not (args.add_account or args.add_token is not None):
         parser.error("--slot can only be used with --add-account or --add-token")
-
     if args.email is not None and args.add_token is None:
         parser.error("--email can only be used with --add-token")
-
     if args.account is not None and not args.export:
         parser.error("--account can only be used with --export")
-
     if args.force and not args.import_:
         parser.error("--force can only be used with --import")
-
     if args.full and not args.export:
         parser.error("--full can only be used with --export")
+
+
+def _cmd_export(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    from claude_swap.transfer import export_accounts
+
+    export_accounts(switcher, args.export, account=args.account, full=args.full)
+
+
+def _cmd_import(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    from claude_swap.transfer import import_accounts
+
+    import_accounts(switcher, args.import_, force=args.force)
+
+
+def _cmd_tui(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    try:
+        from claude_swap.tui import run as tui_run
+    except ImportError:
+        error(
+            "TUI mode requires the 'curses' module. "
+            "On Windows, install with: pip install windows-curses"
+        )
+        sys.exit(1)
+    sys.exit(tui_run(switcher))
+
+
+def _cmd_monitor(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    from claude_swap.monitor import run_cli_monitor
+
+    sys.exit(run_cli_monitor(switcher))
+
+
+def _dispatch_action(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    """Run the single selected mutually-exclusive action, in declared order."""
+    # (selected?, handler) — first match wins; the group guarantees exactly one.
+    # add_token uses `is not None` so an empty-string const (`--add-token` with
+    # no value) still dispatches.
+    actions = [
+        (args.add_account, lambda: switcher.add_account(slot=args.slot)),
+        (
+            args.add_token is not None,
+            lambda: switcher.add_account_from_token(
+                token=args.add_token, email=args.email, slot=args.slot
+            ),
+        ),
+        (bool(args.remove_account), lambda: switcher.remove_account(args.remove_account)),
+        (args.list, lambda: switcher.list_accounts(show_token_status=args.token_status)),
+        (args.health, lambda: switcher.list_accounts(show_token_status=True, show_health=True)),
+        (args.switch, switcher.switch),
+        (bool(args.switch_to), lambda: switcher.switch_to(args.switch_to)),
+        (args.status, switcher.status),
+        (args.purge, switcher.purge),
+        (bool(args.export), lambda: _cmd_export(switcher, args)),
+        (bool(args.import_), lambda: _cmd_import(switcher, args)),
+        (args.tui, lambda: _cmd_tui(switcher, args)),
+        (args.monitor, lambda: _cmd_monitor(switcher, args)),
+    ]
+    for selected, handler in actions:
+        if selected:
+            handler()
+            return
+
+
+def main() -> None:
+    """Main entry point for the CLI."""
+    if len(sys.argv) > 1 and sys.argv[1] in _SUBCOMMANDS:
+        # Subcommands return only in tests where exec/sys.exit is mocked.
+        globals()[_SUBCOMMANDS[sys.argv[1]]](sys.argv[2:])
+        return
+
+    parser = _build_parser()
+    args = parser.parse_args()
+    _validate_args(parser, args)
 
     # Self-upgrade runs before switcher init so we don't touch config/keychain
     # just to upgrade the tool itself.
@@ -425,55 +492,7 @@ Examples:
                 error("Error: Do not run this script as root (unless running in a container)")
                 sys.exit(1)
 
-        if args.add_account:
-            switcher.add_account(slot=args.slot)
-        elif args.add_token is not None:
-            switcher.add_account_from_token(
-                token=args.add_token,
-                email=args.email,
-                slot=args.slot,
-            )
-        elif args.remove_account:
-            switcher.remove_account(args.remove_account)
-        elif args.list:
-            switcher.list_accounts(
-                show_token_status=args.token_status,
-            )
-        elif args.health:
-            switcher.list_accounts(
-                show_token_status=True,
-                show_health=True,
-            )
-        elif args.switch:
-            switcher.switch()
-        elif args.switch_to:
-            switcher.switch_to(args.switch_to)
-        elif args.status:
-            switcher.status()
-        elif args.purge:
-            switcher.purge()
-        elif args.export:
-            from claude_swap.transfer import export_accounts
-
-            export_accounts(switcher, args.export, account=args.account, full=args.full)
-        elif args.import_:
-            from claude_swap.transfer import import_accounts
-
-            import_accounts(switcher, args.import_, force=args.force)
-        elif args.tui:
-            try:
-                from claude_swap.tui import run as tui_run
-            except ImportError:
-                error(
-                    "TUI mode requires the 'curses' module. "
-                    "On Windows, install with: pip install windows-curses"
-                )
-                sys.exit(1)
-            sys.exit(tui_run(switcher))
-        elif args.monitor:
-            from claude_swap.monitor import run_cli_monitor
-
-            sys.exit(run_cli_monitor(switcher))
+        _dispatch_action(switcher, args)
     except ClaudeSwitchError as e:
         error(f"Error: {e}")
         sys.exit(1)
