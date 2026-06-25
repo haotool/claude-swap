@@ -15,7 +15,6 @@ import pytest
 from tests.conftest import stub_screen
 
 from claude_swap import tui
-from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 

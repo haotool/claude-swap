@@ -96,7 +96,6 @@ class TestWriteCache:
     def test_sets_mode_0600(self, tmp_path):
         cache_file = tmp_path / "test.json"
         write_cache(cache_file, {"v": 1})
-        import os
 
         assert (cache_file.stat().st_mode & 0o777) == 0o600
 
