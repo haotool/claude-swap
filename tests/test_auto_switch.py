@@ -674,6 +674,38 @@ class TestMonitorEngine:
         )
         perform.assert_called_once()
 
+    def test_saturated_hold_poll_log_reflects_real_cadence(
+        self, temp_home: Path, caplog,
+    ):
+        """During a saturated hold the poll log must report the real t_max
+        cadence (60s) and must not emit the "— switching" line, since no switch
+        happens. Guards the observability fix for the 100%-hold window."""
+        switcher = ClaudeAccountSwitcher()
+        state = monitor.MonitorRuntimeState()
+        state.saturated_hold = True  # as if a prior poll already saturated
+        perform = MagicMock(return_value=False)
+
+        caplog.set_level(logging.INFO, logger="claude-swap")
+        with patch.object(
+            switcher, "get_auto_switch_config",
+            return_value={"enabled": True, "threshold": 95},
+        ), patch.object(switcher, "get_active_usage_pct", return_value=100.0), \
+             patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+            result = monitor.monitor_step(
+                switcher, state, poll_seconds=60, perform_switch=perform,
+            )
+
+        assert result.kind == "already_optimal"
+        perform.assert_not_called()  # saturated hold skips the switch entirely
+        messages = [r.getMessage() for r in caplog.records if r.name == "claude-swap"]
+        poll_lines = [m for m in messages if m.startswith("monitor poll:")]
+        assert poll_lines and "next_poll=60s" in poll_lines[-1], (
+            f"poll log must show the real 60s cadence, got {poll_lines}"
+        )
+        assert not any("— switching" in m for m in messages), (
+            "saturated hold must not log '— switching' (no switch occurs)"
+        )
+
     def test_saturated_hold_clears_when_below_threshold(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()

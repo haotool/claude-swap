@@ -367,17 +367,18 @@ def monitor_step(
         pct, state.last_pct, elapsed, threshold,
         t_max=poll_seconds,
     )
+    reached = should_switch(pct, threshold)
+    # A saturated hold (set on a prior poll when no target was free) parks at
+    # the poll ceiling and does not switch, so the velocity-based interval and
+    # the "— switching" line would both misrepresent the next action. Reflect
+    # the real cadence here and defer the switching log until we actually do.
+    holding = reached and perform_switch is not None and state.saturated_hold
     log.info(
         "monitor poll: active_usage_pct=%s threshold=%s next_poll=%ds",
-        pct, threshold, interval,
+        pct, threshold, poll_seconds if holding else interval,
     )
 
-    if should_switch(pct, threshold):
-        log.info(
-            "monitor threshold reached: pct=%s threshold=%s — switching",
-            pct,
-            threshold,
-        )
+    if reached:
         if perform_switch is None:
             log.warning(
                 "monitor threshold reached but no switch handler: pct=%s threshold=%s",
@@ -399,8 +400,9 @@ def monitor_step(
             )
         if state.saturated_hold:
             log.info(
-                "monitor: saturated hold at pct=%s — skipping replan",
+                "monitor: saturated hold at pct=%s — holding at %ds (skipping replan)",
                 pct,
+                poll_seconds,
             )
             state.last_pct = pct
             state.last_poll_time = now
@@ -416,6 +418,11 @@ def monitor_step(
                 ),
             )
 
+        log.info(
+            "monitor threshold reached: pct=%s threshold=%s — switching",
+            pct,
+            threshold,
+        )
         switched = False
         switch_error: str | None = None
         try:
