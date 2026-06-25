@@ -2682,21 +2682,11 @@ class ClaudeAccountSwitcher:
 
         self._perform_switch(target_account)
 
-    def _perform_switch(
-        self,
-        target_account: str,
-        *,
-        intent: SwitchIntent | None = None,
-    ) -> None:
-        """Perform the actual account switch with transaction support.
+    def _warn_switch_session_hazards(self, target_account: str, *, quiet: bool) -> None:
+        """Emit pre-switch warnings for live-session and multi-session races.
 
-        The post-switch display runs after the lock releases so that persist
-        callbacks inside list_accounts() can re-acquire it.
+        Warn-only (never blocks): both hazards are external to the CLI.
         """
-        if intent is None:
-            intent = ManualSwitchIntent()
-        quiet = intent.quiet
-        force_refresh = intent.force_refresh
         # Session-mode drift warning (warn, never block): switching the
         # default login to an account that also has a live session profile
         # puts the same refresh token in two config dirs — if the server
@@ -2743,6 +2733,273 @@ class ClaudeAccountSwitcher:
                     "(claude-code#24317). Close extra sessions first to avoid this."
                 )
 
+    def _activate_target_directly(
+        self,
+        data: dict,
+        target_account: str,
+        target_email: str,
+        config_path: Path,
+        current_identity: tuple[str, str] | None,
+        *,
+        quiet: bool,
+        force_refresh: bool,
+    ) -> None:
+        """Activate the target without backing up a prior account.
+
+        Used when there is no live Claude session yet (e.g. right after import)
+        or claude-swap has no tracked active account (e.g. purge -> add-token ->
+        switch-to while a live credential still exists). Skips the back-up step
+        so we never write account-None-* backups.
+        """
+        target_creds = self._read_account_credentials(
+            target_account, target_email
+        )
+        target_config = self._read_account_config(target_account, target_email)
+        if not target_creds:
+            raise SwitchError(
+                f"Account-{target_account} has no stored credentials. "
+                f"Re-add with: cswap --add-account --slot {target_account}"
+            )
+        if not target_config:
+            raise SwitchError(
+                f"Account-{target_account} has no stored config backup. "
+                f"Re-add with: cswap --add-account --slot {target_account}"
+            )
+        target_creds = self._refresh_target_credentials_before_activation(
+            target_account,
+            target_email,
+            target_creds,
+            force=force_refresh,
+        )
+        try:
+            target_config_data = json.loads(target_config)
+        except json.JSONDecodeError as exc:
+            raise SwitchError(f"Invalid backup config: {exc}")
+        target_oauth = target_config_data.get("oauthAccount")
+        if not target_oauth:
+            raise SwitchError("Invalid oauthAccount in backup")
+
+        # Snapshot live state so a mid-operation failure can be undone.
+        # When a live session exists, fail fast if the snapshot is
+        # unreadable rather than proceeding to overwrite without a
+        # safety net. The fresh-machine case has nothing to restore.
+        rollback_creds: str | None = None
+        rollback_config_text: str | None = None
+        if current_identity is not None:
+            rollback_creds = self._read_credentials()
+            if rollback_creds is None:
+                raise CredentialReadError(
+                    "Cannot snapshot live credentials before activation"
+                )
+            if config_path.exists():
+                try:
+                    rollback_config_text = config_path.read_text(
+                        encoding="utf-8"
+                    )
+                except OSError as e:
+                    raise ConfigError(
+                        f"Cannot snapshot live config before activation: {e}"
+                    )
+
+        creds_written = False
+        config_written = False
+        try:
+            self._write_credentials(target_creds, verify=True)
+            creds_written = True
+
+            # Mirror the normal switch path: preserve existing local
+            # settings/projects when ~/.claude.json already exists, only
+            # swapping in oauthAccount. Fall back to the full imported
+            # config when no usable local config exists.
+            existing_config = (
+                self._read_json(config_path) if config_path.exists() else None
+            )
+            if existing_config:
+                existing_config["oauthAccount"] = target_oauth
+                self._write_json(config_path, existing_config)
+            else:
+                self._write_json(config_path, target_config_data)
+            config_written = True
+
+            data["activeAccountNumber"] = int(target_account)
+            data["lastUpdated"] = get_timestamp()
+            self._write_json(self.sequence_file, data)
+        except Exception:
+            if config_written and rollback_config_text is not None:
+                try:
+                    config_path.write_text(
+                        rollback_config_text, encoding="utf-8"
+                    )
+                    if sys.platform != "win32":
+                        os.chmod(config_path, 0o600)
+                except Exception as e:
+                    self._logger.error(
+                        f"Failed to rollback config: {e}"
+                    )
+            if creds_written and rollback_creds is not None:
+                try:
+                    self._write_credentials(rollback_creds)
+                except Exception as e:
+                    self._logger.error(
+                        f"Failed to rollback credentials: {e}"
+                    )
+            raise
+
+        self._logger.info(
+            f"Activated account {target_account} (no prior live account)"
+        )
+        if not quiet:
+            print(
+                f"{accent('Activated')} Account-{target_account} ({target_email})"
+            )
+            print()
+            print(dimmed(self._activation_followup_text()))
+            print()
+
+    def _swap_target_transactional(
+        self,
+        data: dict,
+        target_account: str,
+        target_email: str,
+        current_account: str,
+        current_email: str,
+        config_path: Path,
+        *,
+        force_refresh: bool,
+    ) -> None:
+        """Back up the current account and activate the target with rollback."""
+        # Create transaction for rollback capability
+        try:
+            original_creds = self._read_credentials()
+            if original_creds is None:
+                raise CredentialReadError("Failed to read current credentials")
+            original_config = config_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise ConfigError("Claude config file not found")
+        except PermissionError:
+            raise ConfigError("Permission denied reading Claude config")
+
+        transaction = SwitchTransaction(
+            original_credentials=original_creds,
+            original_config=original_config,
+            original_account_num=current_account,
+            original_email=current_email,
+            config_path=config_path,
+        )
+
+        try:
+            # Step 1: Backup current account
+            original_creds = self._write_verified_live_account_credentials(
+                current_account, current_email, original_creds
+            )
+            self._write_account_config(
+                current_account, current_email, original_config
+            )
+            self._logger.info(f"Backed up account {current_account}")
+
+            # Step 2: Retrieve target account
+            target_creds = self._read_account_credentials(
+                target_account, target_email
+            )
+            target_config = self._read_account_config(target_account, target_email)
+
+            if not target_creds:
+                raise SwitchError(
+                    f"Account-{target_account} has no stored credentials. "
+                    f"Re-add with: cswap --add-account --slot {target_account}"
+                )
+            if not target_config:
+                raise SwitchError(
+                    f"Account-{target_account} has no stored config backup. "
+                    f"Re-add with: cswap --add-account --slot {target_account}"
+                )
+            target_creds = self._refresh_target_credentials_before_activation(
+                target_account,
+                target_email,
+                target_creds,
+                force=force_refresh,
+            )
+
+            # Step 3: Activate target account - credentials
+            self._write_credentials(target_creds, verify=True)
+            transaction.record_step("credentials_written")
+            self._logger.info("Wrote target credentials")
+
+            # Step 4: Update config with target oauthAccount
+            target_config_data = json.loads(target_config)
+            oauth_section = target_config_data.get("oauthAccount")
+
+            if not oauth_section:
+                raise SwitchError("Invalid oauthAccount in backup")
+
+            current_config_data = self._read_json(config_path)
+            current_config_data["oauthAccount"] = oauth_section
+
+            self._write_json(config_path, current_config_data)
+            transaction.record_step("config_written")
+            self._logger.info("Updated config file")
+
+            # Step 5: Update sequence state
+            data["activeAccountNumber"] = int(target_account)
+            data["lastUpdated"] = get_timestamp()
+            self._write_json(self.sequence_file, data)
+            transaction.record_step("sequence_updated")
+
+            self._logger.info(
+                f"Switched from account {current_account} to {target_account}"
+            )
+
+        except Exception as e:
+            self._logger.error(f"Switch failed: {e}, attempting rollback")
+            if transaction.completed_steps:
+                success = transaction.rollback(self)
+                if success:
+                    self._logger.info("Rollback successful")
+                    raise SwitchError(
+                        f"Switch failed and was rolled back: {e}"
+                    )
+                else:
+                    self._logger.error("Rollback failed!")
+                    raise SwitchError(
+                        f"Switch failed and rollback also failed: {e}. "
+                        f"Manual recovery may be needed."
+                    )
+            raise
+
+    def _print_switch_result(self, target_account: str, target_email: str) -> None:
+        """Render the post-switch summary.
+
+        Runs after the lock releases so persist callbacks inside
+        list_accounts() can re-acquire it.
+        """
+        print(f"{accent('Switched to')} Account-{target_account} ({target_email})")
+        try:
+            self.list_accounts()
+        except Exception as e:
+            self._logger.warning(f"Post-switch usage display failed: {e!r}")
+            print(dimmed("  (usage display unavailable — run `cswap --list` to retry)"))
+        print()
+        print(dimmed(self._activation_followup_text()))
+        print()
+
+    def _perform_switch(
+        self,
+        target_account: str,
+        *,
+        intent: SwitchIntent | None = None,
+    ) -> None:
+        """Perform the actual account switch with transaction support.
+
+        The post-switch display runs after the lock releases so that persist
+        callbacks inside list_accounts() can re-acquire it.
+        """
+        if intent is None:
+            intent = ManualSwitchIntent()
+        quiet = intent.quiet
+        force_refresh = intent.force_refresh
+
+        self._warn_switch_session_hazards(target_account, quiet=quiet)
+
         with FileLock(self.lock_file):
             data = self._get_sequence_data()
             active_account = data.get("activeAccountNumber")
@@ -2768,225 +3025,33 @@ class ClaudeAccountSwitcher:
             # live Claude credential still exists). In both cases, skip the
             # back-up-current step so we never write account-None-* backups.
             if current_identity is None or current_account is None:
-                target_creds = self._read_account_credentials(
-                    target_account, target_email
-                )
-                target_config = self._read_account_config(target_account, target_email)
-                if not target_creds:
-                    raise SwitchError(
-                        f"Account-{target_account} has no stored credentials. "
-                        f"Re-add with: cswap --add-account --slot {target_account}"
-                    )
-                if not target_config:
-                    raise SwitchError(
-                        f"Account-{target_account} has no stored config backup. "
-                        f"Re-add with: cswap --add-account --slot {target_account}"
-                    )
-                target_creds = self._refresh_target_credentials_before_activation(
+                self._activate_target_directly(
+                    data,
                     target_account,
                     target_email,
-                    target_creds,
-                    force=force_refresh,
+                    config_path,
+                    current_identity,
+                    quiet=quiet,
+                    force_refresh=force_refresh,
                 )
-                try:
-                    target_config_data = json.loads(target_config)
-                except json.JSONDecodeError as exc:
-                    raise SwitchError(f"Invalid backup config: {exc}")
-                target_oauth = target_config_data.get("oauthAccount")
-                if not target_oauth:
-                    raise SwitchError("Invalid oauthAccount in backup")
-
-                # Snapshot live state so a mid-operation failure can be undone.
-                # When a live session exists, fail fast if the snapshot is
-                # unreadable rather than proceeding to overwrite without a
-                # safety net. The fresh-machine case has nothing to restore.
-                rollback_creds: str | None = None
-                rollback_config_text: str | None = None
-                if current_identity is not None:
-                    rollback_creds = self._read_credentials()
-                    if rollback_creds is None:
-                        raise CredentialReadError(
-                            "Cannot snapshot live credentials before activation"
-                        )
-                    if config_path.exists():
-                        try:
-                            rollback_config_text = config_path.read_text(
-                                encoding="utf-8"
-                            )
-                        except OSError as e:
-                            raise ConfigError(
-                                f"Cannot snapshot live config before activation: {e}"
-                            )
-
-                creds_written = False
-                config_written = False
-                try:
-                    self._write_credentials(target_creds, verify=True)
-                    creds_written = True
-
-                    # Mirror the normal switch path: preserve existing local
-                    # settings/projects when ~/.claude.json already exists, only
-                    # swapping in oauthAccount. Fall back to the full imported
-                    # config when no usable local config exists.
-                    existing_config = (
-                        self._read_json(config_path) if config_path.exists() else None
-                    )
-                    if existing_config:
-                        existing_config["oauthAccount"] = target_oauth
-                        self._write_json(config_path, existing_config)
-                    else:
-                        self._write_json(config_path, target_config_data)
-                    config_written = True
-
-                    data["activeAccountNumber"] = int(target_account)
-                    data["lastUpdated"] = get_timestamp()
-                    self._write_json(self.sequence_file, data)
-                except Exception:
-                    if config_written and rollback_config_text is not None:
-                        try:
-                            config_path.write_text(
-                                rollback_config_text, encoding="utf-8"
-                            )
-                            if sys.platform != "win32":
-                                os.chmod(config_path, 0o600)
-                        except Exception as e:
-                            self._logger.error(
-                                f"Failed to rollback config: {e}"
-                            )
-                    if creds_written and rollback_creds is not None:
-                        try:
-                            self._write_credentials(rollback_creds)
-                        except Exception as e:
-                            self._logger.error(
-                                f"Failed to rollback credentials: {e}"
-                            )
-                    raise
-
-                self._logger.info(
-                    f"Activated account {target_account} (no prior live account)"
-                )
-                if not quiet:
-                    print(
-                        f"{accent('Activated')} Account-{target_account} ({target_email})"
-                    )
-                    print()
-                    print(dimmed(self._activation_followup_text()))
-                    print()
                 return
 
             current_email, _ = current_identity
-
-            # Create transaction for rollback capability
-            try:
-                original_creds = self._read_credentials()
-                if original_creds is None:
-                    raise CredentialReadError("Failed to read current credentials")
-                original_config = config_path.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                raise ConfigError("Claude config file not found")
-            except PermissionError:
-                raise ConfigError("Permission denied reading Claude config")
-
-            transaction = SwitchTransaction(
-                original_credentials=original_creds,
-                original_config=original_config,
-                original_account_num=current_account,
-                original_email=current_email,
-                config_path=config_path,
+            self._swap_target_transactional(
+                data,
+                target_account,
+                target_email,
+                current_account,
+                current_email,
+                config_path,
+                force_refresh=force_refresh,
             )
-
-            try:
-                # Step 1: Backup current account
-                original_creds = self._write_verified_live_account_credentials(
-                    current_account, current_email, original_creds
-                )
-                self._write_account_config(
-                    current_account, current_email, original_config
-                )
-                self._logger.info(f"Backed up account {current_account}")
-
-                # Step 2: Retrieve target account
-                target_creds = self._read_account_credentials(
-                    target_account, target_email
-                )
-                target_config = self._read_account_config(target_account, target_email)
-
-                if not target_creds:
-                    raise SwitchError(
-                        f"Account-{target_account} has no stored credentials. "
-                        f"Re-add with: cswap --add-account --slot {target_account}"
-                    )
-                if not target_config:
-                    raise SwitchError(
-                        f"Account-{target_account} has no stored config backup. "
-                        f"Re-add with: cswap --add-account --slot {target_account}"
-                    )
-                target_creds = self._refresh_target_credentials_before_activation(
-                    target_account,
-                    target_email,
-                    target_creds,
-                    force=force_refresh,
-                )
-
-                # Step 3: Activate target account - credentials
-                self._write_credentials(target_creds, verify=True)
-                transaction.record_step("credentials_written")
-                self._logger.info("Wrote target credentials")
-
-                # Step 4: Update config with target oauthAccount
-                target_config_data = json.loads(target_config)
-                oauth_section = target_config_data.get("oauthAccount")
-
-                if not oauth_section:
-                    raise SwitchError("Invalid oauthAccount in backup")
-
-                current_config_data = self._read_json(config_path)
-                current_config_data["oauthAccount"] = oauth_section
-
-                self._write_json(config_path, current_config_data)
-                transaction.record_step("config_written")
-                self._logger.info("Updated config file")
-
-                # Step 5: Update sequence state
-                data["activeAccountNumber"] = int(target_account)
-                data["lastUpdated"] = get_timestamp()
-                self._write_json(self.sequence_file, data)
-                transaction.record_step("sequence_updated")
-
-                self._logger.info(
-                    f"Switched from account {current_account} to {target_account}"
-                )
-
-            except Exception as e:
-                self._logger.error(f"Switch failed: {e}, attempting rollback")
-                if transaction.completed_steps:
-                    success = transaction.rollback(self)
-                    if success:
-                        self._logger.info("Rollback successful")
-                        raise SwitchError(
-                            f"Switch failed and was rolled back: {e}"
-                        )
-                    else:
-                        self._logger.error("Rollback failed!")
-                        raise SwitchError(
-                            f"Switch failed and rollback also failed: {e}. "
-                            f"Manual recovery may be needed."
-                        )
-                raise
 
         # Lock released. Safe to do network I/O and let persist callbacks
         # re-acquire the lock from inside list_accounts().
         if quiet:
             return
-        print(f"{accent('Switched to')} Account-{target_account} ({target_email})")
-        try:
-            self.list_accounts()
-        except Exception as e:
-            self._logger.warning(f"Post-switch usage display failed: {e!r}")
-            print(dimmed("  (usage display unavailable — run `cswap --list` to retry)"))
-        print()
-        print(dimmed(self._activation_followup_text()))
-        print()
+        self._print_switch_result(target_account, target_email)
 
     def purge(self) -> None:
         """Remove all traces of claude-swap from the system.
