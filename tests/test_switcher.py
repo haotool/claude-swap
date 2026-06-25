@@ -10,14 +10,18 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from typing import TYPE_CHECKING
+
 from claude_swap.exceptions import (
-    AccountNotFoundError,
     ConfigError,
     CredentialReadError,
     CredentialWriteError,
     ValidationError,
 )
 from claude_swap.models import Platform
+
+if TYPE_CHECKING:
+    from claude_swap.models import BackgroundAutoSwitchIntent
 from claude_swap.paths import get_backup_root
 from claude_swap.switcher import ClaudeAccountSwitcher, SETUP_TOKEN_SCOPES
 
@@ -2654,7 +2658,7 @@ class TestAddAccountFromToken:
     def test_basic_add_stores_account(self, temp_home, capsys):
         """A valid token + email should store the account and print 'Added'."""
         switcher = self._make_switcher(temp_home)
-        with patch.object(switcher, "_write_account_credentials") as mock_creds, \
+        with patch.object(switcher, "_write_account_credentials"), \
              patch.object(switcher, "_write_account_config"):
             switcher.add_account_from_token("sk-ant-oat01-abc", "user@example.com")
 
@@ -3904,7 +3908,6 @@ class TestUsageCacheFreshness:
     def test_failed_refresh_leaves_expired_snapshots_untrusted(self, temp_home: Path):
         import json
         import time
-        from claude_swap import oauth
 
         s = ClaudeAccountSwitcher()
         s._setup_directories()
