@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Callable
 from claude_swap import macos_keychain
 from claude_swap.exceptions import MigrationIncomplete
 from claude_swap.models import Platform, get_timestamp
-from claude_swap.switcher import KEYRING_SERVICE, SECURITY_SERVICE
+from claude_swap.switcher import KEYRING_SERVICE
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher

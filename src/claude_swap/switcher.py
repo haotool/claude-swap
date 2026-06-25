@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import math
 import os
 import re
@@ -49,8 +48,6 @@ from claude_swap.printer import (
     bolded,
     dimmed,
     entrypoint_label,
-    error,
-    format_age,
     ide_short_name,
     muted,
     warning,
@@ -305,28 +302,15 @@ def _persist_usage_cache_entry(
     previous,
 ) -> None:
     """Write one cache row without re-stamping stale data after fetch failures."""
-    merged, note = _merge_usage_with_previous(current, previous)
-    if merged is None:
-        if current is None:
-            existing[key] = None
-        return
+    prev_trusted = previous if isinstance(previous, dict) and _is_usage_dict(previous) else None
     if isinstance(current, oauth.UsageFetchError):
-        if isinstance(previous, dict) and _is_usage_dict(previous):
-            existing[key] = previous
-        else:
-            existing[key] = _usage_to_cache(current)
-        return
-    if current is None and isinstance(previous, dict) and _is_usage_dict(previous):
-        existing[key] = previous
-        return
-    if isinstance(current, str):
+        existing[key] = prev_trusted if prev_trusted is not None else _usage_to_cache(current)
+    elif current is None:
+        existing[key] = prev_trusted  # None when no trusted prior row
+    elif isinstance(current, str):
         existing[key] = current
-        return
-    if _is_usage_dict(current):
+    elif _is_usage_dict(current):
         existing[key] = _usage_to_cache(current)
-        return
-    if _is_usage_dict(merged):
-        existing[key] = _usage_to_cache(merged)
 
 
 def _usage_slot_trusted(

@@ -463,7 +463,7 @@ Examples:
         elif args.tui:
             try:
                 from claude_swap.tui import run as tui_run
-            except ImportError as e:
+            except ImportError:
                 error(
                     "TUI mode requires the 'curses' module. "
                     "On Windows, install with: pip install windows-curses"
