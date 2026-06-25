@@ -57,22 +57,22 @@ from claude_swap.paths import (
 )
 from claude_swap.process_detection import get_running_instances
 
-# Service name under which the legacy ``keyring`` backend stored per-account
-# backup credentials on macOS (kept for the one-time keyring → security migration
-# and for the Windows Credential Manager migration).
-KEYRING_SERVICE = "claude-code"
-
-# Per-account backup + active-credential service names and the storage mechanics
-# now live in credentials.py (plan 020). Re-exported here so existing callers and
-# tests that reference ``switcher.SECURITY_SERVICE`` /
-# ``switcher.CLAUDE_CODE_KEYCHAIN_SERVICE`` keep working unchanged.
-from claude_swap.credentials import (  # noqa: E402
+# The credential storage/freshness mechanics live in credentials.py /
+# credential_refresh.py (plan 020). SECURITY_SERVICE / CLAUDE_CODE_KEYCHAIN_SERVICE
+# are re-exported here so callers and tests referencing them off ``switcher`` keep
+# working unchanged.
+from claude_swap.credentials import (
     CLAUDE_CODE_KEYCHAIN_SERVICE,  # noqa: F401  (re-exported for back-compat)
     SECURITY_SERVICE,
     CredentialStore,
     looks_like_api_key,
 )
-from claude_swap.credential_refresh import CredentialRefresher  # noqa: E402
+from claude_swap.credential_refresh import CredentialRefresher
+
+# Service name under which the legacy ``keyring`` backend stored per-account
+# backup credentials on macOS (kept for the one-time keyring → security migration
+# and for the Windows Credential Manager migration).
+KEYRING_SERVICE = "claude-code"
 
 # Setup-tokens are inference-only server-side; wider scopes trigger 403s
 # on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.

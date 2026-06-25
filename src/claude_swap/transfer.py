@@ -217,7 +217,7 @@ def export_accounts(
         # not OAuth JSON — carry it verbatim (and tag the kind) so the JSON parse
         # below doesn't choke and import can restore it as-is.
         is_api_key = looks_like_api_key(creds_text)
-        entry: dict = {
+        entry: dict[str, Any] = {
             "number": int(num),
             "email": email,
             "uuid": record.get("uuid", ""),

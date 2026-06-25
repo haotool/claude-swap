@@ -44,10 +44,6 @@ from claude_swap.paths import (
     get_global_config_path,
 )
 
-# Service name under which the legacy ``keyring`` backend stored per-account
-# backup credentials lives in switcher.py (KEYRING_SERVICE) — it is a migration
-# concern, not part of the active credential store, so it stays there.
-
 # Service name for per-account backup credentials managed via the ``security``
 # CLI on macOS. Deliberately distinct from the legacy keyring service so old
 # keyring items and new security items coexist during migration.
