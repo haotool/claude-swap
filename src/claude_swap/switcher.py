@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import math
 import os
 import re
 import shutil
 import sys
-import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -54,8 +52,6 @@ from claude_swap.printer import (
 )
 from claude_swap.paths import (
     get_backup_root,
-    get_claude_config_home,
-    get_credentials_path,
     get_global_config_path,
     get_legacy_backup_root,
     migrate_legacy_backup_dir,
@@ -67,14 +63,15 @@ from claude_swap.process_detection import get_running_instances
 # and for the Windows Credential Manager migration).
 KEYRING_SERVICE = "claude-code"
 
-# Service name for per-account backup credentials now managed via the ``security``
-# CLI on macOS. Deliberately distinct from KEYRING_SERVICE so old keyring items and
-# new security items coexist during migration (safe write → verify → delete).
-SECURITY_SERVICE = "claude-swap"
-
-# Service name of Claude Code's *active* credential in the macOS Keychain (read by
-# Claude Code itself; we read/write it when switching accounts).
-CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+# Per-account backup + active-credential service names and the storage mechanics
+# now live in credentials.py (plan 020). Re-exported here so existing callers and
+# tests that reference ``switcher.SECURITY_SERVICE`` /
+# ``switcher.CLAUDE_CODE_KEYCHAIN_SERVICE`` keep working unchanged.
+from claude_swap.credentials import (  # noqa: E402
+    CLAUDE_CODE_KEYCHAIN_SERVICE,  # noqa: F401  (re-exported for back-compat)
+    SECURITY_SERVICE,
+    CredentialStore,
+)
 
 # Setup-tokens are inference-only server-side; wider scopes trigger 403s
 # on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
@@ -100,6 +97,7 @@ def auto_switch_display(cfg: dict) -> tuple[bool, int, str, str]:
 
 
 _BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS = 0.5
+
 
 # Cooldown-aware target picker (``_pick_best_switch_target``):
 # Score buckets used by ``_slot_switch_score`` — lower is better.
@@ -361,6 +359,10 @@ class ClaudeAccountSwitcher:
         self.lock_file = self.backup_dir / ".lock"
         self._logger = setup_logging(self.backup_dir, debug=debug)
 
+        # Credential storage layer (plan 020). Reads platform / credentials_dir
+        # / _logger off this switcher at call time via the _StoreHost Protocol.
+        self._store = CredentialStore(self)
+
         # Run any pending one-time data migrations (e.g. relocating Windows
         # backup credentials out of Credential Manager into files). Imported
         # lazily to avoid a circular import, and self-contained so it never
@@ -455,186 +457,31 @@ class ClaudeAccountSwitcher:
             os.chmod(path, 0o600)
 
     def _read_credentials(self) -> str | None:
-        """Read credentials from Claude Code's storage.
-
-        Claude Code stores credentials in:
-        - macOS: Keychain with service "Claude Code-credentials"
-        - Linux/WSL/Windows: File at ~/.claude/.credentials.json
-
-        Returns:
-            Credentials string if found, empty string if not found, None on error.
-        """
-        if self.platform == Platform.MACOS:
-            try:
-                val = macos_keychain.get_password(
-                    CLAUDE_CODE_KEYCHAIN_SERVICE, os.environ.get("USER", "user")
-                )
-            except Exception as e:
-                # rc-44 (not found) is returned as None by the wrapper, not raised;
-                # anything raised here is a genuine error (locked / denied / etc.).
-                self._logger.error(f"Failed to read credentials: {e}")
-                return None
-            return val if val is not None else ""
-        else:  # Linux/WSL/Windows - credentials stored in file
-            cred_file = get_credentials_path()
-            if cred_file.exists():
-                try:
-                    return cred_file.read_text(encoding="utf-8")
-                except Exception as e:
-                    self._logger.error(f"Failed to read credentials file: {e}")
-                    return None
-            return ""
+        """Read Claude Code's active credentials (delegates to CredentialStore)."""
+        return self._store._read_credentials()
 
     def _write_credentials(self, credentials: str, *, verify: bool = False) -> None:
-        """Write credentials to Claude Code's storage.
-
-        Claude Code stores credentials in:
-        - macOS: Keychain with service "Claude Code-credentials"
-        - Linux/WSL/Windows: File at ~/.claude/.credentials.json
-
-        Args:
-            credentials: The credential payload to persist (raw string).
-            verify: When True, immediately read the credentials back from the
-                storage layer and confirm the readback matches what was
-                written. Defends against silent Keychain ACL corruption and
-                concurrent overwrites by other processes between our write and
-                the next operation. Recommended for activation-path writes;
-                left False on rollback writes where verification failure would
-                mask the original cause of the rollback.
-
-        Raises:
-            CredentialWriteError: If writing credentials fails, or if
-                ``verify=True`` and the readback does not match the intended
-                payload.
-        """
-        if self.platform == Platform.MACOS:
-            try:
-                macos_keychain.set_password(
-                    CLAUDE_CODE_KEYCHAIN_SERVICE,
-                    os.environ.get("USER", "user"),
-                    credentials,
-                )
-            except Exception as e:
-                raise CredentialWriteError(f"Failed to write credentials: {e}")
-        else:  # Linux/WSL/Windows - credentials stored in file
-            cred_dir = get_claude_config_home()
-            cred_dir.mkdir(parents=True, exist_ok=True)
-            cred_file = cred_dir / ".credentials.json"
-            try:
-                fd, tmp_path = tempfile.mkstemp(dir=str(cred_dir), suffix=".tmp")
-                try:
-                    os.write(fd, credentials.encode("utf-8"))
-                    os.close(fd)
-                    fd = -1
-                    os.replace(tmp_path, str(cred_file))
-                    if sys.platform != "win32":
-                        os.chmod(str(cred_file), 0o600)
-                except BaseException:
-                    if fd >= 0:
-                        os.close(fd)
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-                    raise
-            except Exception as e:
-                raise CredentialWriteError(f"Failed to write credentials: {e}")
-
-        if verify:
-            readback = self._read_credentials()
-            if readback != credentials:
-                # We deliberately do NOT include credential payloads in the
-                # error message (avoid leaking secrets into logs).
-                raise CredentialWriteError(
-                    "Credential write verification failed: readback differs "
-                    "from intended payload. Possible silent Keychain corruption "
-                    "or concurrent overwrite. Aborting switch."
-                )
+        """Write Claude Code's active credentials (delegates to CredentialStore)."""
+        self._store._write_credentials(credentials, verify=verify)
 
     def _uses_file_backup_backend(self) -> bool:
-        """Whether per-account backup credentials live in files vs. the Keychain.
-
-        Linux/WSL/Windows store them as base64 files under ``credentials_dir``;
-        macOS (and any UNKNOWN platform) use the macOS Keychain (via the
-        ``security`` CLI). Windows moved to files because the Windows Credential
-        Manager rejects entries over ~2,500 bytes, which Claude Code session
-        credentials can exceed (#45).
-        """
-        return self.platform in (Platform.LINUX, Platform.WSL, Platform.WINDOWS)
+        """Whether per-account backups live in files vs. Keychain (delegates)."""
+        return self._store._uses_file_backup_backend()
 
     def _read_account_credentials(self, account_num: str, email: str) -> str:
-        """Read account credentials from backup.
-
-        On Linux/WSL/Windows: Uses file-based storage (base64 files under
-        ``credentials_dir``). On macOS: Uses the Keychain via the ``security`` CLI.
-        """
-        if self._uses_file_backup_backend():
-            cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
-            if cred_file.exists():
-                try:
-                    encoded = cred_file.read_text(encoding="utf-8")
-                    return base64.b64decode(encoded).decode("utf-8")
-                except Exception as e:
-                    self._logger.warning(f"Failed to read credentials file: {e}")
-                    return ""
-            return ""
-        else:
-            # macOS: per-account backup credentials in the Keychain via `security`.
-            username = f"account-{account_num}-{email}"
-            try:
-                creds = macos_keychain.get_password(SECURITY_SERVICE, username)
-                return creds if creds else ""
-            except Exception as e:
-                self._logger.warning(f"Failed to read credentials from Keychain: {e}")
-                return ""
+        """Read account credentials from backup (delegates to CredentialStore)."""
+        return self._store._read_account_credentials(account_num, email)
 
     def _write_account_credentials(
         self, account_num: str, email: str, credentials: str
     ) -> None:
-        """Write account credentials to backup.
+        """Write account backup credentials, then invalidate the session profile.
 
-        On Linux/WSL/Windows: Uses file-based storage (base64 files under
-        ``credentials_dir``). On macOS: Uses the Keychain via the ``security`` CLI.
+        Pure storage is delegated to ``CredentialStore``; the session-lifecycle
+        side effect below is switcher-owned (the store is data-only toward its
+        host) and so stays here, keeping behavior identical for every caller.
         """
-        if self._uses_file_backup_backend():
-            cred_file = self.credentials_dir / f".creds-{account_num}-{email}.enc"
-            try:
-                encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-                # Atomic 0o600 write: ``write_text`` would land the file with
-                # the user's umask (typically 0o644) for the window before the
-                # explicit ``chmod``, exposing the base64-encoded token to any
-                # same-UID process that races a read.  ``mkstemp`` creates the
-                # temp file with 0o600 directly, and ``os.replace`` is atomic
-                # within the directory.
-                fd, tmp_path = tempfile.mkstemp(
-                    dir=str(self.credentials_dir), suffix=".tmp",
-                )
-                try:
-                    os.write(fd, encoded.encode("utf-8"))
-                    os.close(fd)
-                    fd = -1
-                    os.replace(tmp_path, str(cred_file))
-                    if sys.platform != "win32":
-                        os.chmod(str(cred_file), 0o600)
-                except BaseException:
-                    if fd >= 0:
-                        os.close(fd)
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-                    raise
-            except Exception as e:
-                self._logger.warning(f"Failed to write credentials file: {e}")
-                raise
-        else:
-            # macOS: per-account backup credentials in the Keychain via `security`.
-            username = f"account-{account_num}-{email}"
-            try:
-                macos_keychain.set_password(SECURITY_SERVICE, username, credentials)
-            except Exception as e:
-                self._logger.warning(f"Failed to write credentials to Keychain: {e}")
-                raise
+        self._store._write_account_credentials(account_num, email, credentials)
         # Backup credentials changed (re-login via --add-account, --add-token,
         # import, switch backing up, or a usage-refresh rotation): a session
         # profile seeded from the old credentials may now hold a stale or
@@ -876,31 +723,8 @@ class ClaudeAccountSwitcher:
             return refreshed, "token refreshed"
 
     def _delete_account_credentials(self, account_num: str, email: str) -> None:
-        """Delete account credentials from backup.
-
-        On Linux/WSL/Windows: Deletes file-based credential storage.
-        On macOS: Removes from the Keychain via the ``security`` CLI.
-        """
-        if self._uses_file_backup_backend():
-            cred_files = [self.credentials_dir / f".creds-{account_num}-{email}.enc"]
-            if str(account_num) != "None":
-                cred_files.append(self.credentials_dir / f".creds-None-{email}.enc")
-            for cred_file in cred_files:
-                try:
-                    if cred_file.exists():
-                        cred_file.unlink()
-                except Exception as e:
-                    self._logger.warning(f"Failed to delete credentials file: {e}")
-        else:
-            # macOS: per-account backup credentials in the Keychain via `security`.
-            usernames = [f"account-{account_num}-{email}"]
-            if str(account_num) != "None":
-                usernames.append(f"account-None-{email}")
-            for username in usernames:
-                try:
-                    macos_keychain.delete_password(SECURITY_SERVICE, username)
-                except Exception as e:
-                    self._logger.warning(f"Failed to delete credentials from Keychain: {e}")
+        """Delete account credentials from backup (delegates to CredentialStore)."""
+        self._store._delete_account_credentials(account_num, email)
 
     def _delete_account_files(self, account_num: str, email: str) -> None:
         """Delete all backup files for an account (credentials + config).
