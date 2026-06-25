@@ -1543,6 +1543,102 @@ class ClaudeAccountSwitcher:
             data["lastUpdated"] = get_timestamp()
             self._write_json(self.sequence_file, data)
 
+    def _resolve_target_slot(
+        self, email: str, org_uuid: str, slot: int | None
+    ) -> tuple[str, tuple[str, str] | None, str | None] | None:
+        """Resolve where a new/moved account should land.
+
+        Returns ``(account_num, displace_slot, migrate_from)`` or ``None`` when
+        the user declines an overwrite prompt. No destructive work is done here.
+        """
+        displace_slot: tuple[str, str] | None = None
+        migrate_from: str | None = None
+
+        if slot is None:
+            return str(self._get_next_account_number()), None, None
+
+        if slot < 1:
+            raise ConfigError("Slot number must be >= 1")
+        account_num = str(slot)
+        data = self._get_sequence_data()
+
+        # Find if the same account already exists in a different slot.
+        if self._account_exists(email, org_uuid):
+            old_num = next(
+                (num for num, acc in data.get("accounts", {}).items()
+                 if acc.get("email") == email
+                 and acc.get("organizationUuid", "") == org_uuid),
+                None,
+            )
+            if old_num and old_num != account_num:
+                migrate_from = old_num
+
+        # Check if the target slot is occupied by a different account.
+        if account_num in data.get("accounts", {}):
+            existing = data["accounts"][account_num]
+            existing_email = existing.get("email", "unknown")
+            is_same = (existing_email == email
+                       and existing.get("organizationUuid", "") == org_uuid)
+            if not is_same:
+                existing_tag = self._get_display_tag(
+                    existing_email,
+                    existing.get("organizationName", ""),
+                    existing.get("organizationUuid", ""),
+                )
+                warning(f"Slot {slot} already occupied")
+                print(f"{existing_email} {muted(f'[{existing_tag}]')}")
+                try:
+                    answer = input(f"Overwrite slot {slot}? [y/N] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print(f"\n{dimmed('Cancelled')}")
+                    return None
+                if answer not in ("y", "yes"):
+                    print(dimmed("Cancelled"))
+                    return None
+                displace_slot = (account_num, existing_email)
+
+        return account_num, displace_slot, migrate_from
+
+    def _apply_slot_displacement(
+        self,
+        displace_slot: tuple[str, str] | None,
+        migrate_from: str | None,
+        slot: int | None,
+    ) -> None:
+        """Delete the slot(s) freed by an overwrite/move, in sequence.json."""
+        if displace_slot:
+            d_num, d_email = displace_slot
+            self._delete_account_files(d_num, d_email)
+            data = self._get_sequence_data()
+            if int(d_num) in data["sequence"]:
+                data["sequence"].remove(int(d_num))
+            del data["accounts"][d_num]
+            self._write_json(self.sequence_file, data)
+
+        if migrate_from:
+            data = self._get_sequence_data()
+            old_email = data["accounts"][migrate_from].get("email", "")
+            self._delete_account_files(migrate_from, old_email)
+            if int(migrate_from) in data["sequence"]:
+                data["sequence"].remove(int(migrate_from))
+            del data["accounts"][migrate_from]
+            self._write_json(self.sequence_file, data)
+            print(f"{dimmed(f'Moved from slot {migrate_from} → {slot}')}")
+
+    def _register_account_slot(
+        self, account_num: str, metadata: dict, *, set_active: bool
+    ) -> None:
+        """Record the new slot in sequence.json and persist it."""
+        data = self._get_sequence_data()
+        data["accounts"][account_num] = metadata
+        if int(account_num) not in data["sequence"]:
+            data["sequence"].append(int(account_num))
+            data["sequence"].sort()
+        if set_active:
+            data["activeAccountNumber"] = int(account_num)
+        data["lastUpdated"] = get_timestamp()
+        self._write_json(self.sequence_file, data)
+
     def add_account(self, slot: int | None = None) -> None:
         """Add current account to managed accounts.
 
@@ -1607,53 +1703,10 @@ class ClaudeAccountSwitcher:
 
         # Determine slot number and collect confirmation decisions
         # (no destructive operations until new account is verified readable)
-        displace_slot = None  # slot to clean up (occupied by different account)
-        migrate_from = None   # old slot to clean up (same account, different slot)
-
-        if slot is not None:
-            if slot < 1:
-                raise ConfigError("Slot number must be >= 1")
-            account_num = str(slot)
-            data = self._get_sequence_data()
-
-            # Find if current account already exists in a different slot
-            if self._account_exists(current_email, current_org_uuid):
-                old_num = next(
-                    (num for num, acc in data.get("accounts", {}).items()
-                     if acc.get("email") == current_email and
-                     acc.get("organizationUuid", "") == current_org_uuid),
-                    None,
-                )
-                if old_num and old_num != account_num:
-                    migrate_from = old_num
-
-            # Check if target slot is occupied by a different account
-            if account_num in data.get("accounts", {}):
-                existing = data["accounts"][account_num]
-                existing_email = existing.get("email", "unknown")
-                is_same = (existing_email == current_email
-                           and existing.get("organizationUuid", "") == current_org_uuid)
-                if not is_same:
-                    existing_tag = self._get_display_tag(
-                        existing_email,
-                        existing.get("organizationName", ""),
-                        existing.get("organizationUuid", ""),
-                    )
-                    warning(f"Slot {slot} already occupied")
-                    print(
-                        f"{existing_email} {muted(f'[{existing_tag}]')}"
-                    )
-                    try:
-                        answer = input(f"Overwrite slot {slot}? [y/N] ").strip().lower()
-                    except (EOFError, KeyboardInterrupt):
-                        print(f"\n{dimmed('Cancelled')}")
-                        return
-                    if answer not in ("y", "yes"):
-                        print(dimmed("Cancelled"))
-                        return
-                    displace_slot = (account_num, existing_email)
-        else:
-            account_num = str(self._get_next_account_number())
+        resolved = self._resolve_target_slot(current_email, current_org_uuid, slot)
+        if resolved is None:
+            return
+        account_num, displace_slot, migrate_from = resolved
 
         # Read new account credentials BEFORE any destructive operations
         current_creds = self._read_credentials()
@@ -1678,24 +1731,7 @@ class ClaudeAccountSwitcher:
         organization_name = oauth_data.get("organizationName", "") or ""
 
         # Now safe to perform destructive cleanup (new account data is in memory)
-        if displace_slot:
-            d_num, d_email = displace_slot
-            self._delete_account_files(d_num, d_email)
-            data = self._get_sequence_data()
-            if int(d_num) in data["sequence"]:
-                data["sequence"].remove(int(d_num))
-            del data["accounts"][d_num]
-            self._write_json(self.sequence_file, data)
-
-        if migrate_from:
-            data = self._get_sequence_data()
-            old_email = data["accounts"][migrate_from].get("email", "")
-            self._delete_account_files(migrate_from, old_email)
-            if int(migrate_from) in data["sequence"]:
-                data["sequence"].remove(int(migrate_from))
-            del data["accounts"][migrate_from]
-            self._write_json(self.sequence_file, data)
-            print(f"{dimmed(f'Moved from slot {migrate_from} → {slot}')}")
+        self._apply_slot_displacement(displace_slot, migrate_from, slot)
 
         # Store backups
         current_creds = self._write_verified_live_account_credentials(
@@ -1706,21 +1742,17 @@ class ClaudeAccountSwitcher:
         self._write_account_config(account_num, current_email, current_config)
 
         # Update sequence.json
-        data = self._get_sequence_data()
-        data["accounts"][account_num] = {
-            "email": current_email,
-            "uuid": account_uuid,
-            "organizationUuid": organization_uuid,
-            "organizationName": organization_name,
-            "added": get_timestamp(),
-        }
-        if int(account_num) not in data["sequence"]:
-            data["sequence"].append(int(account_num))
-            data["sequence"].sort()
-        data["activeAccountNumber"] = int(account_num)
-        data["lastUpdated"] = get_timestamp()
-
-        self._write_json(self.sequence_file, data)
+        self._register_account_slot(
+            account_num,
+            {
+                "email": current_email,
+                "uuid": account_uuid,
+                "organizationUuid": organization_uuid,
+                "organizationName": organization_name,
+                "added": get_timestamp(),
+            },
+            set_active=True,
+        )
         tag = self._get_display_tag(current_email, organization_name, organization_uuid)
         self._logger.info(f"Added account {account_num}: {current_email} (org: {organization_uuid or 'personal'})")
         print(f"{accent('Added')} Account {account_num}: {current_email} {muted(f'[{tag}]')}")
@@ -1806,51 +1838,10 @@ class ClaudeAccountSwitcher:
             )
             return
 
-        displace_slot = None
-        migrate_from = None
-
-        if slot is not None:
-            if slot < 1:
-                raise ConfigError("Slot number must be >= 1")
-            account_num = str(slot)
-            data = self._get_sequence_data()
-
-            if self._account_exists(email, ""):
-                old_num = next(
-                    (num for num, acc in data.get("accounts", {}).items()
-                     if acc.get("email") == email
-                     and acc.get("organizationUuid", "") == ""),
-                    None,
-                )
-                if old_num and old_num != account_num:
-                    migrate_from = old_num
-
-            if account_num in data.get("accounts", {}):
-                existing = data["accounts"][account_num]
-                existing_email = existing.get("email", "unknown")
-                is_same = (
-                    existing_email == email
-                    and existing.get("organizationUuid", "") == ""
-                )
-                if not is_same:
-                    existing_tag = self._get_display_tag(
-                        existing_email,
-                        existing.get("organizationName", ""),
-                        existing.get("organizationUuid", ""),
-                    )
-                    warning(f"Slot {slot} already occupied")
-                    print(f"{existing_email} {muted(f'[{existing_tag}]')}")
-                    try:
-                        answer = input(f"Overwrite slot {slot}? [y/N] ").strip().lower()
-                    except (EOFError, KeyboardInterrupt):
-                        print(f"\n{dimmed('Cancelled')}")
-                        return
-                    if answer not in ("y", "yes"):
-                        print(dimmed("Cancelled"))
-                        return
-                    displace_slot = (account_num, existing_email)
-        else:
-            account_num = str(self._get_next_account_number())
+        resolved = self._resolve_target_slot(email, "", slot)
+        if resolved is None:
+            return
+        account_num, displace_slot, migrate_from = resolved
 
         credentials = json.dumps({
             "claudeAiOauth": {
@@ -1867,42 +1858,22 @@ class ClaudeAccountSwitcher:
             }
         })
 
-        if displace_slot:
-            d_num, d_email = displace_slot
-            self._delete_account_files(d_num, d_email)
-            data = self._get_sequence_data()
-            if int(d_num) in data["sequence"]:
-                data["sequence"].remove(int(d_num))
-            del data["accounts"][d_num]
-            self._write_json(self.sequence_file, data)
-
-        if migrate_from:
-            data = self._get_sequence_data()
-            old_email = data["accounts"][migrate_from].get("email", "")
-            self._delete_account_files(migrate_from, old_email)
-            if int(migrate_from) in data["sequence"]:
-                data["sequence"].remove(int(migrate_from))
-            del data["accounts"][migrate_from]
-            self._write_json(self.sequence_file, data)
-            print(f"{dimmed(f'Moved from slot {migrate_from} → {slot}')}")
+        self._apply_slot_displacement(displace_slot, migrate_from, slot)
 
         self._write_account_credentials(account_num, email, credentials)
         self._write_account_config(account_num, email, config)
 
-        data = self._get_sequence_data()
-        data["accounts"][account_num] = {
-            "email": email,
-            "uuid": "",
-            "organizationUuid": "",
-            "organizationName": "",
-            "added": get_timestamp(),
-        }
-        if int(account_num) not in data["sequence"]:
-            data["sequence"].append(int(account_num))
-            data["sequence"].sort()
-        data["lastUpdated"] = get_timestamp()
-
-        self._write_json(self.sequence_file, data)
+        self._register_account_slot(
+            account_num,
+            {
+                "email": email,
+                "uuid": "",
+                "organizationUuid": "",
+                "organizationName": "",
+                "added": get_timestamp(),
+            },
+            set_active=False,
+        )
         self._logger.info(f"Added account {account_num} from token: {email}")
         print(
             f"{accent('Added')} Account {account_num}: {email} "
