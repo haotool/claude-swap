@@ -4,6 +4,32 @@ All notable user-facing changes to claude-swap are documented here.
 
 ## [Unreleased]
 
+## [0.15.0b2] — 2026-06-27
+
+### Added
+
+- **Upstream sync:** `--json` machine-readable output, `--strategy` for targeted switching, and `assume_yes` on destructive prompts.
+- **TUI in-place + Watch:** menu actions render in-place; live Watch dashboard for usage velocity (fork retains Account health and Auto-switch menus).
+- **Managed API-key accounts:** `cswap --add-token` can register `sk-ant-api` managed accounts (plan 021).
+- **`auto_switch_planning` module:** slot scoring and automated switch planning extracted from `switcher.py` (plan 022 track 5).
+
+### Changed
+
+- **Credential layer:** `CredentialStore` and `CredentialRefresher` extracted from switcher; usage-cache codec moved to `usage_cache.py` (plans 018–020).
+- **Switch/purge paths:** fresh-machine target resolution, switch/purge phase decomposition, and `status_payload()` JSON SSOT (plan 022 track 6).
+- **Fork-only modules:** monitor, service, credential_refresh, and usage_cache aligned to upstream comment/style conventions (−147 LOC, plan 022 track 2).
+
+### Fixed
+
+- **OAuth refresh:** inactive-account refresh serialized under FileLock (plan 017).
+- **Monitor:** per-window usage tracking so velocity polling is not masked by saturated holds.
+- **Lint:** remove unused imports in `switcher.py`.
+
+### Upgrade notes
+
+- Fork is **96 commits ahead, 0 behind** upstream `realiti4/claude-swap` at this tag — all upstream features are included plus auto-switch Beta, `cswap service`, and `--health`.
+- Auto-switch users: see [0.13.1] breaking changes and README failure-modes section before enabling monitor/service on a fresh upgrade.
+
 ## [0.13.1] — 2026-06-14
 
 ### Added

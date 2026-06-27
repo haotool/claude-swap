@@ -9,7 +9,6 @@ import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
 
 from claude_swap import macos_keychain
@@ -36,15 +35,12 @@ from claude_swap.json_output import (
     USAGE_NO_CREDENTIALS,
     USAGE_TOKEN_EXPIRED,
     account_ref,
-    account_row,
     list_payload,
     switch_noop,
     switch_result_from_op,
     status_payload,
-    usage_fields,
 )
 from claude_swap.auto_switch_planning import (
-    SATURATED_SWITCH_MARGIN_S,
     max_usage_pct,
     pick_best_from_snapshots,
     plan_automated_switch,
@@ -71,8 +67,6 @@ from claude_swap.printer import (
     dimmed,
     entrypoint_label,
     ide_short_name,
-    error,
-    format_age,
     muted,
     warning,
 )

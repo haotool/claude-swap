@@ -29,6 +29,9 @@
     codec, and extracting them would create a chatty back-referencing
     collaborator (anemic-module anti-pattern). This is the evidence-based stop
     point for safe extraction; no circular coupling was introduced.
+- **Track D (plan 022): DONE** — 2026-06-27. Upstream sync, TUI in-place Watch,
+  auto_switch_planning + JSON payload SSOT, switch/purge phase decomposition.
+  switcher.py 3712→3494 LOC; 739 passed.
 - **Priority**: P2
 - **Effort**: L (split across sub-steps)
 - **Risk**: MED — touches the critical switch path; guard with the suite
