@@ -141,16 +141,12 @@ def keychain_service_name(session_dir: Path) -> str:
 
 
 def _keychain_account_name() -> str:
-    """Keychain account name, mirroring Claude's ``getUsername()``."""
-    user = os.environ.get("USER")
-    if user:
-        return user
-    try:
-        import pwd  # POSIX-only; matches the macOS-only call sites
+    """Keychain account name, mirroring Claude's ``getUsername()``.
 
-        return pwd.getpwuid(os.geteuid()).pw_name
-    except Exception:
-        return "claude-code-user"
+    Delegates to :func:`macos_keychain.keychain_account_name` so session profiles
+    and the active store derive the account name identically.
+    """
+    return macos_keychain.keychain_account_name()
 
 
 def delete_macos_keychain_entry(session_dir: Path) -> None:
@@ -272,9 +268,8 @@ class SessionManager:
         """Reject API-key accounts in session mode (not supported yet).
 
         Session bootstrap is OAuth-shaped — it seeds ``.credentials.json`` and
-        ``_is_session_valid`` requires ``authMethod == "claude.ai"`` — so an
-        API-key account would otherwise fail validation opaquely. Raise early
-        with guidance.
+        ``_is_session_valid`` requires ``authMethod == "claude.ai"`` — so an API-key
+        account would otherwise fail validation opaquely. Raise early with guidance.
         """
         if self.switcher._account_kind(account_num) == "api_key":
             raise SessionError(

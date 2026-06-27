@@ -1,27 +1,21 @@
-"""Credential storage layer for Claude Code accounts.
+"""Credential storage layer for claude-swap.
 
-Extracted from ``switcher.py`` (plan 020) so the switcher no longer owns the
-keychain/file mechanics of reading and writing credentials. ``CredentialStore``
-owns two stores:
+Owns *where* credentials live and *how* they are read/written — the macOS
+Keychain-vs-file routing, per-process capability detection and sticky fallback,
+and the ``.enc``-wins backup reconciliation that landed in #66. Split out of
+``switcher.py`` so the switcher reads as account orchestration again.
 
-- the **active** credential Claude Code itself reads (macOS Keychain service
-  ``"Claude Code-credentials"``; elsewhere ``~/.claude/.credentials.json``), and
-- the **per-account backup** credentials claude-swap keeps for inactive slots
-  (macOS Keychain service ``"claude-swap"``; elsewhere base64 ``.enc`` files
-  under ``credentials_dir``).
+``CredentialStore`` is a leaf collaborator: it imports only the OS-primitive and
+path helpers (``macos_keychain``, ``paths``) and never imports ``switcher``. It
+reads its live configuration (``platform``, ``_logger``, ``credentials_dir``)
+from a host *view* — a small data-only window onto the switcher that constructs
+it — and must never call a switcher *method* through that host, or storage and
+orchestration would re-couple. The store owns only its two pieces of state:
+``_keychain_usable_cache`` (sticky, process-local) and
+``_last_active_credentials_backend`` (for the post-switch follow-up message).
 
-The store reads its live configuration (``platform``, ``credentials_dir``,
-``_logger``) off a host via the ``_StoreHost`` Protocol at call time, so a
-switcher that mutates those attributes post-construction (e.g. tests setting
-``switcher.platform``) is honored. The store must not reach for any *method* on
-the host — session-lifecycle side effects (invalidating a slot's session
-profile after a backup write) stay in the switcher, which wraps the store's
-pure write.
-
-Interface and method names mirror upstream ``credentials.py`` to keep future
-selective convergence a drop-in. ``_write_credentials``'s ``verify`` keyword is
-a claude-swap addition (activation-path read-back verification) not present
-upstream.
+``_write_credentials``'s ``verify`` keyword is a claude-swap addition
+(activation-path read-back verification) not present upstream.
 """
 
 from __future__ import annotations

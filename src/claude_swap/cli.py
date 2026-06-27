@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.json_output import error_envelope
 from claude_swap.printer import bolded, dimmed, error, muted
 from claude_swap.switcher import ClaudeAccountSwitcher, auto_switch_display
 
@@ -238,6 +240,8 @@ Examples:
   %(prog)s --list
   %(prog)s --health
   %(prog)s --switch
+  %(prog)s --switch --strategy best             # switch to the account with most quota left
+  %(prog)s --switch --strategy next-available   # rotate, skipping rate-limited accounts
   %(prog)s --switch-to 2
   %(prog)s --switch-to user@example.com
   %(prog)s run 2                            # run account 2 in this terminal only
@@ -269,6 +273,24 @@ Examples:
         "--token-status",
         action="store_true",
         help="Show OAuth token expiry state (use with --list)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit machine-readable JSON to stdout (use with --list, --status, "
+            "--switch, or --switch-to). See README 'JSON output for scripting'."
+        ),
+    )
+    parser.add_argument(
+        "--strategy",
+        choices=["best", "next-available"],
+        metavar="{best,next-available}",
+        help=(
+            "With --switch: pick the target by remaining 5h/7d quota. "
+            "'best' jumps to the account with the most headroom; "
+            "'next-available' rotates to the next account, skipping any at their limit"
+        ),
     )
     parser.add_argument(
         "--slot",
@@ -387,6 +409,14 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     """Enforce cross-flag constraints argparse cannot express directly."""
     if args.token_status and not (args.list or args.health):
         parser.error("--token-status can only be used with --list or --health")
+    if args.json and not (args.list or args.status or args.switch or args.switch_to):
+        parser.error(
+            "--json can only be used with --list, --status, --switch, or --switch-to"
+        )
+    if args.json and args.token_status:
+        parser.error("--token-status cannot be combined with --json")
+    if args.strategy is not None and not args.switch:
+        parser.error("--strategy can only be used with --switch")
     if args.slot is not None and not (args.add_account or args.add_token is not None):
         parser.error("--slot can only be used with --add-account or --add-token")
     if args.email is not None and args.add_token is None:
@@ -429,35 +459,49 @@ def _cmd_monitor(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> N
     sys.exit(run_cli_monitor(switcher))
 
 
-def _dispatch_action(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
-    """Run the single selected mutually-exclusive action, in declared order."""
-    # (selected?, handler) — first match wins; the group guarantees exactly one.
-    # add_token uses `is not None` so an empty-string const (`--add-token` with
-    # no value) still dispatches.
-    actions = [
-        (args.add_account, lambda: switcher.add_account(slot=args.slot)),
-        (
-            args.add_token is not None,
-            lambda: switcher.add_account_from_token(
-                token=args.add_token, email=args.email, slot=args.slot
-            ),
-        ),
-        (bool(args.remove_account), lambda: switcher.remove_account(args.remove_account)),
-        (args.list, lambda: switcher.list_accounts(show_token_status=args.token_status)),
-        (args.health, lambda: switcher.list_accounts(show_token_status=True, show_health=True)),
-        (args.switch, switcher.switch),
-        (bool(args.switch_to), lambda: switcher.switch_to(args.switch_to)),
-        (args.status, switcher.status),
-        (args.purge, switcher.purge),
-        (bool(args.export), lambda: _cmd_export(switcher, args)),
-        (bool(args.import_), lambda: _cmd_import(switcher, args)),
-        (args.tui, lambda: _cmd_tui(switcher, args)),
-        (args.monitor, lambda: _cmd_monitor(switcher, args)),
-    ]
-    for selected, handler in actions:
-        if selected:
-            handler()
-            return
+def _dispatch_action(
+    switcher: ClaudeAccountSwitcher, args: argparse.Namespace
+) -> dict | None:
+    """Run the single selected mutually-exclusive action. Returns JSON payload when applicable."""
+    if args.add_account:
+        switcher.add_account(slot=args.slot)
+    elif args.add_token is not None:
+        switcher.add_account_from_token(
+            token=args.add_token, email=args.email, slot=args.slot
+        )
+    elif args.remove_account:
+        switcher.remove_account(args.remove_account)
+    elif args.list:
+        if args.json:
+            return switcher.list_accounts(
+                show_token_status=args.token_status, json_output=True
+            )
+        switcher.list_accounts(show_token_status=args.token_status)
+    elif args.health:
+        switcher.list_accounts(show_token_status=True, show_health=True)
+    elif args.switch:
+        if args.json:
+            return switcher.switch(strategy=args.strategy, json_output=True)
+        switcher.switch(strategy=args.strategy)
+    elif args.switch_to:
+        if args.json:
+            return switcher.switch_to(args.switch_to, json_output=True)
+        switcher.switch_to(args.switch_to)
+    elif args.status:
+        if args.json:
+            return switcher.status(json_output=True)
+        switcher.status()
+    elif args.purge:
+        switcher.purge()
+    elif args.export:
+        _cmd_export(switcher, args)
+    elif args.import_:
+        _cmd_import(switcher, args)
+    elif args.tui:
+        _cmd_tui(switcher, args)
+    elif args.monitor:
+        _cmd_monitor(switcher, args)
+    return None
 
 
 def main() -> None:
@@ -495,19 +539,28 @@ def main() -> None:
                 error("Error: Do not run this script as root (unless running in a container)")
                 sys.exit(1)
 
-        _dispatch_action(switcher, args)
+        payload = _dispatch_action(switcher, args)
     except ClaudeSwitchError as e:
-        error(f"Error: {e}")
+        if args.json:
+            print(json.dumps(error_envelope(e), indent=2))
+        else:
+            error(f"Error: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
-        print(f"\n{dimmed('Operation cancelled')}")
+        print(
+            f"\n{dimmed('Operation cancelled')}",
+            file=sys.stderr if args.json else sys.stdout,
+        )
         sys.exit(130)
+
+    if args.json and payload is not None:
+        print(json.dumps(payload, indent=2))
 
     # Passive update notification (never fails). Skipped after --purge so we
     # don't immediately recreate <backup_root>/cache/update_check.json inside
     # the directory we just deleted. Skipped after --upgrade as a safety guard
     # in case the dispatch is later refactored to fall through.
-    if not args.purge and not args.upgrade:
+    if not args.purge and not args.upgrade and not args.json:
         from claude_swap.update_check import check_for_update
 
         msg = check_for_update(__version__)

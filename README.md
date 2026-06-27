@@ -67,9 +67,11 @@ cswap --switch-to 2
 cswap --switch-to user@example.com
 ```
 
+Or let claude-swap auto-pick by remaining quota — `cswap --switch --strategy best` (most quota left) or `--strategy next-available` (skip rate-limited accounts).
+
 **Note:** You usually don't need to restart — on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
 
-### Run multiple accounts at the same time (session mode) `[experimental]`
+### Run multiple accounts at the same time (session mode)
 
 Launch Claude Code as a specific account in the current terminal only — every other terminal and the VS Code extension stay on your default account, so two accounts can work in parallel.
 
@@ -218,21 +220,59 @@ cswap --import backup.cswap --force          # Overwrite existing
 
 The export file is plaintext JSON. If you need encryption, pipe through your tool of choice (e.g. `cswap --export - | gpg -c > backup.gpg`).
 
-### Add an account from a raw OAuth token
+### JSON output for scripting
 
-If you only have a long-lived setup-token (e.g., produced by `claude setup-token`)
-and you don't want to log in via the browser flow first — useful on headless
-servers or when receiving a token from another machine — register it directly:
+Add `--json` to `--list`, `--status`, `--switch`, or `--switch-to` to emit a single machine-readable JSON object on stdout (human-readable notices go to stderr). Useful for scripting auto-swap and quota tracking.
 
 ```bash
-cswap --add-token sk-ant-oat01-...
+cswap --list --json                 # all accounts with usage/quota
+cswap --status --json               # current active account
+cswap --switch --strategy best --json   # switch, then report the result
+cswap --switch-to 2 --json
+```
+
+<details>
+<summary>Example output & schema notes</summary>
+
+```json
+{
+  "schemaVersion": 1,
+  "activeAccountNumber": 2,
+  "accounts": [
+    { "number": 2, "email": "you@example.com", "active": true, "usageStatus": "ok",
+      "usage": { "fiveHour": { "pct": 25.0, "resetsAt": "2026-06-22T23:29:59Z" },
+                 "sevenDay": { "pct": 16.0, "resetsAt": "2026-06-26T17:59:59Z" } } }
+  ]
+}
+```
+
+Every payload carries a `schemaVersion` (currently `1`); on a handled error stdout is `{"schemaVersion":1,"error":{...}}` with a non-zero exit code. `--switch`/`--switch-to` report `{"switched": true|false, "from": …, "to": …, "reason": …}`.
+
+</details>
+
+### Add an account from a raw token or API key
+
+If you only have a long-lived setup-token (e.g., produced by `claude setup-token`)
+or a managed API key (`sk-ant-api...`) and you don't want to log in via the browser
+flow first — useful on headless servers or when receiving a token from another
+machine — register it directly. The token type is auto-detected:
+
+```bash
+cswap --add-token sk-ant-oat01-...           # OAuth setup-token
+cswap --add-token sk-ant-api03-...           # managed API key
 cswap --add-token sk-ant-oat01-... --slot 3
 cswap --add-token - --slot 3                 # read token from stdin
 cswap --add-token --email user@example.com   # optional label override
 ```
 
-`--email` is optional; omitted values use `setup-token-{slot}@token.local`.
-No Anthropic API calls are made.
+`--email` is optional; omitted values use `setup-token-{slot}@token.local`
+(or `api-key-{slot}@token.local` for API keys). No Anthropic API calls are made.
+
+**API-key accounts.** An `sk-ant-api...` value registers a managed API-key account
+(the kind Claude Code uses after `/login` with a key) rather than an OAuth
+setup-token. It switches like any other account; since API keys have no subscription
+quota, they show no usage and the usage-aware `--switch` strategies never skip them as
+rate-limited.
 
 ## Uninstall
 

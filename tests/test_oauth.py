@@ -28,6 +28,40 @@ class TestExtractAccessToken:
         assert oauth.extract_access_token("") is None
 
 
+class TestAccountHeadroom:
+    """Test account_headroom."""
+
+    def test_binding_window_is_the_higher_utilization(self):
+        usage = {"five_hour": {"pct": 80.0}, "seven_day": {"pct": 20.0}}
+        assert oauth.account_headroom(usage) == 20.0  # 100 - max(80, 20)
+
+    def test_seven_day_can_be_the_binding_window(self):
+        usage = {"five_hour": {"pct": 10.0}, "seven_day": {"pct": 95.0}}
+        assert oauth.account_headroom(usage) == 5.0
+
+    def test_single_window(self):
+        assert oauth.account_headroom({"five_hour": {"pct": 40.0}}) == 60.0
+
+    def test_at_limit_is_zero_headroom(self):
+        assert oauth.account_headroom({"five_hour": {"pct": 100.0}}) == 0.0
+
+    def test_spend_is_ignored(self):
+        # Pay-as-you-go credits must not drive rate-limit headroom.
+        usage = {"spend": {"pct": 99.0}, "five_hour": {"pct": 10.0}}
+        assert oauth.account_headroom(usage) == 90.0
+
+    def test_no_window_data_is_unknown(self):
+        assert oauth.account_headroom({"spend": {"pct": 50.0}}) is None
+        assert oauth.account_headroom({}) is None
+
+    def test_none_and_non_dict_are_unknown(self):
+        assert oauth.account_headroom(None) is None
+        assert oauth.account_headroom("no credentials") is None
+
+    def test_malformed_pct_is_ignored(self):
+        assert oauth.account_headroom({"five_hour": {"pct": None}}) is None
+
+
 class TestFormatReset:
     """Test format_reset."""
 

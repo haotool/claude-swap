@@ -245,12 +245,35 @@ def build_usage_result(data: dict) -> dict | None:
                     "currency": eu.get("currency", "USD"),
                 }
                 if eu.get("resets_at"):
+                    spend_entry["resets_at"] = eu["resets_at"]
                     spend_entry["countdown"], spend_entry["clock"] = format_reset(eu["resets_at"])
                 result["spend"] = spend_entry
             except (TypeError, ValueError) as e:
                 _logger.debug("extra_usage parse failed: %r", e)
 
     return result if result else None
+
+
+def account_headroom(usage: dict | None) -> float | None:
+    """Remaining percentage before this account hits a rate-limit window.
+
+    Considers only the 5-hour and 7-day utilization windows — the two that
+    actually gate requests. ``spend`` (pay-as-you-go extra-usage credits) is a
+    separate axis and is deliberately ignored. Returns the headroom of the
+    *binding* window (``100 - max(pct)``), so ``<= 0`` means the account is at
+    or over a limit. Returns ``None`` when usage is unavailable or carries no
+    window data, which callers treat as "unknown" (never auto-skipped).
+    """
+    if not isinstance(usage, dict):
+        return None
+    pcts = [
+        window["pct"]
+        for window in (usage.get("five_hour"), usage.get("seven_day"))
+        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float))
+    ]
+    if not pcts:
+        return None
+    return 100.0 - max(pcts)
 
 
 def fetch_usage(access_token: str) -> dict | None:

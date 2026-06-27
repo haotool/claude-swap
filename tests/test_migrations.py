@@ -18,6 +18,7 @@ import pytest
 
 from claude_swap import migrations
 from claude_swap.exceptions import MigrationIncomplete
+from claude_swap.macos_keychain import KeychainError
 from claude_swap.migrations import run_migrations
 from claude_swap.models import Platform
 from claude_swap.switcher import KEYRING_SERVICE, ClaudeAccountSwitcher
@@ -545,9 +546,11 @@ class TestMacosKeyringToSecurity:
         block_real_keychain.set_password(KEYRING_SERVICE, username, "sekret")
         fake = FakeKeyring({(KEYRING_SERVICE, username): "sekret"})
 
-        # Force the security read-back to disagree with what was written.
+        # Force the security read-back to disagree with what was written. The
+        # migration reads the security service via the keychain-only helper
+        # (_kc_read_backup), not the transparent .enc-wins backup methods.
         with _patch_keyring(fake), patch.object(
-            switcher, "_read_account_credentials", side_effect=["", "WRONG"]
+            switcher, "_kc_read_backup", side_effect=["", "WRONG"]
         ):
             with pytest.raises(MigrationIncomplete):
                 migrations.migrate_macos_keyring_to_security(switcher)
@@ -591,6 +594,24 @@ class TestMacosKeyringToSecurity:
 
         assert switcher._read_account_credentials("1", "a@example.com") == "sekret"
         assert fake.get_calls == []
+
+    def test_security_keychain_unusable_defers_and_writes_no_enc(self, temp_home):
+        # The destination (security-service) Keychain is unusable: the keychain-only
+        # pending pre-check raises, so the migration must defer rather than mistake
+        # an .enc for "already migrated" or write legacy creds to a file while
+        # claiming the security service.
+        switcher = _make_macos_switcher(temp_home)
+        _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
+
+        with patch.object(switcher, "_kc_read_backup", side_effect=KeychainError("locked")):
+            run_migrations(switcher)  # swallows MigrationIncomplete → left unmarked
+
+        # Deferred cleanly: no fallback .enc written, migration not recorded.
+        assert not (switcher.credentials_dir / ".creds-1-a@example.com.enc").exists()
+        state_file = switcher.backup_dir / ".migrations.json"
+        if state_file.exists():
+            applied = json.loads(state_file.read_text()).get("applied", {})
+            assert "macos_keyring_to_security" not in applied
 
     def test_idempotent_via_runner_marks_applied(self, temp_home):
         switcher = _make_macos_switcher(temp_home)
