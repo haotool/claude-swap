@@ -13,9 +13,6 @@ it — and must never call a switcher *method* through that host, or storage and
 orchestration would re-couple. The store owns only its two pieces of state:
 ``_keychain_usable_cache`` (sticky, process-local) and
 ``_last_active_credentials_backend`` (for the post-switch follow-up message).
-
-``_write_credentials``'s ``verify`` keyword is a claude-swap addition
-(activation-path read-back verification) not present upstream.
 """
 
 from __future__ import annotations
@@ -228,7 +225,8 @@ class CredentialStore:
           ``customApiKeyResponses.approved``, then clear the OAuth credential.
 
         ``verify=True`` (OAuth path only) read-backs and confirms the payload
-        (claude-swap addition; not present upstream).
+        matches what was written — guards against silent Keychain corruption on
+        the activation path.
 
         Raises:
             CredentialWriteError: If writing fails, or if ``verify=True`` (OAuth)

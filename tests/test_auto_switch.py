@@ -1222,7 +1222,7 @@ class TestNextPollInterval:
 
 
 class TestNextPollIntervalMulti:
-    """Per-window interval picker (plan 019) — the most-urgent window wins."""
+    """Per-window interval picker — the most-urgent window wins."""
 
     def test_fast_window_not_masked_by_flat_higher_window(self):
         """The 2026-06-24 bug: a flat, higher 7d window must not hide a fast 5h

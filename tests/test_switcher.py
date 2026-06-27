@@ -3822,7 +3822,7 @@ class TestUsageCacheFreshness:
     def test_get_active_usage_breakdown_returns_per_window(
         self, temp_home: Path,
     ):
-        """Breakdown exposes each window separately (plan 019) so the monitor
+        """Breakdown exposes each window separately so the monitor
         can track 5h velocity independently of a flat 7d, and stays a strict
         superset of get_active_usage_pct (max of the same values)."""
         import json

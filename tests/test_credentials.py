@@ -1,4 +1,4 @@
-"""Unit tests for the extracted ``CredentialStore`` (plan 020).
+"""Tests for the credentials module.
 
 These prove the store is independently testable against a minimal ``_StoreHost``
 — a plain object exposing ``platform`` / ``credentials_dir`` / ``_logger`` and

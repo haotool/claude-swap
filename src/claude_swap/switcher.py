@@ -78,10 +78,9 @@ from claude_swap.paths import (
 )
 from claude_swap.process_detection import get_running_instances
 
-# The credential storage/freshness mechanics live in credentials.py /
-# credential_refresh.py (plan 020). SECURITY_SERVICE / CLAUDE_CODE_KEYCHAIN_SERVICE
-# are re-exported here so callers and tests referencing them off ``switcher`` keep
-# working unchanged.
+# Credential storage/freshness live in credentials.py / credential_refresh.py.
+# SECURITY_SERVICE / CLAUDE_CODE_KEYCHAIN_SERVICE are re-exported here so
+# callers and tests referencing them off ``switcher`` keep working unchanged.
 from claude_swap.credentials import (
     CLAUDE_CODE_KEYCHAIN_SERVICE,  # noqa: F401  (re-exported for back-compat)
     SECURITY_SERVICE,
@@ -109,7 +108,7 @@ SETUP_TOKEN_SCOPES = ("user:inference",)
 # Auto-switch (Beta): when the active account's 5h/7d usage reaches this
 # percentage, automated paths pick the cooldown-aware best target.
 DEFAULT_AUTO_SWITCH_THRESHOLD = 95
-_USAGE_CACHE_TTL = 15  # seconds (upstream JSON/status paths)
+_USAGE_CACHE_TTL = 15  # seconds
 
 # Re-exported for tests and monitor imports that reference switcher.
 _max_usage_pct = max_usage_pct
@@ -212,11 +211,10 @@ class ClaudeAccountSwitcher:
         self.lock_file = self.backup_dir / ".lock"
         self._logger = setup_logging(self.backup_dir, debug=debug)
 
-        # Credential storage layer (plan 020). Reads platform / credentials_dir
-        # / _logger off this switcher at call time via the _StoreHost Protocol.
+        # Credential storage layer. Reads platform / credentials_dir / _logger off
+        # this switcher at call time via the _StoreHost Protocol.
         self._store = CredentialStore(self)
-        # OAuth credential-freshness layer (plan 020 follow-on): verify/refresh/
-        # sync of backup tokens. Collaborator holding this switcher.
+        # OAuth credential-freshness: verify/refresh/sync of backup tokens.
         self._refresher = CredentialRefresher(self)
 
         # Run any pending one-time data migrations (e.g. relocating Windows
@@ -2617,10 +2615,6 @@ class ClaudeAccountSwitcher:
         else:
             print(f"{bolded('Status:')} {current_email} {dimmed('(not managed)')}")
 
-    # ------------------------------------------------------------------ #
-    # Auto-switch (Beta)
-    # ------------------------------------------------------------------ #
-
     def get_auto_switch_config(self) -> dict:
         """Return the persisted auto-switch (Beta) settings.
 
@@ -2782,7 +2776,7 @@ class ClaudeAccountSwitcher:
         ``{"five_hour": 72.0, "seven_day": 87.0}`` — windows without a usable
         pct are omitted; returns ``None`` when no usage is available. Lets the
         monitor track each window's velocity independently so a fast 5h climb
-        is not masked by a flat, higher 7d value (plan 019).
+        is not masked by a flat, higher 7d value.
         """
         usage = self._resolve_active_usage()
         if not isinstance(usage, dict):

@@ -1,4 +1,4 @@
-"""Tests for managed API-key (sk-ant-api) accounts (plan 021).
+"""Tests for managed API-key (sk-ant-api) accounts.
 
 Exercised on the Linux/file backend (no Keychain): the managed key lands in
 ``~/.claude.json`` ``primaryApiKey`` and ``customApiKeyResponses.approved``.

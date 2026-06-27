@@ -21,6 +21,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TextIO
 
+from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.models import AutoSwitchDecisionContext, BackgroundAutoSwitchIntent
+from claude_swap.printer import accent, bolded, dimmed, muted
+from claude_swap.switcher import ClaudeAccountSwitcher
+
+PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
+
 MonitorStepKind = Literal[
     "disabled",
     "idle",
@@ -32,13 +39,6 @@ MonitorStepKind = Literal[
     "already_optimal",
     "polled",
 ]
-
-from claude_swap.models import AutoSwitchDecisionContext, BackgroundAutoSwitchIntent
-from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.printer import accent, bolded, dimmed, muted
-from claude_swap.switcher import ClaudeAccountSwitcher
-
-PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
 
 _WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d"}
 
