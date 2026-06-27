@@ -1,14 +1,11 @@
-"""macOS launchd background service for the auto-switch monitor.
+"""macOS launchd supervisor for the auto-switch monitor.
 
-``cswap service install`` writes a LaunchAgent that runs ``cswap --monitor``
-(the same foreground loop consolidated in plans 002/003) under launchd, which
-supervises and restarts it on crash and captures its output. macOS only for now;
-the launchd specifics live behind ``_launchd_*`` helpers so a systemd backend
-can be added later without touching the CLI wiring.
+Owns install/uninstall/status of the LaunchAgent that runs ``cswap --monitor``
+under launchd. macOS-only for now; launchd specifics live behind ``_launchd_*``
+helpers so a systemd backend can be added later without touching CLI wiring.
 
-The service is intentionally a thin supervisor: it shells out via
-``[sys.executable, "-m", "claude_swap", "--monitor"]`` so future changes to the
-monitor loop require no changes here.
+The service shells out via ``[sys.executable, "-m", "claude_swap", "--monitor"]``
+so monitor-loop changes never require edits here.
 """
 
 from __future__ import annotations
@@ -24,27 +21,19 @@ from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.printer import accent, bolded, dimmed, muted, warning
 from claude_swap.switcher import ClaudeAccountSwitcher
 
-# Key injected into the plist EnvironmentVariables so ``status`` can detect
-# whether the running service was installed from an older package version.
 _VERSION_ENV_KEY = "CSWAP_INSTALLED_VERSION"
 
 SERVICE_LABEL = "com.claude-swap.monitor"
 
-# Resolve the absolute path to Apple's launchctl at import time rather than
-# trusting PATH (same supply-chain hygiene used for /usr/bin/security in
-# macos_keychain.py).  macOS 26 (Tahoe) moved the binary from /usr/bin to /bin,
-# so we probe both known Apple system locations.
+# Resolve launchctl at import time rather than trusting PATH. macOS 26 moved
+# the binary from /usr/bin to /bin — probe both known Apple system locations.
 _LAUNCHCTL = (
     "/bin/launchctl"
     if os.path.exists("/bin/launchctl")
     else "/usr/bin/launchctl"
 )
 
-# HOME, CLAUDE_CONFIG_DIR, XDG_DATA_HOME determine WHERE the supervised
-# ``cswap --monitor`` process reads state, so the launchd agent must see
-# the same values as the user's shell. PATH is forwarded so the monitor
-# child can resolve any subprocesses it spawns under launchd's otherwise-
-# empty default PATH (the agent's own ``launchctl`` is pinned absolute).
+# State paths the supervised monitor must see (same as the user's shell).
 _FORWARDED_ENV_KEYS = ("HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "PATH")
 
 
@@ -65,9 +54,6 @@ def _log_dir(switcher: ClaudeAccountSwitcher) -> Path:
 
 
 def _program_arguments() -> list[str]:
-    # Use the current interpreter + module entry, not a PATH lookup of `cswap`,
-    # so the agent keeps working regardless of the login shell's PATH and
-    # survives venv activations that ``cswap`` would otherwise miss.
     return [sys.executable, "-m", "claude_swap", "--monitor"]
 
 
@@ -83,11 +69,9 @@ def _build_plist(switcher: ClaudeAccountSwitcher) -> dict:
         "Label": SERVICE_LABEL,
         "ProgramArguments": _program_arguments(),
         "RunAtLoad": True,
-        # Restart on crash, but NOT after a clean exit (e.g. user ``bootout``).
         # Dict form is mandatory: ``KeepAlive=True`` would resurrect the agent
         # immediately after ``launchctl bootout``, defeating uninstall.
         "KeepAlive": {"SuccessfulExit": False},
-        # Guard against crash-restart storms; pairs with KeepAlive.
         "ThrottleInterval": 30,
         "ProcessType": "Background",
         "LowPriorityIO": True,
@@ -110,14 +94,7 @@ def _launchd_service_target() -> str:
 
 
 def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    """Invoke ``/usr/bin/launchctl`` with the given arguments.
-
-    Mirrors the disciplined ``subprocess.run`` shape in ``macos_keychain.py``:
-    capture both streams, check the return code explicitly, and surface the
-    failure as a ``ClaudeSwitchError`` so the CLI renders it as a clean stderr
-    line. ``check=False`` is reserved for idempotent calls where a non-zero
-    exit is part of the contract (e.g. ``bootout`` before ``bootstrap``).
-    """
+    """Invoke launchctl; surface failures as ``ClaudeSwitchError``."""
     proc = subprocess.run(
         [_LAUNCHCTL, *args],
         capture_output=True,
@@ -138,10 +115,6 @@ def install(switcher: ClaudeAccountSwitcher) -> int:
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     _log_dir(switcher).mkdir(parents=True, exist_ok=True)
     tmp_path = plist_path.with_suffix(plist_path.suffix + ".tmp")
-    # O_CREAT|O_EXCL|O_NOFOLLOW with mode 0o600: reject pre-planted symlinks
-    # at the tmp path (same-UID hostile process scenario) and refuse to
-    # clobber an existing file.  We unlink stale tmp paths first because a
-    # crashed prior install can leave one behind.
     try:
         os.unlink(tmp_path)
     except FileNotFoundError:
@@ -162,8 +135,6 @@ def install(switcher: ClaudeAccountSwitcher) -> int:
         except OSError:
             pass
         raise
-    # Replace any prior instance: ``bootout`` is best-effort (not installed yet
-    # on first run is normal), then ``bootstrap`` must succeed.
     _launchctl("bootout", _launchd_service_target(), check=False)
     _launchctl("bootstrap", _launchd_domain(), str(plist_path))
     log_dir = _log_dir(switcher)
@@ -179,11 +150,7 @@ def install(switcher: ClaudeAccountSwitcher) -> int:
 
 
 def uninstall(switcher: ClaudeAccountSwitcher) -> int:
-    """Bootout the agent and remove the plist. Idempotent.
-
-    Logs and the foreground PID file are intentionally preserved so the user
-    has a post-mortem trail; we print the paths so they know where to look.
-    """
+    """Bootout the agent and remove the plist. Idempotent."""
     _require_macos()
     _launchctl("bootout", _launchd_service_target(), check=False)
     plist_path = _plist_path()
@@ -200,14 +167,7 @@ def uninstall(switcher: ClaudeAccountSwitcher) -> int:
 
 
 def _installed_version() -> str | None:
-    """Return the cswap version recorded in the installed plist, or ``None``.
-
-    Catches only the specific failure modes that mean "no readable plist
-    on disk" — a missing file, a malformed plist, or a non-dict root.
-    Everything else (genuine logic bugs, attribute errors after a schema
-    change) is allowed to surface so we don't silently disable the
-    version-mismatch warning in ``status()``.
-    """
+    """Return the cswap version recorded in the installed plist, or ``None``."""
     try:
         with _plist_path().open("rb") as fh:
             data = plistlib.load(fh)
@@ -237,8 +197,6 @@ def status(switcher: ClaudeAccountSwitcher) -> int:
         print(f"{bolded('Service:')} {dimmed('not installed')}")
         return 0
 
-    # Warn if the installed plist was written by an older package version.
-    # The running process won't pick up new code until the service restarts.
     installed_ver = _installed_version()
     if installed_ver is not None and installed_ver != __version__:
         warning(
@@ -253,16 +211,11 @@ def status(switcher: ClaudeAccountSwitcher) -> int:
         return 0
 
     proc = _launchctl("print", _launchd_service_target(), check=False)
-    # ``launchctl print`` is verbose; surface only the state / pid / last exit
-    # lines so the output stays scannable.
     print(f"{bolded('Service:')} {accent('loaded')} {muted(SERVICE_LABEL)}")
     for line in proc.stdout.splitlines():
         stripped = line.strip()
         if stripped.startswith(("state =", "pid =", "last exit code =")):
             print(f"  {muted(stripped)}")
-    # On-call breadcrumb: where the structured decision-trail lives.  The
-    # launchd capture is only stdout/stderr noise — the real "why did this
-    # fire?" lives in claude-swap.log.
     print(
         f"  {dimmed('decision log → ' + str(switcher.backup_dir / 'claude-swap.log'))}"
     )
@@ -270,21 +223,7 @@ def status(switcher: ClaudeAccountSwitcher) -> int:
 
 
 def logs(switcher: ClaudeAccountSwitcher, lines: int = 40) -> int:
-    """Tail every monitor log surface we own.
-
-    Surfaces in order of decision-trail value for an on-call engineer:
-
-    1. ``claude-swap.log`` — the structured logger.  Every poll, switch
-       decision, switch outcome, dedup'd repeat, and backoff escalation
-       lands here at INFO/WARNING.  This is where you debug ``why did the
-       monitor fire?'' or ``why didn't it?''
-    2. ``monitor.err`` / ``monitor.out`` — launchd's raw stdout/stderr
-       capture.  Useful for crashes and the early-boot banner.
-
-    Splitting the surfaces was the historical default, but at 3am the
-    on-call wants both windows in one place.  Print the file paths inline
-    so a follow-up ``tail -F`` can target whichever stream is interesting.
-    """
+    """Tail monitor log surfaces: structured log, then launchd stderr/stdout."""
     _require_macos()
     structured = switcher.backup_dir / "claude-swap.log"
     for path, label in [

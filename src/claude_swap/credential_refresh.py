@@ -1,18 +1,14 @@
-"""OAuth credential-freshness layer for Claude Code accounts.
+"""OAuth credential-freshness layer for claude-swap.
 
-Extracted from ``switcher.py`` (plan 020 follow-on) so the switcher no longer
-owns the multi-step "keep a backup token fresh / verified" logic. This is the
-read-modify-write side of credentials (refresh expiring OAuth tokens, verify a
-backup matches the live store, sync a Claude-Code-rotated token back to backup)
-— distinct from ``CredentialStore``'s pure storage mechanics.
+Owns read-modify-write paths that keep backup OAuth tokens fresh and verified
+— refresh before activation, sync Claude-Code-rotated tokens back to backup,
+verify a write matches the live store. Split out of ``switcher.py`` so the
+switcher reads as account orchestration again.
 
-``CredentialRefresher`` is a collaborator that holds the switcher (composition
-with back-reference) and calls its credential primitives
-(``_read_credentials`` / ``_read_account_credentials`` /
-``_write_account_credentials`` — the last of which carries the switcher's
-session-invalidation side effect), plus ``lock_file`` / ``_live_session_pids``
-/ ``_logger``. The switcher keeps thin delegators under the original method
-names so every caller (and the existing test call-sites) is unchanged.
+``CredentialRefresher`` is a leaf collaborator: it calls switcher credential
+primitives (``_read_credentials``, ``_read_account_credentials``,
+``_write_account_credentials``) and ``lock_file`` / ``_live_session_pids`` /
+``_logger``, but never owns storage routing — that stays in ``CredentialStore``.
 """
 
 from __future__ import annotations
@@ -31,7 +27,6 @@ from claude_swap.locking import FileLock
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
 
-# Backup-credential read-back verification tuning. Only this module uses them.
 _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS = 3
 _BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS = 0.5
 
@@ -84,18 +79,12 @@ class CredentialRefresher:
             if stored == live_now:
                 return live_now
 
-            # Track whether the drift is "live moving" or "our write failing".
             if previous_live is not None and live_now != previous_live:
                 live_keeps_changing = True
             previous_live = live_now
 
             if attempt == _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS - 1:
                 if live_keeps_changing:
-                    # Claude Code is actively refreshing tokens during our
-                    # verification window. Accept the latest sample rather
-                    # than fighting a moving target — the backup will be at
-                    # most one rotation stale, and the refresh-before-
-                    # activation path handles that on the next switch.
                     self._sw._logger.warning(
                         "persistent in-flight Claude Code rotation during "
                         "backup verification for account-%s after %d attempts; "
@@ -112,7 +101,6 @@ class CredentialRefresher:
             expected = live_now
             time.sleep(_BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS)
 
-        # Unreachable: the loop either returns or raises on every path above.
         raise CredentialWriteError("backup credential verification fell through unexpectedly")
 
     def sync_live_to_backup(
@@ -140,10 +128,6 @@ class CredentialRefresher:
             )
             self._sw._logger.info("Synced refreshed live credentials for account %s", account_num)
         except (CredentialReadError, CredentialWriteError, OSError) as exc:
-            # Narrow catch: these are the credential-store failure modes that
-            # are acceptable to swallow on a best-effort sync hot path.
-            # ``KeyboardInterrupt`` and other base-exception subclasses must
-            # propagate so the user can still Ctrl-C out of list_accounts().
             self._sw._logger.warning(
                 "Failed to sync live credentials for account %s (%s): %r",
                 account_num,
@@ -183,7 +167,6 @@ class CredentialRefresher:
 
         refreshed = oauth.refresh_oauth_credentials(credentials)
         if not refreshed:
-            # Forced refresh on a still-valid token: degrade gracefully.
             if not expired:
                 self._sw._logger.info(
                     "forced pre-activation refresh failed for account-%s "
@@ -237,8 +220,6 @@ class CredentialRefresher:
             return credentials, None
 
         with FileLock(self._sw.lock_file):
-            # Re-read under the lock — another process may have refreshed
-            # while we were waiting.
             latest = self._sw._read_account_credentials(account_num, email) or credentials
             latest_oauth = oauth.extract_oauth_data(latest)
             if (

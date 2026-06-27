@@ -1,18 +1,13 @@
-"""Plain CLI auto-switch monitor with adaptive polling.
+"""Auto-switch monitor for claude-swap.
 
-The monitor periodically checks the active account's usage percentage and
-switches to the cooldown-aware best target when a configured threshold is
-reached.  The
-cadence is *adaptive*: when usage is far from threshold and stable, the
-monitor polls slowly (the historical 60s ceiling); as usage approaches the
-threshold or starts climbing, the interval shrinks toward a floor of 5s so
-the swap fires before the user hits a rate-limit error.
+Owns the adaptive polling loop that watches the active account's usage and
+triggers background switches when a configured threshold is crossed. Split out
+so ``monitor_step`` serves the foreground ``--monitor`` command, the TUI, and
+the launchd service from one decision engine.
 
-Every tunable lives behind a named constant with a documented rationale —
-no inline magic numbers — so the trade-offs stay auditable.  The pure
-function ``_next_poll_interval`` and ``_failure_backoff_seconds`` are easy
-to test in isolation; ``run_cli_monitor`` wires them into the existing
-PID-file + SIGTERM-handling skeleton.
+Imports ``ClaudeAccountSwitcher`` for reads and planning but never owns
+credential storage or switch orchestration — callers supply ``perform_switch`` to
+wire the actual ``switch(BackgroundAutoSwitchIntent(...))`` call.
 """
 
 from __future__ import annotations
@@ -38,14 +33,6 @@ MonitorStepKind = Literal[
     "polled",
 ]
 
-# Outcome vocabulary (see also models.SwitchPlanOutcome in the switcher planner):
-#   SwitchPlanOutcome       MonitorStepKind
-#   "already_optimal"   →   "already_optimal"  (perform_switch returned False / saturated hold)
-#   "chosen"            →   "switched"         (perform_switch returned True)
-#   "no_trusted_signal" →   "switch_failed"    (SwitchError from planning)
-# MonitorStepKind adds engine-only kinds: disabled, idle, usage_unavailable,
-# threshold_no_handler, switch_cancelled, polled.
-
 from claude_swap.models import AutoSwitchDecisionContext, BackgroundAutoSwitchIntent
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.printer import accent, bolded, dimmed, muted
@@ -53,51 +40,27 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 
 PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
 
-# Polling cadence — all tunables live here so the trade-offs are auditable.
-
-# Ceiling on the polling interval.  Historical default; preserved as the
-# canonical name so the TUI's ``MONITOR_POLL_SECONDS`` import keeps working.
-# Used as ``t_max`` in the adaptive algorithm.
 _WINDOW_LABELS = {"five_hour": "5h", "seven_day": "7d"}
+
+# Adaptive polling ceiling. Canonical name preserved for the TUI's import.
 MONITOR_POLL_SECONDS = 60
 
-# Floor on the polling interval.  Below this, we risk overwhelming the usage
-# API and producing log noise without meaningful gain in detection latency.
-# 5s ≈ one Claude Code API round-trip plus margin: the monitor can react
-# within a single user message of the threshold being crossed.
+# Floor on the polling interval — one API round-trip plus margin.
 MONITOR_POLL_SECONDS_MIN = 5
 
-# Safety factor for the time-to-threshold prediction.  If velocity says we
-# hit the threshold in T seconds, schedule the next poll at T / FACTOR so
-# we get at least FACTOR polls before the predicted crossing.  3 is the
-# smallest value that tolerates one noisy delta without overshooting.
+# Schedule next poll at ETA / FACTOR before a predicted threshold crossing.
 MONITOR_POLL_SAFETY_FACTOR = 3
 
-# When ``current_pct`` reaches this fraction of ``threshold``, stop trusting
-# the velocity model and force the floor.  A single bursty prompt at the end
-# of the budget can eat the remaining few percent faster than any predictor
-# can react.  0.95 → for threshold=95 the override fires at ≥90.25%.
+# Force the floor when usage reaches this fraction of the threshold.
 MONITOR_POLL_NEAR_TRIGGER_RATIO = 0.95
 
-# Base for the usage-API failure backoff sequence: BASE, 2·BASE, 4·BASE, …
-# up to the polling ceiling.  Starts at the floor so a transient blip costs
-# only one normal interval before retry; doubles on each consecutive failure
-# so a persistent outage stops hammering the API.
+# Exponential backoff base for consecutive usage-API failures.
 MONITOR_FAILURE_BACKOFF_BASE = MONITOR_POLL_SECONDS_MIN
 
-# Schema-break safety net.  When session-detection returns zero live PIDs the
-# monitor idles at the polling ceiling.  If that signal misfires (e.g. Anthropic
-# changes ``~/.claude/sessions/*.json`` and our parser silently returns []),
-# we'd never poll usage again — auto-switch goes observably-silent.  Emit a
-# WARNING when we've been idle this long while the config says auto-switch
-# is enabled, so an on-call engineer sees the symptom in monitor.err.
+# Emit a warning when idle this long with auto-switch enabled and no sessions.
 MONITOR_IDLE_HEARTBEAT_SECONDS = 3600
 
-# Sleep/wake recovery.  ``time.monotonic`` is steady across macOS sleep, but
-# ``last_pct`` from before sleep is stale.  If the wall-clock gap between
-# polls exceeds the polling ceiling by this multiple, treat the previous
-# baseline as garbage and reset both the velocity track and the dedup'd
-# switch-error key so a real new failure isn't masked as a "repeat".
+# Reset velocity baselines after sleep/wake gaps exceeding t_max * this.
 MONITOR_WAKE_GAP_MULTIPLIER = 4
 
 
@@ -136,12 +99,8 @@ def _next_poll_interval(
       ``ETA / SAFETY_FACTOR``, clamped to ``[t_min, t_max]``.
     """
     if t_max <= 0:
-        # Test contract: poll_seconds=0 disables real sleeps everywhere.
         return 0
 
-    # Final-approach override — see NEAR_TRIGGER_RATIO docstring.
-    # Checked before the no-baseline path so a post-switch reset at high
-    # usage still polls at the floor instead of idling at t_max.
     if (
         current_pct is not None
         and current_pct >= threshold * MONITOR_POLL_NEAR_TRIGGER_RATIO
@@ -151,8 +110,6 @@ def _next_poll_interval(
     if current_pct is None or last_pct is None or elapsed <= 0:
         return t_max
 
-    # Velocity in pct-points per second.  Negative values (post-switch drop)
-    # and exact zero collapse to "idle" — slow polling is correct.
     delta = current_pct - last_pct
     velocity = delta / elapsed
     if velocity <= 0.0:
@@ -160,8 +117,6 @@ def _next_poll_interval(
 
     eta_to_threshold = (threshold - current_pct) / velocity
     target = eta_to_threshold / MONITOR_POLL_SAFETY_FACTOR
-    # ``round`` rather than ``int``: keep the interval closest to the
-    # predicted ETA / SAFETY_FACTOR instead of always biasing earlier.
     return int(max(t_min, min(round(target), t_max)))
 
 
@@ -179,9 +134,7 @@ def _next_poll_interval_multi(
     Computes ``_next_poll_interval`` per window (each against its own previous
     reading) and returns the minimum, so a fast-climbing 5h window drives a
     short interval even while a higher but flat 7d window would, alone, sit at
-    ``t_max``. This is the fix for the masking bug where ``max(5h, 7d)`` hid the
-    faster window's velocity (plan 019). Falls back to ``t_max`` when no window
-    has a usable reading.
+    ``t_max``. Falls back to ``t_max`` when no window has a usable reading.
     """
     if t_max <= 0:
         return 0
@@ -377,10 +330,6 @@ def monitor_step(
     pct_text = "unavailable" if pct is None else f"{pct:.0f}%"
 
     if pct is None and switcher.active_account_is_api_key():
-        # Managed API-key active account: no subscription quota to monitor.
-        # Treat as idle (infinite headroom) — NOT a usage fetch failure: no
-        # backoff sequence and no "observably-silent" warning, and never switch
-        # away (an API-key account can't hit a rate limit).
         state.consecutive_failures = 0
         state.reset_pcts()
         state.last_poll_time = None
@@ -422,24 +371,14 @@ def monitor_step(
         )
 
     state.consecutive_failures = 0
-    # Per-window breakdown drives velocity; one fetch per poll because the
-    # get_active_usage_pct() call above warmed the short-lived usage cache this
-    # reads back. Fall back to the aggregate when a per-window split isn't
-    # available so behavior matches the old single-metric path exactly.
     breakdown = switcher.get_active_usage_breakdown()
     windows = breakdown or {"max": pct}
     elapsed = (now - state.last_poll_time) if state.last_poll_time is not None else 0.0
-    # Per-window adaptive interval: the soonest-to-cross window wins, so a fast
-    # 5h climb is not masked by a flat, higher 7d window (plan 019).
     interval = _next_poll_interval_multi(
         windows, state.last_pcts, elapsed, threshold,
         t_max=poll_seconds,
     )
     reached = should_switch(pct, threshold)
-    # A saturated hold (set on a prior poll when no target was free) parks at
-    # the poll ceiling and does not switch, so the velocity-based interval and
-    # the "— switching" line would both misrepresent the next action. Reflect
-    # the real cadence here and defer the switching log until we actually do.
     holding = reached and perform_switch is not None and state.saturated_hold
     windows_text = " ".join(
         f"{_WINDOW_LABELS.get(k, k)}={v:.0f}%" for k, v in windows.items()
