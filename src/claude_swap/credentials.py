@@ -95,15 +95,11 @@ class _StoreHost(Protocol):
 class CredentialStore:
     """Owns the active and per-account backup credential stores.
 
-    One store per switcher. Constructed with the switcher as its host; the
-    switcher satisfies ``_StoreHost`` by exposing ``platform`` /
-    ``credentials_dir`` / ``_logger``.
+    One store per switcher.
     """
 
     def __init__(self, host: _StoreHost):
         self._host = host
-
-    # -- active credential (Claude Code's own store) ----------------------
 
     def _read_credentials(self) -> str | None:
         """Read Claude Code's active credential — OAuth *or* managed API key.
@@ -124,7 +120,6 @@ class CredentialStore:
             return None
         if oauth_val:
             return oauth_val
-        # OAuth empty → fall through to the managed API key.
         return self._read_managed_key()
 
     def _read_oauth_credentials(self) -> str | None:
@@ -139,8 +134,6 @@ class CredentialStore:
                     CLAUDE_CODE_KEYCHAIN_SERVICE, os.environ.get("USER", "user")
                 )
             except Exception as e:
-                # rc-44 (not found) is returned as None by the wrapper, not raised;
-                # anything raised here is a genuine error (locked / denied / etc.).
                 self._host._logger.error(f"Failed to read credentials: {e}")
                 return None
             return val if val is not None else ""
@@ -234,14 +227,8 @@ class CredentialStore:
           ``~/.claude.json`` ``primaryApiKey``) and record ``key[-20:]`` in
           ``customApiKeyResponses.approved``, then clear the OAuth credential.
 
-        Args:
-            credentials: The credential payload to persist (raw string).
-            verify: When True (OAuth path only), read the credential back and
-                confirm it matches — defends against silent Keychain ACL
-                corruption / concurrent overwrite on the activation path.
-                A no-op on the API-key path (no OAuth activation corruption to
-                guard; the managed write already persisted and cleared OAuth).
-                (claude-swap addition; not present in upstream.)
+        ``verify=True`` (OAuth path only) read-backs and confirms the payload
+        (claude-swap addition; not present upstream).
 
         Raises:
             CredentialWriteError: If writing fails, or if ``verify=True`` (OAuth)
@@ -252,14 +239,11 @@ class CredentialStore:
             return
 
         self._write_oauth_credentials(credentials)
-        # Mutual exclusion: drop any managed key so it can't shadow OAuth.
         self._clear_managed_key()
 
         if verify:
             readback = self._read_credentials()
             if readback != credentials:
-                # We deliberately do NOT include credential payloads in the
-                # error message (avoid leaking secrets into logs).
                 raise CredentialWriteError(
                     "Credential write verification failed: readback differs "
                     "from intended payload. Possible silent Keychain corruption "
@@ -346,7 +330,6 @@ class CredentialStore:
             responses.setdefault("rejected", [])
             cfg["customApiKeyResponses"] = responses
             if wrote_to_keychain:
-                # Keychain holds the key; keep it out of plaintext config.
                 cfg.pop("primaryApiKey", None)
             else:
                 cfg["primaryApiKey"] = api_key
@@ -358,7 +341,6 @@ class CredentialStore:
         except Exception as e:
             raise CredentialWriteError(f"Failed to write managed API key: {e}")
 
-        # Mutual exclusion: drop the OAuth credential so it can't shadow the key.
         self._clear_oauth_credential()
 
     def _clear_managed_key(self) -> None:
@@ -409,8 +391,6 @@ class CredentialStore:
         except OSError as e:
             self._host._logger.warning(f"Failed to remove credentials file: {e}")
 
-    # -- per-account backup credentials -----------------------------------
-
     def _uses_file_backup_backend(self) -> bool:
         """Whether per-account backup credentials live in files vs. the Keychain.
 
@@ -455,21 +435,11 @@ class CredentialStore:
 
         On Linux/WSL/Windows: Uses file-based storage (base64 files under
         ``credentials_dir``). On macOS: Uses the Keychain via the ``security`` CLI.
-
-        Session-profile invalidation after a backup change is **not** done here
-        — that is a switcher-owned lifecycle side effect (the store is data-only
-        toward its host). The switcher's same-named wrapper adds it.
         """
         if self._uses_file_backup_backend():
             cred_file = self._host.credentials_dir / f".creds-{account_num}-{email}.enc"
             try:
                 encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-                # Atomic 0o600 write: ``write_text`` would land the file with
-                # the user's umask (typically 0o644) for the window before the
-                # explicit ``chmod``, exposing the base64-encoded token to any
-                # same-UID process that races a read.  ``mkstemp`` creates the
-                # temp file with 0o600 directly, and ``os.replace`` is atomic
-                # within the directory.
                 fd, tmp_path = tempfile.mkstemp(
                     dir=str(self._host.credentials_dir), suffix=".tmp",
                 )
