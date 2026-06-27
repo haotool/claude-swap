@@ -1,16 +1,11 @@
-"""Usage-cache serialization and per-slot freshness (Plan 018 Track C).
+"""Usage-cache serialization and per-slot freshness for claude-swap.
 
-Pure codec layer extracted from ``switcher.py``: round-trips usage entries
-(success dicts or ``oauth.UsageFetchError``) to/from the on-disk cache, merges a
-fetch failure with a trusted prior row, and decides whether a cached row is
-still within the per-slot TTL. No I/O and no ``ClaudeAccountSwitcher`` coupling
-— every function takes its inputs as arguments — so the switcher's usage-cache
-orchestration (which slots to fetch, locking, the thread pool) stays where it
-belongs and this layer is unit-testable on its own.
-
-``switcher`` re-exports these names, so existing callers and tests that import
-``_usage_to_cache`` / ``_persist_usage_cache_entry`` off ``switcher`` are
-unchanged.
+Owns the pure codec layer for usage cache rows: round-trip success dicts and
+``oauth.UsageFetchError`` values to/from on-disk form, merge a fetch failure
+with a trusted prior row, and decide whether a row is within the per-slot TTL.
+No I/O and no ``ClaudeAccountSwitcher`` coupling — the switcher's usage-cache
+orchestration (which slots to fetch, locking, the thread pool) stays in
+``switcher``. ``switcher`` re-exports these names for existing callers.
 """
 
 from __future__ import annotations
@@ -19,7 +14,6 @@ import time
 
 from claude_swap import oauth
 
-# Per-slot usage freshness window (seconds) for unattended switch planning.
 _USAGE_CACHE_TTL = 15
 
 
@@ -76,7 +70,7 @@ def _persist_usage_cache_entry(
     if isinstance(current, oauth.UsageFetchError):
         existing[key] = prev_trusted if prev_trusted is not None else _usage_to_cache(current)
     elif current is None:
-        existing[key] = prev_trusted  # None when no trusted prior row
+        existing[key] = prev_trusted
     elif isinstance(current, str):
         existing[key] = current
     elif _is_usage_dict(current):
