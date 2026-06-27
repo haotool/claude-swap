@@ -100,6 +100,34 @@ class TestFormatReset:
         assert "h" not in countdown
 
 
+class TestDescribeUsageError:
+    def test_describe_usage_error(self):
+        cases = [
+            (
+                oauth.UsageFetchError(reason="rate_limited", retry_after="30s"),
+                "usage unavailable (rate limited, retry after 30s)",
+            ),
+            (
+                oauth.UsageFetchError(reason="rate_limited"),
+                "usage unavailable (rate limited)",
+            ),
+            (
+                oauth.UsageFetchError(reason="unauthorized"),
+                "usage unavailable (unauthorized)",
+            ),
+            (
+                oauth.UsageFetchError(reason="network_error"),
+                "usage unavailable (network error)",
+            ),
+            (
+                oauth.UsageFetchError(reason="http_error", status_code=500),
+                "usage unavailable",
+            ),
+        ]
+        for error, expected in cases:
+            assert oauth.describe_usage_error(error) == expected
+
+
 class TestFetchUsage:
     """Test fetch_usage."""
 
@@ -124,6 +152,8 @@ class TestFetchUsage:
 
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
+        assert result["five_hour"]["resets_at"] == future.isoformat()
+        assert result["seven_day"]["resets_at"] == future.isoformat()
         assert result["five_hour"]["countdown"] == "1h 0m"
 
     def test_network_error(self):
@@ -276,6 +306,38 @@ class TestFetchUsage:
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
         assert "spend" not in result
+
+    def test_resets_at_preserved_when_utilization_null(self):
+        """Cooldown-aware target picker needs resets_at even when utilization is null."""
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": None, "resets_at": "2026-06-15T12:00:00+00:00"},
+            "seven_day": {"utilization": 50.0, "resets_at": "2026-06-22T00:00:00+00:00"},
+        })
+        assert result is not None
+        assert result["five_hour"]["pct"] is None
+        assert result["five_hour"]["resets_at"] == "2026-06-15T12:00:00+00:00"
+        assert "countdown" in result["five_hour"]
+        assert "clock" in result["five_hour"]
+        assert result["seven_day"]["pct"] == 50.0
+
+    def test_missing_extra_usage_key_keeps_other_rows(self):
+        """API omits extra_usage entirely → five_hour/seven_day still rendered."""
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": 22.0, "resets_at": None},
+            "seven_day": {"utilization": 61.0, "resets_at": None},
+        })
+        assert result is not None
+        assert result["five_hour"]["pct"] == 22.0
+        assert result["seven_day"]["pct"] == 61.0
+        assert "spend" not in result
+
+    def test_malformed_resets_at_propagates_as_none(self):
+        """A bad resets_at raises ValueError inside format_reset; fetch_usage
+        swallows it and returns None. Pins today's behavior."""
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": 22.0, "resets_at": "not-an-iso-string"},
+        })
+        assert result is None
 
 
 class TestRefreshOAuthCredentials:
@@ -521,7 +583,8 @@ class TestFetchUsageForAccount:
                 is_active=False,
             )
 
-        assert result is None
+        assert isinstance(result, oauth.UsageFetchError)
+        assert result.reason == "unauthorized"
 
     def test_refreshes_when_scopes_are_missing(self):
         """Refresh should work even when stored credentials have no scopes."""
@@ -596,8 +659,8 @@ class TestFetchUsageForAccount:
 
         assert refresh_calls == 0
         persist_mock.assert_not_called()
-        # Usage call 401'd and there's no retry-with-refresh for active, so None.
-        assert result is None
+        assert isinstance(result, oauth.UsageFetchError)
+        assert result.reason == "unauthorized"
 
     def test_active_account_401_does_not_retry_with_refresh(self):
         """Active account that 401s returns None without attempting a refresh."""
@@ -622,8 +685,44 @@ class TestFetchUsageForAccount:
                 persist_credentials=persist_mock,
             )
 
-        assert result is None
+        assert isinstance(result, oauth.UsageFetchError)
+        assert result.reason == "unauthorized"
         persist_mock.assert_not_called()
+
+    def test_rate_limit_returns_classified_error(self):
+        """429s should be observable instead of collapsing into None."""
+        credentials = self._make_credentials()
+        body = json.dumps({
+            "error": {
+                "type": "rate_limit_error",
+                "message": "Rate limited. Please try again later.",
+            }
+        }).encode()
+        headers = {"Retry-After": "30"}
+
+        def mock_urlopen(req, timeout=0):
+            if "oauth/usage" in req.full_url:
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    429,
+                    "Too Many Requests",
+                    hdrs=headers,
+                    fp=MagicMock(read=MagicMock(return_value=body)),
+                )
+            raise AssertionError(f"Unexpected URL: {req.full_url}")
+
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
+            result = oauth.fetch_usage_for_account(
+                "1",
+                "test@example.com",
+                credentials,
+                is_active=True,
+            )
+
+        assert isinstance(result, oauth.UsageFetchError)
+        assert result.reason == "rate_limited"
+        assert result.status_code == 429
+        assert result.retry_after == "30"
 
     def test_persist_failure_logs_warning_with_recovery_hint(self, caplog, capsys):
         """If the persist callback raises, _persist logs at WARNING level with

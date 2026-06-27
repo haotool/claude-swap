@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -80,6 +79,8 @@ class TestCLI:
         assert "--switch" in result.stdout
         assert "--list" in result.stdout
         assert "--status" in result.stdout
+        assert "--monitor" in result.stdout
+        assert "--health" in result.stdout
 
     def test_no_args_shows_error(self):
         """Test that running without args shows error."""
@@ -114,14 +115,14 @@ class TestCLI:
         # Should run (may fail due to no config, but flag should be accepted)
         assert "--debug" not in result.stderr or "unrecognized" not in result.stderr
 
-    def test_token_status_flag_requires_list(self, capsys):
-        """--token-status should only be accepted alongside --list."""
+    def test_token_status_flag_requires_list_or_health(self, capsys):
+        """--token-status should only be accepted alongside --list or --health."""
         with patch.object(sys, "argv", ["claude-swap", "--token-status", "--status"]):
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
 
         assert excinfo.value.code == 2
-        assert "--token-status can only be used with --list" in capsys.readouterr().err
+        assert "--token-status can only be used with --list or --health" in capsys.readouterr().err
 
     def test_token_status_flag_is_forwarded_to_list(self):
         """--list --token-status should call list_accounts(show_token_status=True)."""
@@ -133,58 +134,46 @@ class TestCLI:
 
         switcher_cls.return_value.list_accounts.assert_called_once_with(
             show_token_status=True,
-            json_output=False,
         )
 
-    def test_strategy_best_requires_switch(self, capsys):
-        """--strategy should only be accepted alongside --switch."""
-        with patch.object(sys, "argv", ["claude-swap", "--strategy", "best", "--list"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "--strategy can only be used with --switch" in capsys.readouterr().err
-
-    def test_strategy_next_available_requires_switch(self, capsys):
-        """--strategy next-available should only be accepted alongside --switch."""
-        with patch.object(sys, "argv", ["claude-swap", "--strategy", "next-available", "--list"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert "--strategy can only be used with --switch" in capsys.readouterr().err
-
-    def test_strategy_rejects_unknown_value(self, capsys):
-        """argparse rejects strategies outside the known choices."""
-        with patch.object(sys, "argv", ["claude-swap", "--switch", "--strategy", "bogus"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-
-    def test_switch_strategy_forwarded(self):
-        """--switch --strategy best forwards the strategy to switch()."""
+    def test_health_shows_token_status_and_health(self):
+        """--health should reuse the account list with health observability enabled."""
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--switch", "--strategy", "best"]), \
+             patch.object(sys, "argv", ["claude-swap", "--health"]), \
              patch("os.geteuid", return_value=1000), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
             cli.main()
 
-        switcher_cls.return_value.switch.assert_called_once_with(
-            strategy="best", json_output=False
+        switcher_cls.return_value.list_accounts.assert_called_once_with(
+            show_token_status=True,
+            show_health=True,
         )
 
-    def test_plain_switch_passes_no_strategy(self):
-        """Bare --switch forwards strategy=None."""
+    def test_token_status_flag_is_allowed_with_health(self):
+        """--health already shows token status, and explicit --token-status is accepted."""
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--switch"]), \
+             patch.object(sys, "argv", ["claude-swap", "--health", "--token-status"]), \
              patch("os.geteuid", return_value=1000), \
              patch("claude_swap.update_check.check_for_update", return_value=None):
             cli.main()
 
-        switcher_cls.return_value.switch.assert_called_once_with(
-            strategy=None, json_output=False
+        switcher_cls.return_value.list_accounts.assert_called_once_with(
+            show_token_status=True,
+            show_health=True,
         )
+
+    def test_monitor_dispatches_to_run_cli_monitor(self):
+        """--monitor should start the plain CLI monitor."""
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch.object(sys, "argv", ["claude-swap", "--monitor"]), \
+             patch("claude_swap.monitor.run_cli_monitor", return_value=0) as mock_run, \
+             patch("os.geteuid", return_value=1000), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+
+        assert excinfo.value.code == 0
+        mock_run.assert_called_once_with(switcher_cls.return_value)
 
     def test_slot_flag_requires_add_account(self, capsys):
         """--slot should only be accepted alongside --add-account or --add-token."""
@@ -514,66 +503,95 @@ class TestRunCommand:
         assert "boom" in capsys.readouterr().err
 
 
-class TestJsonOutputCli:
-    """CLI wiring for ``--json``: validation, single serialization, error envelope."""
+class TestAutoSwitchCommand:
+    """`cswap auto-switch` pre-dispatch: config-only SSOT commands."""
 
-    def test_json_rejected_without_supported_command(self, capsys):
-        """--purge --json is rejected (bare --json instead hits the required-group error)."""
-        with patch.object(sys, "argv", ["claude-swap", "--purge", "--json"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert "--json can only be used with" in capsys.readouterr().err
-
-    def test_token_status_with_json_rejected(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "--list", "--token-status", "--json"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert "--token-status cannot be combined with --json" in capsys.readouterr().err
-
-    def test_list_json_serialized_to_stdout(self, capsys):
-        payload = {"schemaVersion": 1, "activeAccountNumber": None, "accounts": []}
+    def test_status_reads_persisted_config(self, capsys):
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--list", "--json"]), \
              patch("os.geteuid", return_value=1000), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            switcher_cls.return_value.list_accounts.return_value = payload
+             patch.object(sys, "argv", ["claude-swap", "auto-switch", "status"]):
+            switcher_cls.return_value.get_auto_switch_config.return_value = {
+                "enabled": True,
+                "threshold": 95,
+            }
             cli.main()
 
-        switcher_cls.return_value.list_accounts.assert_called_once_with(
-            show_token_status=False, json_output=True,
+        switcher_cls.return_value.get_auto_switch_config.assert_called_once_with()
+        out = capsys.readouterr().out
+        assert "Auto-switch:" in out
+        assert "enabled" in out
+        assert "95%" in out
+
+    def test_enable_persists_enabled_true(self, capsys):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("os.geteuid", return_value=1000), \
+             patch.object(sys, "argv", ["claude-swap", "auto-switch", "enable"]):
+            switcher_cls.return_value.set_auto_switch_config.return_value = {
+                "enabled": True,
+                "threshold": 95,
+            }
+            cli.main()
+
+        switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
+            enabled=True
         )
         out = capsys.readouterr().out
-        assert json.loads(out) == payload  # exactly one JSON object, no extra text
+        assert "Auto-switch:" in out
+        assert "enabled" in out
 
-    def test_switch_json_forwarded_and_serialized(self, capsys):
-        payload = {"schemaVersion": 1, "switched": True}
+    def test_disable_persists_enabled_false(self, capsys):
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--switch", "--json"]), \
              patch("os.geteuid", return_value=1000), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            switcher_cls.return_value.switch.return_value = payload
+             patch.object(sys, "argv", ["claude-swap", "auto-switch", "disable"]):
+            switcher_cls.return_value.set_auto_switch_config.return_value = {
+                "enabled": False,
+                "threshold": 95,
+            }
             cli.main()
 
-        switcher_cls.return_value.switch.assert_called_once_with(
-            strategy=None, json_output=True,
+        switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
+            enabled=False
         )
-        assert json.loads(capsys.readouterr().out) == payload
+        out = capsys.readouterr().out
+        assert "Auto-switch:" in out
+        assert "disabled" in out
 
-    def test_error_envelope_on_stdout_with_exit_1(self, capsys):
-        from claude_swap.exceptions import ConfigError
+    def test_set_threshold_persists_threshold(self, capsys):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("os.geteuid", return_value=1000), \
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "auto-switch", "set-threshold", "95"],
+             ):
+            switcher_cls.return_value.set_auto_switch_config.return_value = {
+                "enabled": False,
+                "threshold": 95,
+            }
+            cli.main()
+
+        switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
+            threshold=95
+        )
+        out = capsys.readouterr().out
+        assert "Auto-switch:" in out
+        assert "95%" in out
+
+    def test_set_threshold_invalid_value_exits_cleanly(self, capsys):
+        from claude_swap.exceptions import ValidationError
 
         with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch.object(sys, "argv", ["claude-swap", "--status", "--json"]), \
              patch("os.geteuid", return_value=1000), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
-            switcher_cls.return_value.status.side_effect = ConfigError("nope")
+             patch.object(
+                 sys,
+                 "argv",
+                 ["claude-swap", "auto-switch", "set-threshold", "101"],
+             ):
+            switcher_cls.return_value.set_auto_switch_config.side_effect = ValidationError(
+                "Threshold must be between 1 and 100"
+            )
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
 
         assert excinfo.value.code == 1
-        captured = capsys.readouterr()
-        envelope = json.loads(captured.out)  # error went to stdout as JSON
-        assert envelope["error"] == {"type": "ConfigError", "message": "nope"}
-        assert captured.err == ""  # nothing on stderr in JSON mode
+        assert "Threshold must be between 1 and 100" in capsys.readouterr().err

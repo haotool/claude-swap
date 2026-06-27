@@ -217,7 +217,7 @@ def _install_patches(switcher, creds_store, configs_store, live_state):
         patch.object(switcher, "_read_credentials",
                      side_effect=lambda: live_state.get("creds", "")),
         patch.object(switcher, "_write_credentials",
-                     side_effect=lambda c: live_state.__setitem__("creds", c)),
+                     side_effect=lambda c, verify=False: live_state.__setitem__("creds", c)),
         # Don't make network calls from the (suppressed) post-switch usage path.
         patch("claude_swap.oauth.fetch_usage_for_account", return_value=None),
     ]

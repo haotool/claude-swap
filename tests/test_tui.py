@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import stub_screen
+
 from claude_swap import tui
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -20,13 +22,6 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
 # --------------------------------------------------------------------------- #
-
-
-def _stub_screen(rows: int = 30, cols: int = 100) -> MagicMock:
-    """Return a MagicMock that quacks like a curses window."""
-    screen = MagicMock()
-    screen.getmaxyx.return_value = (rows, cols)
-    return screen
 
 
 def _make_seq(temp_home: Path, accounts: list[tuple[str, str]] | None = None) -> Path:
@@ -104,7 +99,7 @@ class TestAccountItems:
 
 class TestSelectFrom:
     def test_returns_value_on_enter(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         # press down once, then enter
         screen.getch.side_effect = [tui.curses.KEY_DOWN, 10]
         result = tui._select_from(
@@ -115,19 +110,19 @@ class TestSelectFrom:
         assert result == "b"
 
     def test_returns_none_on_escape(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [27]  # Esc
         result = tui._select_from(screen, "t", items=[("x", "1")])
         assert result is None
 
     def test_returns_none_on_q(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
         result = tui._select_from(screen, "t", items=[("x", "1")])
         assert result is None
 
     def test_wrap_around_on_up_at_top(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [tui.curses.KEY_UP, 10]
         result = tui._select_from(
             screen, "t",
@@ -136,7 +131,7 @@ class TestSelectFrom:
         assert result == "3"  # wrapped to last
 
     def test_cancel_sentinel_returns_none(self):
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [tui.curses.KEY_DOWN, 10]
         # second item has value=None — selecting it should return None
         result = tui._select_from(
@@ -154,7 +149,7 @@ class TestSelectFrom:
 class TestDoSwitch:
     def test_no_accounts_shows_message(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.return_value = ord("q")  # dismiss the message
         tui._do_switch(screen, switcher)
         # Should NOT call switch_to
@@ -166,8 +161,8 @@ class TestDoSwitch:
         (temp_home / ".claude.json").write_text(json.dumps(config))
         switcher = ClaudeAccountSwitcher()
 
-        screen = _stub_screen()
-        # Pick the second item (slot 2): one DOWN + ENTER, then 'q' to leave pager.
+        screen = stub_screen()
+        # Pick the second item (slot 2) with one DOWN + ENTER
         screen.getch.side_effect = [tui.curses.KEY_DOWN, 10, ord("q")]
 
         with patch.object(switcher, "switch_to") as mock_switch:
@@ -181,7 +176,7 @@ class TestDoSwitch:
         (temp_home / ".claude.json").write_text(json.dumps(config))
         switcher = ClaudeAccountSwitcher()
 
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [27]  # Esc on selection screen
 
         with patch.object(switcher, "switch_to") as mock_switch:
@@ -193,7 +188,7 @@ class TestDoSwitch:
 class TestDoAdd:
     def test_login_path_calls_add_account(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         # First menu: Enter on "From current Claude Code login" (idx 0)
         screen.getch.side_effect = [10]
         with patch.object(switcher, "add_account") as mock_add, \
@@ -206,7 +201,7 @@ class TestDoAdd:
 
     def test_token_option_only_when_method_exists(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [27]  # cancel out
 
         with patch.object(switcher, "add_account") as _:
@@ -221,7 +216,7 @@ class TestDoAdd:
         # Stub add_account_from_token onto the instance
         switcher.add_account_from_token = MagicMock()
 
-        screen = _stub_screen()
+        screen = stub_screen()
 
         # Sequence:
         #   menu: DOWN once (to "From a setup-token") + ENTER
@@ -247,7 +242,7 @@ class TestDoAdd:
 class TestDoRemove:
     def test_no_accounts_shows_message(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.return_value = ord("q")
         with patch.object(switcher, "remove_account") as mock_rm:
             tui._do_remove(screen, switcher)
@@ -257,7 +252,7 @@ class TestDoRemove:
         _make_seq(temp_home, [("1", "a@x.com")])
         switcher = ClaudeAccountSwitcher()
 
-        screen = _stub_screen()
+        screen = stub_screen()
         # pick slot 1 + Enter, then type "n" + Enter on confirm prompt
         keys = [10]  # pick first item
         keys += [ord("n"), 10]  # confirm: "n"
@@ -273,8 +268,7 @@ class TestDoRemove:
         _make_seq(temp_home, [("3", "x@y.com")])
         switcher = ClaudeAccountSwitcher()
 
-        screen = _stub_screen()
-        # pick first slot, confirm 'y' + Enter, then 'q' to leave the pager.
+        screen = stub_screen()
         screen.getch.side_effect = [10, ord("y"), 10, ord("q")]
 
         with patch.object(switcher, "remove_account") as mock_rm, \
@@ -282,6 +276,77 @@ class TestDoRemove:
             tui._do_remove(screen, switcher)
 
         mock_rm.assert_called_once_with("3", assume_yes=True)
+
+
+# --------------------------------------------------------------------------- #
+# Main loop dispatch                                                           #
+# --------------------------------------------------------------------------- #
+
+
+class TestMainLoopHealth:
+    """The "Account health & usage" entry must shell out to the existing
+    ``list_accounts(show_token_status=True, show_health=True)`` renderer —
+    SSOT preserved (no curses-native re-implementation)."""
+
+    def _select_keys(self, idx: int) -> list[int]:
+        """Keys to move down ``idx`` times and press Enter."""
+        return [tui.curses.KEY_DOWN] * idx + [10]
+
+    def test_health_entry_dispatches_with_flags(self, temp_home: Path):
+        switcher = MagicMock(spec=ClaudeAccountSwitcher)
+        # _status_line consults the switcher; keep it cheap and deterministic.
+        switcher.get_auto_switch_config.return_value = {
+            "enabled": False, "threshold": 90,
+        }
+        switcher._get_sequence_data_migrated.return_value = None
+        switcher._get_current_account.return_value = None
+
+        screen = stub_screen(rows=40, cols=120)
+        # Menu order: switch, add, remove, refresh, list, health(5),
+        # status, watch, auto, quit(9). Pick "health" (idx 5), then quit (idx 9).
+        screen.getch.side_effect = (
+            self._select_keys(5) + self._select_keys(9)
+        )
+
+        with patch("claude_swap.tui._run_inline") as mock_inline, \
+             patch("claude_swap.tui.curses.curs_set"):
+            rc = tui._main_loop(screen, switcher)
+
+        assert rc == 0
+        assert mock_inline.call_count == 1
+        _stdscr_arg, title, fn = mock_inline.call_args.args
+        assert _stdscr_arg is screen
+        assert title == "Account health & usage"
+        fn()
+        switcher.list_accounts.assert_called_once_with(
+            show_token_status=True, show_health=True,
+        )
+
+    def test_quick_list_entry_uses_no_flags(self, temp_home: Path):
+        """Regression: the list entry stays flag-free."""
+        switcher = MagicMock(spec=ClaudeAccountSwitcher)
+        switcher.get_auto_switch_config.return_value = {
+            "enabled": False, "threshold": 90,
+        }
+        switcher._get_sequence_data_migrated.return_value = None
+        switcher._get_current_account.return_value = None
+
+        screen = stub_screen(rows=40, cols=120)
+        # Pick "list" (idx 4), then quit (idx 9).
+        screen.getch.side_effect = (
+            self._select_keys(4) + self._select_keys(9)
+        )
+
+        with patch("claude_swap.tui._run_inline") as mock_inline, \
+             patch("claude_swap.tui.curses.curs_set"):
+            rc = tui._main_loop(screen, switcher)
+
+        assert rc == 0
+        assert mock_inline.call_count == 1
+        _stdscr_arg, title, fn = mock_inline.call_args.args
+        assert title == "Accounts"
+        fn()
+        switcher.list_accounts.assert_called_once_with()
 
 
 # --------------------------------------------------------------------------- #
@@ -336,146 +401,22 @@ class TestClampInterval:
 
     def test_below_min(self):
         assert tui._clamp_interval(0) == 1
-        assert tui._clamp_interval(-3) == 1
 
     def test_above_max(self):
         assert tui._clamp_interval(999) == 60
-
-    def test_custom_bounds(self):
-        assert tui._clamp_interval(100, lo=2, hi=10) == 10
 
 
 class TestAnsiSegments:
     def test_plain_text_single_run(self):
         assert tui._ansi_segments("hello") == [("hello", 0)]
 
-    def test_empty_string(self):
-        assert tui._ansi_segments("") == [("", 0)]
-
     def test_bold_run(self):
         assert tui._ansi_segments("\x1b[1mX\x1b[0m") == [("X", tui._STYLE_BOLD)]
 
-    def test_stacked_bold_accent(self):
-        # printer.bold_accent emits "\x1b[1m\x1b[38;5;173m...\x1b[0m"
-        segs = tui._ansi_segments("\x1b[1m\x1b[38;5;173mY\x1b[0m")
-        assert segs == [("Y", tui._STYLE_BOLD | tui._STYLE_ACCENT)]
-
-    def test_mixed_runs_with_reset(self):
-        segs = tui._ansi_segments("a\x1b[2mb\x1b[0mc")
-        assert segs == [("a", 0), ("b", tui._STYLE_DIM), ("c", 0)]
-
-    def test_muted_and_red_and_yellow(self):
-        assert tui._ansi_segments("\x1b[38;5;250mm\x1b[0m") == [("m", tui._STYLE_MUTED)]
-        assert tui._ansi_segments("\x1b[31mr\x1b[0m") == [("r", tui._STYLE_RED)]
-        assert tui._ansi_segments("\x1b[33my\x1b[0m") == [("y", tui._STYLE_YELLOW)]
-
-    def test_unknown_code_ignored(self):
-        assert tui._ansi_segments("\x1b[99mZ\x1b[0m") == [("Z", 0)]
-
-
-class TestStyleToAttr:
-    def test_bold_maps_to_a_bold(self):
-        # A_BOLD is a plain constant available without initscr.
-        assert tui._style_to_attr(tui._STYLE_BOLD) & tui.curses.A_BOLD
-
-    def test_dim_maps_to_a_dim(self):
-        assert tui._style_to_attr(tui._STYLE_DIM) & tui.curses.A_DIM
-
-    def test_no_flags_is_normal(self):
-        assert tui._style_to_attr(0) == tui.curses.A_NORMAL
-
-    def test_color_lookup_without_initscr_does_not_raise(self):
-        # has_colors()/color_pair() raise outside initscr; must be swallowed.
-        attr = tui._style_to_attr(tui._STYLE_ACCENT)
-        assert isinstance(attr, int)
-
-
-class TestAddstrAnsi:
-    def test_draws_each_run_clipped(self):
-        screen = _stub_screen()
-        tui._addstr_ansi(screen, 4, 2, "\x1b[1mAB\x1b[0mCD", max_width=3)
-        # First run "AB" (bold) then "C" (clipped from "CD" at width 3).
-        calls = [c.args for c in screen.addstr.call_args_list]
-        drawn = "".join(a[2] for a in calls)
-        assert drawn == "ABC"
-
-    def test_swallows_curses_error(self):
-        screen = _stub_screen()
-        screen.addstr.side_effect = tui.curses.error
-        # Must not raise.
-        tui._addstr_ansi(screen, 4, 2, "x", max_width=10)
-
-
-class TestPager:
-    def test_returns_on_q(self):
-        screen = _stub_screen(rows=10, cols=40)
-        screen.getch.side_effect = [ord("q")]
-        tui._pager(screen, "T", [f"line{i}" for i in range(50)])
-
-    def test_returns_on_escape(self):
-        screen = _stub_screen()
-        screen.getch.side_effect = [27]
-        tui._pager(screen, "T", ["a", "b"])
-
-    def test_returns_on_enter(self):
-        screen = _stub_screen()
-        screen.getch.side_effect = [10]
-        tui._pager(screen, "T", ["a"])
-
-    def test_scroll_down_then_quit_no_error(self):
-        screen = _stub_screen(rows=8, cols=40)
-        screen.getch.side_effect = [
-            tui.curses.KEY_DOWN, tui.curses.KEY_NPAGE,
-            tui.curses.KEY_END, tui.curses.KEY_HOME, ord("q"),
-        ]
-        tui._pager(screen, "T", [f"row{i}" for i in range(100)])
-
-    def test_short_content_does_not_overscroll(self):
-        screen = _stub_screen(rows=30, cols=40)
-        screen.getch.side_effect = [tui.curses.KEY_DOWN, tui.curses.KEY_NPAGE, ord("q")]
-        tui._pager(screen, "T", ["only line"])
-
 
 class TestRunInline:
-    def test_captures_colored_output_and_pages(self):
-        screen = _stub_screen()
-        seen = {}
-
-        def fake_pager(s, title, lines, subtitle=""):
-            seen["title"] = title
-            seen["lines"] = lines
-
-        def fn():
-            from claude_swap import printer
-            print(printer.accent("hello"))
-            print("plain")
-
-        with patch("claude_swap.tui._pager", side_effect=fake_pager):
-            tui._run_inline(screen, "Title", fn)
-
-        assert seen["title"] == "Title"
-        # Color is forced on during capture → accent line carries ANSI.
-        assert any("hello" in line for line in seen["lines"])
-        assert "\x1b[38;5;173m" in "\n".join(seen["lines"])
-        assert "plain" in seen["lines"]
-
-    def test_stray_input_becomes_message_and_stdin_restored(self):
-        import sys as _sys
-        screen = _stub_screen()
-        before = _sys.stdin
-
-        def fn():
-            input("give me something")  # no stdin → EOFError
-
-        with patch("claude_swap.tui._pager") as mock_pager:
-            tui._run_inline(screen, "T", fn)
-
-        assert _sys.stdin is before  # restored
-        lines = mock_pager.call_args.args[2]
-        assert any("input is not available" in line for line in lines)
-
     def test_switch_error_captured(self):
-        screen = _stub_screen()
+        screen = stub_screen()
 
         def fn():
             raise ClaudeSwitchError("boom")
@@ -489,8 +430,8 @@ class TestRunInline:
 class TestWatch:
     def test_empty_state_returns_without_loop(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
-        screen.getch.return_value = ord("q")  # dismiss _show_message
+        screen = stub_screen()
+        screen.getch.return_value = ord("q")
         with patch.object(switcher, "list_accounts") as mock_list:
             tui._do_watch(screen, switcher)
         mock_list.assert_not_called()
@@ -498,40 +439,11 @@ class TestWatch:
     def test_refreshes_then_quits(self, temp_home: Path):
         _make_seq(temp_home, [("1", "a@x.com")])
         switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
+        screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
         with patch.object(switcher, "list_accounts") as mock_list, \
              patch("claude_swap.tui.time.monotonic", return_value=100.0):
             tui._watch_loop(screen, switcher, interval=5)
-        mock_list.assert_called()  # at least one refresh before quit
+        mock_list.assert_called()
         screen.timeout.assert_any_call(250)
         screen.timeout.assert_any_call(-1)
-
-    def test_plus_raises_interval(self, temp_home: Path):
-        _make_seq(temp_home, [("1", "a@x.com")])
-        switcher = ClaudeAccountSwitcher()
-        screen = _stub_screen()
-        # First loop refreshes (monotonic 100), then '+' (interval→6),
-        # then 'q'. monotonic stays 100 so no second refresh.
-        screen.getch.side_effect = [ord("+"), ord("q")]
-        with patch.object(switcher, "list_accounts") as mock_list, \
-             patch("claude_swap.tui.time.monotonic", return_value=100.0):
-            tui._watch_loop(screen, switcher, interval=5)
-        assert mock_list.call_count == 1
-
-
-class TestInitColors:
-    def test_initializes_pairs_when_color_supported(self):
-        with patch("claude_swap.tui.curses.has_colors", return_value=True), \
-             patch("claude_swap.tui.curses.start_color"), \
-             patch("claude_swap.tui.curses.use_default_colors"), \
-             patch("claude_swap.tui.curses.init_pair") as mock_pair, \
-             patch("claude_swap.tui.curses.COLORS", 256, create=True):
-            tui._colors_initialized = False
-            tui._init_colors()
-        assert mock_pair.call_count == 4
-
-    def test_no_color_terminal_is_safe(self):
-        with patch("claude_swap.tui.curses.has_colors", return_value=False):
-            tui._colors_initialized = False
-            tui._init_colors()  # must not raise

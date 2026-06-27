@@ -17,7 +17,6 @@ from claude_swap.exceptions import AccountNotFoundError, SessionError
 from claude_swap.models import Platform
 from claude_swap.session import (
     SHARE_MANIFEST,
-    SHARED_ITEMS,
     SessionManager,
     _probe_env,
     keychain_service_name,
