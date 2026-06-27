@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import shutil
@@ -38,7 +37,17 @@ from claude_swap.json_output import (
     USAGE_TOKEN_EXPIRED,
     account_ref,
     account_row,
+    list_payload,
+    switch_noop,
+    switch_result_from_op,
     usage_fields,
+)
+from claude_swap.auto_switch_planning import (
+    SATURATED_SWITCH_MARGIN_S,
+    max_usage_pct,
+    pick_best_from_snapshots,
+    plan_automated_switch,
+    slot_switch_score,
 )
 from claude_swap.locking import FileLock
 from claude_swap.logging_config import setup_logging
@@ -105,8 +114,11 @@ SETUP_TOKEN_SCOPES = ("user:inference",)
 # Auto-switch (Beta): when the active account's 5h/7d usage reaches this
 # percentage, automated paths pick the cooldown-aware best target.
 DEFAULT_AUTO_SWITCH_THRESHOLD = 95
-_SATURATED_SWITCH_MARGIN_S = 300  # minimum reset-time lead before switching between two saturated accounts
 _USAGE_CACHE_TTL = 15  # seconds (upstream JSON/status paths)
+
+# Re-exported for tests and monitor imports that reference switcher.
+_max_usage_pct = max_usage_pct
+_slot_switch_score = slot_switch_score
 
 
 def auto_switch_display(cfg: dict) -> tuple[bool, int, str, str]:
@@ -116,17 +128,6 @@ def auto_switch_display(cfg: dict) -> tuple[bool, int, str, str]:
     on_off = "ON" if enabled else "OFF"
     enabled_disabled = "enabled" if enabled else "disabled"
     return enabled, threshold, on_off, enabled_disabled
-
-
-# Cooldown-aware target picker (``_pick_best_switch_target``):
-# Score buckets used by ``_slot_switch_score`` — lower is better.
-# 0: unsaturated (max(5h,7d) < threshold) — within bucket, prefer lowest pct
-# 1: saturated (>= threshold) — within bucket, prefer soonest ``resets_at``
-# 2: unknown usage — worst (cold cache, no signal)
-# Named so callers don't need to reverse-engineer the magic ints.
-_SLOT_SCORE_BUCKET_UNSATURATED = 0
-_SLOT_SCORE_BUCKET_SATURATED = 1
-_SLOT_SCORE_BUCKET_UNKNOWN = 2
 
 
 def _slot_for_identity(
@@ -142,86 +143,6 @@ def _slot_for_identity(
         ):
             return str(num)
     return None
-
-
-def _slot_switch_score(
-    usage: object,
-    threshold: int,
-) -> tuple[int, float]:
-    """Score a slot for cooldown-aware switch target selection.
-
-    Lower scores are better.  Pure function (no I/O); easily tested in
-    isolation.  Returns a sortable ``(bucket, primary_metric)`` tuple where
-    Python's lexicographic tuple comparison gives the right total order:
-
-    * ``(0, max_pct)``        — unsaturated; within bucket, prefer lower pct
-                                 so we stay on the freshest account.
-    * ``(1, soonest_ts)``     — saturated; within bucket, prefer the soonest
-                                 ``resets_at`` so the user parks on the
-                                 account that will free up first.
-    * ``(1, math.inf)``       — saturated but no ``resets_at`` available;
-                                 ranks below any known-reset saturated slot.
-    * ``(2, math.inf)``       — unknown usage (cold cache, parse failure,
-                                 missing keys); ranks behind every signal we
-                                 actually have.
-
-    The ``threshold`` is the auto-switch threshold; an account with
-    ``max(5h, 7d) >= threshold`` is treated as "saturated" for picking
-    purposes regardless of the exact percent.
-    """
-    if not isinstance(usage, dict):
-        return (_SLOT_SCORE_BUCKET_UNKNOWN, math.inf)
-
-    pcts: list[float] = []
-    saturated_resets: list[float] = []
-    for key in ("five_hour", "seven_day"):
-        entry = usage.get(key)
-        if not isinstance(entry, dict):
-            continue
-        pct = entry.get("pct")
-        if not isinstance(pct, (int, float)):
-            continue
-        pct_f = float(pct)
-        pcts.append(pct_f)
-        if pct_f >= threshold:
-            resets_at = entry.get("resets_at")
-            if isinstance(resets_at, str):
-                try:
-                    ts = datetime.fromisoformat(resets_at).timestamp()
-                except ValueError:
-                    continue
-                saturated_resets.append(ts)
-
-    if not pcts:
-        return (_SLOT_SCORE_BUCKET_UNKNOWN, math.inf)
-
-    max_pct = max(pcts)
-    if max_pct < threshold:
-        return (_SLOT_SCORE_BUCKET_UNSATURATED, max_pct)
-    if not saturated_resets:
-        # Saturated but we don't know when it frees — worst within saturated.
-        return (_SLOT_SCORE_BUCKET_SATURATED, math.inf)
-    return (_SLOT_SCORE_BUCKET_SATURATED, min(saturated_resets))
-
-
-def _max_usage_pct(usage: dict | None) -> float | None:
-    """Return the highest 5h/7d utilization percentage in a usage dict.
-
-    Only the rate-limit windows (``five_hour``/``seven_day``) are considered —
-    the dollar-denominated ``spend`` entry is intentionally ignored, since it is
-    not the limit that blocks Claude Code sessions. Returns ``None`` when no
-    usable percentage is present.
-    """
-    if not isinstance(usage, dict):
-        return None
-    pcts: list[float] = []
-    for key in ("five_hour", "seven_day"):
-        entry = usage.get(key)
-        if isinstance(entry, dict):
-            pct = entry.get("pct")
-            if isinstance(pct, (int, float)):
-                pcts.append(float(pct))
-    return max(pcts) if pcts else None
 
 
 def _format_usage_lines(usage: dict) -> list[str]:
@@ -707,89 +628,23 @@ class ClaudeAccountSwitcher:
         *,
         exclude: str | None = None,
     ) -> str | None:
-        """Score switchable slots from trusted usage snapshots only."""
-        data = self._get_sequence_data() or {}
-        sequence = data.get("sequence", [])
-        if not sequence:
-            return None
-
-        scored: list[tuple[tuple[int, float], str]] = []
-        for num in sequence:
-            num_str = str(num)
-            if exclude is not None and num_str == exclude:
-                continue
-            if not self._account_is_switchable(num_str):
-                continue
-            cached_entry = snapshots.get(num_str)
-            score = _slot_switch_score(cached_entry, threshold)
-            scored.append((score, num_str))
-
-        if not scored:
-            return None
-        if all(s[0][0] == _SLOT_SCORE_BUCKET_UNKNOWN for s in scored):
-            return None
-
-        scored.sort()
-        return scored[0][1]
+        return pick_best_from_snapshots(
+            self._get_sequence_data,
+            self._account_is_switchable,
+            threshold,
+            snapshots,
+            exclude=exclude,
+        )
 
     def _plan_automated_switch(
         self,
         decision: AutoSwitchDecisionContext,
     ) -> SwitchPlanResult:
-        """Choose an automated switch target from a trusted decision snapshot."""
-        active = decision.live_active_slot or decision.sequence_active_slot
-        best = self._pick_best_from_snapshots(
-            decision.threshold,
-            decision.usage_by_slot,
-        )
-
-        if best is None:
-            return SwitchPlanResult(
-                outcome="no_trusted_signal",
-                reason=(
-                    "no trusted usage snapshots — run `cswap --list` or wait "
-                    "for the monitor to refresh cache"
-                ),
-            )
-
-        if active is not None and best == active:
-            return SwitchPlanResult(
-                outcome="already_optimal",
-                target=best,
-                reason=f"already on optimal Account-{best}",
-            )
-
-        # When both the active account and the best candidate are saturated,
-        # only switch if the candidate resets at least this many seconds sooner.
-        # Without this guard, continued use on the active account pushes its
-        # resets_at forward on every poll, making the idle account always
-        # appear "better" — causing indefinite oscillation between two accounts
-        # that are both rate-limited. 5 minutes is enough to outweigh API
-        # timestamp jitter while still reacting to meaningful reset differences.
-        if active is not None and best is not None:
-            best_score = _slot_switch_score(
-                decision.usage_by_slot.get(best), decision.threshold
-            )
-            if best_score[0] == _SLOT_SCORE_BUCKET_SATURATED:
-                active_score = _slot_switch_score(
-                    decision.usage_by_slot.get(active), decision.threshold
-                )
-                if active_score[0] == _SLOT_SCORE_BUCKET_SATURATED:
-                    if best_score[1] >= active_score[1] - _SATURATED_SWITCH_MARGIN_S:
-                        return SwitchPlanResult(
-                            outcome="already_optimal",
-                            target=active,
-                            reason=(
-                                f"both accounts saturated; staying on "
-                                f"Account-{active} (target resets at most "
-                                f"{_SATURATED_SWITCH_MARGIN_S}s sooner)"
-                            ),
-                        )
-
-        return SwitchPlanResult(
-            outcome="chosen",
-            target=best,
-            reason=f"cooldown-aware pick Account-{best}",
+        return plan_automated_switch(
+            decision,
+            lambda threshold, snapshots, exclude: self._pick_best_from_snapshots(
+                threshold, snapshots, exclude=exclude
+            ),
         )
 
     def _pick_best_switch_target(
@@ -2056,22 +1911,7 @@ class ClaudeAccountSwitcher:
             accounts_info: list[tuple[int, str, str, str, bool, str]],
             usages: list[dict | str | None],
         ) -> dict:
-            """Build the ``--list --json`` payload from gathered account + usage data."""
-            active_num: int | None = None
-            accounts = []
-            for (num, email, org_name, org_uuid, is_active, _), usage in zip(
-                accounts_info, usages
-            ):
-                if is_active:
-                    active_num = num
-                accounts.append(
-                    account_row(num, email, org_name, org_uuid, is_active, usage)
-                )
-            return {
-                "schemaVersion": SCHEMA_VERSION,
-                "activeAccountNumber": active_num,
-                "accounts": accounts,
-            }
+            return list_payload(accounts_info, usages)
 
     def _active_account_usage(
             self, account_num: str, current_email: str
@@ -2146,31 +1986,7 @@ class ClaudeAccountSwitcher:
     def _switch_result_from_op(
             self, op: dict, strategy: str, extra_warnings: list[str] | None = None
         ) -> dict:
-            """Build a switch result from a ``_perform_switch`` return value.
-
-            ``switched`` is derived from whether the live identity actually changed
-            (``from != to``) — covering recorded/live drift in plain rotation, not just
-            ``switch_to`` onto the already-active account.
-            """
-            from_ref = op["from"]
-            to_ref = op["to"]
-            switched = from_ref != to_ref
-            if switched:
-                reason = "switched"
-                message = f"Switched to Account-{to_ref['number']} ({to_ref['email']})"
-            else:
-                reason = "already-active"
-                message = f"Already on Account-{to_ref['number']} ({to_ref['email']})"
-            return {
-                "schemaVersion": SCHEMA_VERSION,
-                "switched": switched,
-                "from": from_ref,
-                "to": to_ref,
-                "strategy": strategy,
-                "reason": reason,
-                "message": message,
-                "warnings": (extra_warnings or []) + op["warnings"],
-            }
+            return switch_result_from_op(op, strategy, extra_warnings)
 
     def _switch_noop(
             self,
@@ -2182,25 +1998,14 @@ class ClaudeAccountSwitcher:
             to_ref: dict | None = None,
             warnings: list[str] | None = None,
         ) -> dict:
-            """Build a no-op switch result (``switched: false``).
-
-            For a no-op the user neither left nor arrived anywhere — ``from`` and
-            ``to`` are both the current account. Callers pass ``to_ref`` (where they
-            stayed); ``from_ref`` defaults to it so every ``switched: false`` payload
-            reports ``from == to``.
-            """
-            if from_ref is None:
-                from_ref = to_ref
-            return {
-                "schemaVersion": SCHEMA_VERSION,
-                "switched": False,
-                "from": from_ref,
-                "to": to_ref,
-                "strategy": strategy,
-                "reason": reason,
-                "message": message,
-                "warnings": warnings or [],
-            }
+            return switch_noop(
+                strategy=strategy,
+                reason=reason,
+                message=message,
+                from_ref=from_ref,
+                to_ref=to_ref,
+                warnings=warnings,
+            )
 
     def _print_switch_followup(self) -> None:
             """Print the note after a successful switch, keyed to where the active
