@@ -84,6 +84,78 @@ cswap run 2 --no-share          # don't share your ~/.claude customizations
 
 Your `~/.claude` customizations (settings, keybindings, CLAUDE.md, skills, commands, agents) are shared into the session by default — use `--no-share` for a bare profile. Conversation history stays per-account.
 
+### Auto-switch at usage limit (Beta)
+
+Launch the interactive menu and open **Auto-switch at limit (Beta)**:
+
+```bash
+cswap --tui
+```
+
+Or start the same foreground monitor directly from the CLI:
+
+```bash
+cswap --monitor
+```
+
+From there you can:
+
+- **Enable/Disable** automatic switching (the setting persists across runs).
+- **Set threshold** — the usage percentage that triggers a switch (default `95%`).
+- **Start monitor now** — runs the same adaptive auto-switch engine as
+  `cswap --monitor` (typically 5–60s polling based on usage velocity).
+  When usage reaches the threshold, it picks the best target using trusted
+  usage snapshots: unsaturated accounts first, otherwise the soonest
+  cooldown reset. If you are already on that account, it holds until the
+  window frees. Press `s` to check immediately, or `q`/`Esc` to stop.
+
+Because switching doesn't require a Claude Code restart (see the note above),
+the new account takes effect on your next message — on macOS once the Keychain
+cache expires. For automated paths (TUI monitor + launchd service) the target
+account's OAuth token is force-refreshed *before* activation, so the first API
+call after handoff uses a freshly-issued token with maximum remaining lifetime.
+The TUI's **Start monitor now** is foreground-only; `cswap --monitor` and
+`cswap service install` run the same engine in the background. `cswap --monitor`
+records its PID and exits without starting another monitor if one is already
+running. Manual
+`cswap --switch` still uses predictable round-robin; automated paths never
+guess from stale cache — they require fresh usage snapshots (from polling or
+`cswap --list`).
+
+> **Beta:** automated switching is new. Usage percentages come from the same
+> API as `cswap --list`. Please report any rough
+> edges via [Issues](https://github.com/realiti4/claude-swap/issues).
+
+#### Run it in the background (macOS)
+
+```bash
+cswap service install      # start at login, supervised by launchd
+cswap service status       # is it loaded? last exit?
+cswap service logs         # tail recent monitor output
+cswap service uninstall    # stop and remove
+```
+
+The service runs the same `cswap --monitor` loop under launchd
+(`com.claude-swap.monitor`), restarting it if it crashes and logging to
+`<backup_dir>/logs/`. `cswap --monitor` remains available for a foreground run.
+
+#### Failure modes and upgrade
+
+Automated switching is **fail-closed**: it never guesses from stale cache.
+Manual `cswap --switch` still uses round-robin.
+
+| Symptom | Meaning | What to do |
+|---------|---------|------------|
+| `no trusted usage snapshots` / `Cannot choose auto-switch target` | Usage cache is cold or expired at threshold — the monitor will not rotate blindly | Run `cswap --list` to seed fresh snapshots (do this on every machine with auto-switch enabled **before** upgrading) |
+| `already on optimal` / hold at threshold | You are already on the soonest-to-free account; rotation would not help | Expected — wait for the cooldown window to reset |
+| `Only one account` (background monitor) | Auto-switch needs at least two managed accounts | Add another account with `cswap --add-account` |
+| Monitor idle / no switches after upgrade | Background service may still be on an old build or cold cache | After upgrading: run `cswap --list`, then `cswap service install` (macOS), then `cswap service status` |
+
+**Upgrade checklist (beta)**
+
+1. **Before deploy:** `cswap --list` on each machine with auto-switch enabled.
+2. **After deploy:** `cswap service install` (macOS background users), verify `cswap service status`, tail `monitor.err` or `claude-swap.log` for the first threshold event.
+
 ### Refresh expired tokens
 
 If an account's token expires, log back into Claude Code with that account and re-run:
@@ -99,10 +171,12 @@ This will update the stored credentials without creating a duplicate.
 ```bash
 cswap run 2                     # Run an account in this terminal only (session mode)
 cswap --list                    # Show all accounts with 5h/7d usage and reset times
+cswap --health                  # Show account health, usage, and OAuth token status
 cswap --status                  # Show current account
 cswap --add-account --slot 3    # Add account to a specific slot (prompts before overwrite)
 cswap --remove-account 2        # Remove an account
-cswap --tui                     # Launch the interactive arrow-key menu
+cswap --tui                     # Launch the interactive arrow-key menu (incl. auto-switch, Beta)
+cswap --monitor                 # Run the foreground auto-switch monitor
 cswap --upgrade                 # Upgrade claude-swap to the latest version
 cswap --purge                   # Remove all claude-swap data
 ```
