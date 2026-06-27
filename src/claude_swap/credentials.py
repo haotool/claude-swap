@@ -300,7 +300,7 @@ class CredentialStore:
         except Exception:
             pass  # best-effort; a down Keychain can't be cleaned now
 
-    def _write_credentials(self, credentials: str) -> None:
+    def _write_credentials(self, credentials: str, *, verify: bool = False) -> None:
         """Write Claude Code's active credential, enforcing a single auth axis.
 
         Detects the kind from the payload (raw ``sk-ant-api…`` key vs OAuth JSON) and
@@ -314,14 +314,27 @@ class CredentialStore:
           Keychain "Claude Code" when usable, else ``~/.claude.json`` ``primaryApiKey``),
           then clear the OAuth credential (Keychain item + ``.credentials.json``).
 
+        ``verify=True`` (OAuth path only) read-backs and confirms the payload matches
+        what was written — guards against silent Keychain corruption on activation.
+
         Raises:
-            CredentialWriteError: If writing credentials fails.
+            CredentialWriteError: If writing credentials fails, or if ``verify=True``
+                (OAuth) and readback differs from the intended payload.
         """
         if looks_like_api_key(credentials):
             self._write_managed_credentials(credentials.strip())
         else:
             self._write_oauth_credentials(credentials)
             self._clear_managed_key()
+
+        if verify and not looks_like_api_key(credentials):
+            readback = self._read_credentials()
+            if readback != credentials:
+                raise CredentialWriteError(
+                    "Credential write verification failed: readback differs "
+                    "from intended payload. Possible silent Keychain corruption "
+                    "or concurrent overwrite. Aborting switch."
+                )
 
     def _write_managed_credentials(self, api_key: str) -> None:
         """Activate a managed API key, then clear OAuth (mutual exclusion).
