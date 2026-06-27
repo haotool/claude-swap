@@ -7,6 +7,7 @@ import logging
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from claude_swap.printer import warning as print_warning
@@ -17,6 +18,52 @@ OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 _logger = logging.getLogger("claude-swap")
+
+
+@dataclass(frozen=True)
+class UsageFetchError:
+    """Classified usage-fetch failure for user-visible diagnostics."""
+
+    reason: str
+    status_code: int | None = None
+    message: str = ""
+    retry_after: str | None = None
+
+
+def describe_usage_error(error: UsageFetchError) -> str:
+    """Return a concise user-facing description for a usage failure."""
+    if error.reason == "rate_limited":
+        suffix = f", retry after {error.retry_after}" if error.retry_after else ""
+        return f"usage unavailable (rate limited{suffix})"
+    if error.reason == "unauthorized":
+        return "usage unavailable (unauthorized)"
+    if error.reason == "network_error":
+        return "usage unavailable (network error)"
+    return "usage unavailable"
+
+
+def _usage_error_from_http_error(error: urllib.error.HTTPError) -> UsageFetchError:
+    retry_after = error.headers.get("Retry-After") if error.headers else None
+    try:
+        body = error.read().decode(errors="replace")
+        payload = json.loads(body) if body else {}
+        message = payload.get("error", {}).get("message", "")
+    except Exception:
+        message = ""
+
+    if error.code == 429:
+        reason = "rate_limited"
+    elif error.code == 401:
+        reason = "unauthorized"
+    else:
+        reason = "http_error"
+
+    return UsageFetchError(
+        reason=reason,
+        status_code=error.code,
+        message=message,
+        retry_after=retry_after,
+    )
 
 
 def extract_access_token(credentials: str) -> str | None:
@@ -245,7 +292,7 @@ def fetch_usage_for_account(
     credentials: str,
     is_active: bool,
     persist_credentials: Callable[[str, str, str], None] | None = None,
-) -> dict | None:
+) -> dict | UsageFetchError | None:
     """Fetch usage for an account, refreshing expired tokens for inactive accounts only.
 
     Active accounts are never refreshed — Claude Code owns those credentials.
@@ -273,19 +320,28 @@ def fetch_usage_for_account(
         data = request_usage_data(access_token)
         return build_usage_result(data)
     except urllib.error.HTTPError as e:
-        _logger.debug("Usage fetch failed: %r", e)
+        usage_error = _usage_error_from_http_error(e)
+        _logger.debug(
+            "Usage fetch failed: account=%s email=%s active=%s reason=%s status=%s message=%r",
+            account_num,
+            email,
+            is_active,
+            usage_error.reason,
+            usage_error.status_code,
+            usage_error.message,
+        )
         if (
             e.code != 401
             or is_active
             or not oauth
             or not oauth.get("refreshToken")
         ):
-            return None
+            return usage_error
 
         # Retry once after refreshing on 401 (inactive accounts only).
         refreshed = refresh_oauth_credentials(working_credentials)
         if not refreshed:
-            return None
+            return usage_error
 
         working_credentials = refreshed
         _persist(persist_credentials, account_num, email, working_credentials)
@@ -297,12 +353,36 @@ def fetch_usage_for_account(
         try:
             data = request_usage_data(new_token)
             return build_usage_result(data)
+        except urllib.error.HTTPError as retry_error:
+            usage_error = _usage_error_from_http_error(retry_error)
+            _logger.debug(
+                "Usage fetch failed after refresh: account=%s email=%s active=%s reason=%s status=%s message=%r",
+                account_num,
+                email,
+                is_active,
+                usage_error.reason,
+                usage_error.status_code,
+                usage_error.message,
+            )
+            return usage_error
         except Exception as retry_error:
-            _logger.debug("Usage fetch failed after refresh: %r", retry_error)
-            return None
+            _logger.debug(
+                "Usage fetch failed after refresh: account=%s email=%s active=%s error=%r",
+                account_num,
+                email,
+                is_active,
+                retry_error,
+            )
+            return UsageFetchError(reason="network_error", message=str(retry_error))
     except Exception as e:
-        _logger.debug("Usage fetch failed: %r", e)
-        return None
+        _logger.debug(
+            "Usage fetch failed: account=%s email=%s active=%s error=%r",
+            account_num,
+            email,
+            is_active,
+            e,
+        )
+        return UsageFetchError(reason="network_error", message=str(e))
 
 
 def _persist(

@@ -319,8 +319,12 @@ def import_accounts(
         if not isinstance(config_obj, dict):
             raise TransferError(f"config for {email} must be a JSON object")
         # API-key accounts carry the credential as a raw string; OAuth accounts
-        # carry a JSON object.
-        is_api_key = raw.get("kind") == "api_key" or isinstance(creds_obj, str)
+        # carry a JSON object. Only treat it as an API key when the export tags
+        # it as such or the string actually looks like a key — a random string
+        # is a malformed OAuth credential, not an API key.
+        is_api_key = raw.get("kind") == "api_key" or (
+            isinstance(creds_obj, str) and looks_like_api_key(creds_obj)
+        )
         if is_api_key:
             if not (isinstance(creds_obj, str) and looks_like_api_key(creds_obj)):
                 raise TransferError(

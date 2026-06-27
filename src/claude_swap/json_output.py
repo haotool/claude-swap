@@ -114,3 +114,114 @@ def error_envelope(exc: Exception) -> dict:
         "schemaVersion": SCHEMA_VERSION,
         "error": {"type": type(exc).__name__, "message": str(exc)},
     }
+
+
+def list_payload(
+    accounts_info: list[tuple[int, str, str, str, bool, str]],
+    usages: list[dict | str | None],
+) -> dict:
+    """Build the ``--list --json`` payload from gathered account + usage data."""
+    active_num: int | None = None
+    accounts = []
+    for (num, email, org_name, org_uuid, is_active, _), usage in zip(
+        accounts_info, usages
+    ):
+        if is_active:
+            active_num = num
+        accounts.append(
+            account_row(num, email, org_name, org_uuid, is_active, usage)
+        )
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "activeAccountNumber": active_num,
+        "accounts": accounts,
+    }
+
+
+def switch_result_from_op(
+    op: dict,
+    strategy: str,
+    extra_warnings: list[str] | None = None,
+) -> dict:
+    """Build a switch result from a ``_perform_switch`` return value."""
+    from_ref = op["from"]
+    to_ref = op["to"]
+    switched = from_ref != to_ref
+    if switched:
+        reason = "switched"
+        message = f"Switched to Account-{to_ref['number']} ({to_ref['email']})"
+    else:
+        reason = "already-active"
+        message = f"Already on Account-{to_ref['number']} ({to_ref['email']})"
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "switched": switched,
+        "from": from_ref,
+        "to": to_ref,
+        "strategy": strategy,
+        "reason": reason,
+        "message": message,
+        "warnings": (extra_warnings or []) + op["warnings"],
+    }
+
+
+def switch_noop(
+    *,
+    strategy: str,
+    reason: str,
+    message: str,
+    from_ref: dict | None = None,
+    to_ref: dict | None = None,
+    warnings: list[str] | None = None,
+) -> dict:
+    """Build a no-op switch result (``switched: false``)."""
+    if from_ref is None:
+        from_ref = to_ref
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "switched": False,
+        "from": from_ref,
+        "to": to_ref,
+        "strategy": strategy,
+        "reason": reason,
+        "message": message,
+        "warnings": warnings or [],
+    }
+
+
+def status_payload(
+    *,
+    identity: tuple[str, str] | None,
+    account_num: str | None,
+    account_record: dict | None,
+    usage_entry: dict | str | None,
+    total_managed: int | None = None,
+) -> dict:
+    """Build the ``--status --json`` payload."""
+    if identity is None:
+        return {"schemaVersion": SCHEMA_VERSION, "active": None}
+    current_email, current_org_uuid = identity
+    if account_num is None or account_record is None:
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "active": {"email": current_email, "managed": False},
+        }
+    org_name = account_record.get("organizationName", "") or ""
+    org_uuid = account_record.get("organizationUuid", "") or ""
+    status, usage = usage_fields(usage_entry)
+    payload: dict = {
+        "schemaVersion": SCHEMA_VERSION,
+        "active": {
+            "number": int(account_num),
+            "email": current_email,
+            "organizationName": org_name,
+            "organizationUuid": org_uuid,
+            "isOrganization": bool(org_uuid),
+            "managed": True,
+            "usageStatus": status,
+            "usage": usage,
+        },
+    }
+    if total_managed is not None:
+        payload["totalManagedAccounts"] = total_managed
+    return payload
