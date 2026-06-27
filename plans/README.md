@@ -32,7 +32,7 @@ honor its STOP conditions, and update your row below when done. **Plans 001 and
 | 014 | Make `cache.write_cache` atomic with mode 0o600 | P1 | S | — | DONE (commit `8d305d1`, atomic mkstemp+os.replace+chmod 0o600, +4 tests) |
 | 015 | Boundary-case tests for `oauth.build_usage_result` (resets_at preservation, missing extra_usage, malformed resets_at) | P2 | S | — | DONE (+3 tests, 661 passed, 3 skipped) |
 | 016 | Replace `SwitchIntent` `@property` indirection with `ClassVar` (preserves typed dispatch) | P2 | S | — | DONE (net −18 lines, 661 passed, 3 skipped, zero behavior change) |
-| 017 | Serialize inactive-account OAuth refresh under FileLock (close plan 009 final leftover) | P2 | S–M | — | TODO |
+| 017 | Serialize inactive-account OAuth refresh under FileLock (close plan 009 final leftover) | P2 | S–M | — | DONE (+1 test, 697 passed, 3 skipped) |
 | 018 | Complexity convergence roadmap | P1 | L | — | TODO |
 | 019 | Per-window usage tracking for the auto-switch monitor | P1 | M | — | DONE (commit `200ff22`) |
 | 020 | Extract credential storage + freshness out of switcher.py (align to upstream) | P1 | M | — | DONE (credentials.py 299 `CredentialStore` + credential_refresh.py 266 `CredentialRefresher`; switcher 3238→2863, comparable to upstream's 2543 domain-orchestrator core; +9 boundary tests; 676 passed, 3 skipped, ruff F clean) |

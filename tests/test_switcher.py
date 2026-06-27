@@ -4054,6 +4054,45 @@ class TestRefreshTargetBeforeActivation:
         assert result == fresh
 
 
+class TestRefreshInactiveCredentialsIfNeeded:
+    """Lock-acquired re-check in ``_refresh_inactive_credentials_if_needed``."""
+
+    def _expired_creds(self) -> str:
+        return json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "old",
+                "refreshToken": "rt-old",
+                "expiresAt": 0,
+            },
+        })
+
+    def _fresh_creds(self) -> str:
+        return json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "new",
+                "refreshToken": "rt-new",
+                "expiresAt": 4_070_908_800_000,
+            },
+        })
+
+    def test_refresh_inactive_skips_when_disk_already_fresh(self, temp_home: Path):
+        """Lock-acquired re-check skips redundant refresh when disk is fresh."""
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        stale_creds = self._expired_creds()
+        fresh_creds = self._fresh_creds()
+        switcher._write_account_credentials("1", "x@y.z", fresh_creds)
+
+        with patch("claude_swap.oauth.refresh_oauth_credentials") as mock_refresh:
+            result, note = switcher._refresh_inactive_credentials_if_needed(
+                "1", "x@y.z", stale_creds,
+            )
+
+        assert "fresh" in note.lower() or "skip" in note.lower()
+        assert result == fresh_creds
+        mock_refresh.assert_not_called()
+
+
 class TestWriteVerifiedLiveDriftHandling:
     """Lock the two drift modes of ``_write_verified_live_account_credentials``:
 
