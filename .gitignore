@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local agent/editor state
+.claude/
+.cursor/
+output.txt
+.pytest_cache/
+
+# Stray Node artifacts — this is a pure-Python project (no package.json); a tool
+# occasionally runs npm/npx here and drops an empty lockfile. Keep it out of the tree.
+node_modules/
+package-lock.json
