@@ -40,6 +40,7 @@ from claude_swap.json_output import (
     list_payload,
     switch_noop,
     switch_result_from_op,
+    status_payload,
     usage_fields,
 )
 from claude_swap.auto_switch_planning import (
@@ -1942,46 +1943,34 @@ class ClaudeAccountSwitcher:
             return usage
 
     def _build_status_payload(self) -> dict:
-            """Build the ``--status --json`` payload (no active / unmanaged / managed)."""
             identity = self._get_current_account()
             if identity is None:
-                return {"schemaVersion": SCHEMA_VERSION, "active": None}
+                return status_payload(identity=None, account_num=None, account_record=None, usage_entry=None)
             current_email, current_org_uuid = identity
-
             data = self._get_sequence_data_migrated()
             if not data:
-                return {
-                    "schemaVersion": SCHEMA_VERSION,
-                    "active": {"email": current_email, "managed": False},
-                }
-
+                return status_payload(
+                    identity=identity,
+                    account_num=None,
+                    account_record=None,
+                    usage_entry=None,
+                )
             account_num = self._find_account_slot(data, current_email, current_org_uuid)
             if not account_num:
-                return {
-                    "schemaVersion": SCHEMA_VERSION,
-                    "active": {"email": current_email, "managed": False},
-                }
-
+                return status_payload(
+                    identity=identity,
+                    account_num=None,
+                    account_record=None,
+                    usage_entry=None,
+                )
             acct = data["accounts"][account_num]
-            org_name = acct.get("organizationName", "") or ""
-            org_uuid = acct.get("organizationUuid", "") or ""
-            status, usage = usage_fields(
-                self._active_account_usage(account_num, current_email)
+            return status_payload(
+                identity=identity,
+                account_num=account_num,
+                account_record=acct,
+                usage_entry=self._active_account_usage(account_num, current_email),
+                total_managed=len(data.get("accounts", {})),
             )
-            return {
-                "schemaVersion": SCHEMA_VERSION,
-                "active": {
-                    "number": int(account_num),
-                    "email": current_email,
-                    "organizationName": org_name,
-                    "organizationUuid": org_uuid,
-                    "isOrganization": bool(org_uuid),
-                    "managed": True,
-                    "usageStatus": status,
-                    "usage": usage,
-                },
-                "totalManagedAccounts": len(data.get("accounts", {})),
-            }
 
     def _switch_result_from_op(
             self, op: dict, strategy: str, extra_warnings: list[str] | None = None
@@ -2030,6 +2019,117 @@ class ClaudeAccountSwitcher:
             else:
                 print(dimmed("New account is active on your next message — no restart needed."))
 
+    def _resolve_fresh_machine_target(
+        self,
+        *,
+        quiet: bool = False,
+        warnings: list[str] | None = None,
+    ) -> str:
+        """Pick a switchable slot when no live Claude login is present."""
+        data = self._get_sequence_data() or {}
+        sequence = data.get("sequence", [])
+        preferred = data.get("activeAccountNumber")
+        if not preferred and sequence:
+            preferred = sequence[0]
+        if not preferred:
+            raise ConfigError("No accounts are managed yet")
+
+        target = str(preferred)
+        if not self._account_is_switchable(target):
+            if warnings is not None:
+                warnings.append(
+                    f"Skipped Account-{target} (no stored credentials/config)"
+                )
+            else:
+                skip_msg = (
+                    f"Skipping Account-{target} (no stored credentials/config, "
+                    f"re-add with cswap --add-account --slot {target})"
+                )
+                if quiet:
+                    self._logger.info(skip_msg)
+                else:
+                    print(
+                        f"{accent('Skipping')} Account-{target} "
+                        f"(no stored credentials/config, re-add with "
+                        f"cswap --add-account --slot {target})"
+                    )
+            fallback = next(
+                (
+                    str(num)
+                    for num in sequence
+                    if str(num) != target and self._account_is_switchable(str(num))
+                ),
+                None,
+            )
+            if not fallback:
+                raise ConfigError(
+                    "No managed accounts have valid stored credentials/config. "
+                    "Re-add a slot with: cswap --add-account --slot <number>"
+                )
+            target = fallback
+        return target
+
+    def _switch_automated_target(
+        self,
+        decision: AutoSwitchDecisionContext,
+        active_account,
+        *,
+        quiet: bool,
+    ) -> str | None:
+        """Return the automated target slot, or ``None`` when staying put."""
+        plan = self._plan_automated_switch(decision)
+        if plan.outcome == "chosen":
+            self._logger.info(
+                "switch: %s (active=%s threshold=%s)",
+                plan.reason,
+                active_account,
+                decision.threshold,
+            )
+            return plan.target
+        if plan.outcome == "already_optimal":
+            msg = f"{plan.reason}; waiting for cooldown."
+            if quiet:
+                self._logger.info("switch: %s", msg)
+            else:
+                print(dimmed(msg))
+            return None
+        msg = f"Cannot choose auto-switch target safely: {plan.reason}"
+        if not quiet:
+            print(dimmed(msg))
+        raise SwitchError(msg)
+
+    def _switch_manual_rotation_target(
+        self,
+        sequence: list,
+        active_account,
+        *,
+        quiet: bool,
+    ) -> str | None:
+        """Return the next switchable slot in rotation order."""
+        try:
+            current_index = sequence.index(active_account)
+        except ValueError:
+            current_index = 0
+
+        for offset in range(1, len(sequence)):
+            candidate = str(sequence[(current_index + offset) % len(sequence)])
+            if self._account_is_switchable(candidate):
+                return candidate
+            if quiet:
+                self._logger.info(
+                    "Skipping Account-%s (no stored credentials/config, "
+                    "re-add with cswap --add-account --slot %s)",
+                    candidate,
+                    candidate,
+                )
+            else:
+                print(
+                    f"{accent('Skipping')} Account-{candidate} "
+                    f"(no stored credentials/config, re-add with "
+                    f"cswap --add-account --slot {candidate})"
+                )
+        return None
+
     def _switch_cli(
             self, strategy: str | None = None, json_output: bool = False
         ) -> dict | None:
@@ -2067,37 +2167,9 @@ class ClaudeAccountSwitcher:
             # With no live state to capture, the target must have valid backups —
             # walk the sequence if the preferred target is broken.
             if identity is None:
-                data = self._get_sequence_data() or {}
-                sequence = data.get("sequence", [])
-                preferred = data.get("activeAccountNumber")
-                if not preferred and sequence:
-                    preferred = sequence[0]
-                if not preferred:
-                    raise ConfigError("No accounts are managed yet")
-
-                target = str(preferred)
-                if not self._account_is_switchable(target):
-                    if json_output:
-                        warnings.append(
-                            f"Skipped Account-{target} (no stored credentials/config)"
-                        )
-                    else:
-                        print(
-                            f"{accent('Skipping')} Account-{target} "
-                            f"(no stored credentials/config, re-add with "
-                            f"cswap --add-account --slot {target})"
-                        )
-                    fallback = next(
-                        (str(num) for num in sequence
-                         if str(num) != target and self._account_is_switchable(str(num))),
-                        None,
-                    )
-                    if not fallback:
-                        raise ConfigError(
-                            "No managed accounts have valid stored credentials/config. "
-                            "Re-add a slot with: cswap --add-account --slot <number>"
-                        )
-                    target = fallback
+                target = self._resolve_fresh_machine_target(
+                    warnings=warnings if json_output else None,
+                )
                 op = self._perform_switch(target, emit_output=not json_output)
                 return (
                     self._switch_result_from_op(op, strategy_label, warnings)
@@ -2819,40 +2891,7 @@ class ClaudeAccountSwitcher:
         # With no live state to capture, the target must have valid backups —
         # walk the sequence if the preferred target is broken.
         if identity is None:
-            data = self._get_sequence_data() or {}
-            sequence = data.get("sequence", [])
-            preferred = data.get("activeAccountNumber")
-            if not preferred and sequence:
-                preferred = sequence[0]
-            if not preferred:
-                raise ConfigError("No accounts are managed yet")
-
-            target = str(preferred)
-            if not self._account_is_switchable(target):
-                skip_msg = (
-                    f"Skipping Account-{target} (no stored credentials/config, "
-                    f"re-add with cswap --add-account --slot {target})"
-                )
-                if quiet:
-                    # Background service must not leak per-candidate prints to
-                    # launchd's stdout (where there is no human reader); route
-                    # through the structured logger instead.
-                    self._logger.info(skip_msg)
-                else:
-                    print(f"{accent('Skipping')} Account-{target} "
-                          f"(no stored credentials/config, re-add with "
-                          f"cswap --add-account --slot {target})")
-                fallback = next(
-                    (str(num) for num in sequence
-                     if str(num) != target and self._account_is_switchable(str(num))),
-                    None,
-                )
-                if not fallback:
-                    raise ConfigError(
-                        "No managed accounts have valid stored credentials/config. "
-                        "Re-add a slot with: cswap --add-account --slot <number>"
-                    )
-                target = fallback
+            target = self._resolve_fresh_machine_target(quiet=quiet)
             self._perform_switch(target, intent=intent)
             return True
 
@@ -2874,11 +2913,6 @@ class ClaudeAccountSwitcher:
         if len(sequence) < 2:
             msg = "Only one account is managed. Add more accounts to switch between."
             if quiet:
-                # Automated callers (auto-switch monitor) must NOT silently
-                # treat "nothing to switch to" as a successful rotation —
-                # that would cause the monitor to log a false "switched
-                # account" on every threshold crossing.  Raise so the caller
-                # can dedup the actionable error.
                 raise SwitchError(msg)
             print(dimmed(msg))
             return False
@@ -2889,63 +2923,16 @@ class ClaudeAccountSwitcher:
             else data.get("activeAccountNumber")
         )
 
-        next_account: str | None = None
-
         if automated and decision is not None:
-            plan = self._plan_automated_switch(decision)
-            if plan.outcome == "chosen":
-                self._logger.info(
-                    "switch: %s (active=%s threshold=%s)",
-                    plan.reason,
-                    active_account,
-                    decision.threshold,
-                )
-                next_account = plan.target
-            elif plan.outcome == "already_optimal":
-                msg = f"{plan.reason}; waiting for cooldown."
-                if quiet:
-                    self._logger.info("switch: %s", msg)
-                else:
-                    print(dimmed(msg))
+            next_account = self._switch_automated_target(
+                decision, active_account, quiet=quiet,
+            )
+            if next_account is None:
                 return False
-            else:
-                msg = (
-                    "Cannot choose auto-switch target safely: "
-                    f"{plan.reason}"
-                )
-                if not quiet:
-                    print(dimmed(msg))
-                raise SwitchError(msg)
-
-        if next_account is None and not automated:
-            # Find current index and get next, skipping broken candidates.
-            # The active slot is never checked here — _perform_switch captures
-            # live state into a fresh backup before swapping, so the active
-            # slot's stored backup may be stale or absent without blocking us.
-            try:
-                current_index = sequence.index(active_account)
-            except ValueError:
-                current_index = 0
-
-            for offset in range(1, len(sequence)):
-                candidate = str(sequence[(current_index + offset) % len(sequence)])
-                if self._account_is_switchable(candidate):
-                    next_account = candidate
-                    break
-                if quiet:
-                    # Background service must not leak per-candidate prints; the
-                    # structured logger is the right destination for these.
-                    self._logger.info(
-                        "Skipping Account-%s (no stored credentials/config, "
-                        "re-add with cswap --add-account --slot %s)",
-                        candidate, candidate,
-                    )
-                else:
-                    print(
-                        f"{accent('Skipping')} Account-{candidate} "
-                        f"(no stored credentials/config, re-add with "
-                        f"cswap --add-account --slot {candidate})"
-                    )
+        else:
+            next_account = self._switch_manual_rotation_target(
+                sequence, active_account, quiet=quiet,
+            )
 
         if next_account is None:
             msg = (
@@ -2953,9 +2940,6 @@ class ClaudeAccountSwitcher:
                 "Re-add a skipped slot with: cswap --add-account --slot <number>"
             )
             if quiet:
-                # See the analogous guard above: the auto-switch monitor must
-                # see this as a failure so it can dedup-log and not falsely
-                # report a successful rotation every poll.
                 raise SwitchError(msg)
             print(dimmed(msg))
             return False
@@ -3371,22 +3355,8 @@ class ClaudeAccountSwitcher:
         self._print_switch_result(target_account, target_email)
         return None
 
-    def purge(self) -> None:
-        """Remove all traces of claude-swap from the system.
-
-        This removes:
-        - All stored account credentials (files on Linux/WSL/Windows, macOS
-          Keychain items via ``security`` on macOS), plus a best-effort sweep of
-          any pre-migration keyring / Windows Credential Manager entries left behind
-        - The active backup directory (XDG path on Linux/WSL, ~/.claude-swap-backup elsewhere)
-        - Any stale legacy ~/.claude-swap-backup directory left around from
-          before the XDG migration
-        """
-        legacy = get_legacy_backup_root()
-        legacy_distinct = legacy != self.backup_dir
-
-        # Refuse while any session-mode claude is running: purging would pull
-        # its profile (and keychain entry) out from under a live process.
+    def _purge_guard_live_sessions(self) -> list[Path]:
+        """Refuse purge while session-mode Claude is running; else return session dirs."""
         sessions_root = self.backup_dir / "sessions"
         session_dirs = (
             [d for d in sessions_root.iterdir() if d.is_dir()]
@@ -3395,7 +3365,7 @@ class ClaudeAccountSwitcher:
         )
         from claude_swap.session import live_sessions_for
 
-        live = {}
+        live: dict[str, list[int]] = {}
         for d in session_dirs:
             pids = [s.pid for s in live_sessions_for(d)]
             if pids:
@@ -3409,6 +3379,61 @@ class ClaudeAccountSwitcher:
                 f"Live session-mode Claude instance(s) found: {details}. "
                 "Exit them first, then retry --purge."
             )
+        return session_dirs
+
+    def _purge_remove_account_credentials(
+        self, data: dict | None, removed_items: list[str]
+    ) -> None:
+        if not data:
+            return
+        for account_num, account_info in data.get("accounts", {}).items():
+            email = account_info.get("email", "")
+            if self._uses_file_backup_backend():
+                cred_files = [
+                    self.credentials_dir / f".creds-{account_num}-{email}.enc"
+                ]
+                if str(account_num) != "None":
+                    cred_files.append(
+                        self.credentials_dir / f".creds-None-{email}.enc"
+                    )
+                for cred_file in cred_files:
+                    try:
+                        if cred_file.exists():
+                            cred_file.unlink()
+                            removed_items.append(f"Credential file: {cred_file.name}")
+                    except Exception:
+                        pass
+                if self.platform == Platform.WINDOWS:
+                    usernames = [f"account-{account_num}-{email}"]
+                    if str(account_num) != "None":
+                        usernames.append(f"account-None-{email}")
+                    _sweep_legacy_keyring(usernames, removed_items)
+            else:
+                usernames = [f"account-{account_num}-{email}"]
+                if str(account_num) != "None":
+                    usernames.append(f"account-None-{email}")
+                for username in usernames:
+                    try:
+                        macos_keychain.delete_password(SECURITY_SERVICE, username)
+                        removed_items.append(f"Credential: {username}")
+                    except Exception:
+                        pass
+                _sweep_legacy_keyring(usernames, removed_items)
+
+    def purge(self) -> None:
+        """Remove all traces of claude-swap from the system.
+
+        This removes:
+        - All stored account credentials (files on Linux/WSL/Windows, macOS
+          Keychain items via ``security`` on macOS), plus a best-effort sweep of
+          any pre-migration keyring / Windows Credential Manager entries left behind
+        - The active backup directory (XDG path on Linux/WSL, ~/.claude-swap-backup elsewhere)
+        - Any stale legacy ~/.claude-swap-backup directory left around from
+          before the XDG migration
+        """
+        legacy = get_legacy_backup_root()
+        legacy_distinct = legacy != self.backup_dir
+        session_dirs = self._purge_guard_live_sessions()
 
         warning("This will remove ALL claude-swap data from your system:")
         print(f"  - Backup directory: {self.backup_dir}")
@@ -3429,54 +3454,8 @@ class ClaudeAccountSwitcher:
             print(dimmed("Cancelled"))
             return
 
-        removed_items = []
-
-        # Remove credentials
-        data = self._get_sequence_data()
-        if data:
-            for account_num, account_info in data.get("accounts", {}).items():
-                email = account_info.get("email", "")
-                if self._uses_file_backup_backend():
-                    # Remove credential files (Linux/WSL/Windows)
-                    cred_files = [
-                        self.credentials_dir / f".creds-{account_num}-{email}.enc"
-                    ]
-                    if str(account_num) != "None":
-                        cred_files.append(
-                            self.credentials_dir / f".creds-None-{email}.enc"
-                        )
-                    for cred_file in cred_files:
-                        try:
-                            if cred_file.exists():
-                                cred_file.unlink()
-                                removed_items.append(f"Credential file: {cred_file.name}")
-                        except Exception:
-                            pass  # Ignore errors during purge
-                    if self.platform == Platform.WINDOWS:
-                        # Best-effort cleanup of any pre-migration Credential
-                        # Manager entries left behind if the keyring → file
-                        # migration never completed. Files are authoritative
-                        # now; these are just stale cruft.
-                        usernames = [f"account-{account_num}-{email}"]
-                        if str(account_num) != "None":
-                            usernames.append(f"account-None-{email}")
-                        _sweep_legacy_keyring(usernames, removed_items)
-                else:
-                    # macOS: remove the Keychain items via `security`.
-                    usernames = [f"account-{account_num}-{email}"]
-                    if str(account_num) != "None":
-                        usernames.append(f"account-None-{email}")
-                    for username in usernames:
-                        try:
-                            macos_keychain.delete_password(SECURITY_SERVICE, username)
-                            removed_items.append(f"Credential: {username}")
-                        except Exception:
-                            pass  # Ignore errors during purge
-                    # Best-effort cleanup of any pre-migration keyring entries left
-                    # behind if the keyring → security migration never completed.
-                    _sweep_legacy_keyring(usernames, removed_items)
-
-        # Session-profile keychain entries must go BEFORE the backup dir:
+        removed_items: list[str] = []
+        self._purge_remove_account_credentials(self._get_sequence_data(), removed_items)
         # the hashed service names are derived from the dir paths and can't
         # be recomputed once the directories are deleted.
         if session_dirs:

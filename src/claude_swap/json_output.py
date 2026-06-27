@@ -187,3 +187,41 @@ def switch_noop(
         "message": message,
         "warnings": warnings or [],
     }
+
+
+def status_payload(
+    *,
+    identity: tuple[str, str] | None,
+    account_num: str | None,
+    account_record: dict | None,
+    usage_entry: dict | str | None,
+    total_managed: int | None = None,
+) -> dict:
+    """Build the ``--status --json`` payload."""
+    if identity is None:
+        return {"schemaVersion": SCHEMA_VERSION, "active": None}
+    current_email, current_org_uuid = identity
+    if account_num is None or account_record is None:
+        return {
+            "schemaVersion": SCHEMA_VERSION,
+            "active": {"email": current_email, "managed": False},
+        }
+    org_name = account_record.get("organizationName", "") or ""
+    org_uuid = account_record.get("organizationUuid", "") or ""
+    status, usage = usage_fields(usage_entry)
+    payload: dict = {
+        "schemaVersion": SCHEMA_VERSION,
+        "active": {
+            "number": int(account_num),
+            "email": current_email,
+            "organizationName": org_name,
+            "organizationUuid": org_uuid,
+            "isOrganization": bool(org_uuid),
+            "managed": True,
+            "usageStatus": status,
+            "usage": usage,
+        },
+    }
+    if total_managed is not None:
+        payload["totalManagedAccounts"] = total_managed
+    return payload
