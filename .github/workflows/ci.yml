@@ -8,7 +8,12 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Surface a platform failure on every OS rather than cancelling siblings.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -18,13 +23,75 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          pip install -e .
-          pip install pytest
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
-      - name: Run tests
-        run: pytest
+      - name: Install dependencies
+        run: uv sync --all-groups --locked
+
+      # Lint/format/type/audit are platform-independent — run them once on Linux.
+      - name: Ruff lint
+        if: runner.os == 'Linux'
+        run: uv run ruff check src/ tests/
+
+      - name: Ruff format (tests)
+        # Gate formatter drift on tests/ (matches pre-commit ruff-format hook).
+        if: runner.os == 'Linux'
+        run: uv run ruff format --check tests/
+
+      - name: Mypy type check
+        if: runner.os == 'Linux'
+        run: uv run mypy src/claude_swap
+
+      - name: Supply-chain audit
+        # OSV-backed CVE scan; https://github.com/pypa/pip-audit
+        if: runner.os == 'Linux'
+        run: uvx pip-audit .
+
+      - name: Run tests with coverage floor (Linux)
+        # Coverage is platform-independent, so the floor is enforced once.
+        if: runner.os == 'Linux'
+        run: |
+          uv run pytest -q -p no:cacheprovider \
+            --cov=src/claude_swap \
+            --cov-report=term-missing \
+            --cov-fail-under=85
+
+      - name: Run tests (macOS)
+        # The real-keychain files have their own job with hang protection.
+        if: runner.os == 'macOS'
+        run: |
+          uv run pytest -q -p no:cacheprovider \
+            --ignore=tests/test_macos_keychain.py \
+            --ignore=tests/test_macos_keychain_contract.py
+
+  windows:
+    runs-on: windows-latest
+    # Informational until the POSIX-only tests (file-mode asserts, signals) are
+    # guarded for win32. Non-blocking so it surfaces real Windows failures
+    # without gating merges; promote into the matrix above once green.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-groups --locked
+
+      - name: Run tests (informational)
+        run: uv run pytest -q -p no:cacheprovider
 
   macos-keychain:
     runs-on: macos-latest
@@ -37,10 +104,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
       - name: Install dependencies
-        run: |
-          pip install -e .
-          pip install pytest
+        run: uv sync --all-groups --locked
 
       - name: Run macOS Keychain tests (contract + real security wrapper)
         # faulthandler dumps every thread's stack if a test exceeds 60s — a
@@ -48,4 +118,4 @@ jobs:
         # otherwise hang the job with no clue where. The step timeout is the
         # backstop that actually kills it.
         timeout-minutes: 5
-        run: pytest tests/test_macos_keychain_contract.py tests/test_macos_keychain.py -v -o faulthandler_timeout=60
+        run: uv run pytest tests/test_macos_keychain_contract.py tests/test_macos_keychain.py -v -o faulthandler_timeout=60

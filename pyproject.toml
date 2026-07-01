@@ -1,6 +1,6 @@
 [project]
 name = "claude-swap"
-version = "0.15.0"
+version = "0.15.0b2+haotool.1"
 description = "Multi-account switcher for Claude Code"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -40,7 +40,69 @@ build-backend = "hatchling.build"
 packages = ["src/claude_swap"]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.15.20",
+    "mypy>=1.14",
+    "pre-commit>=4.0",
+]
+
+[tool.ruff]
+# https://docs.astral.sh/ruff/configuration/
+target-version = "py312"
+line-length = 88
+
+[tool.mypy]
+# Incremental typing baseline; tighten overrides as modules are cleaned up.
+# https://mypy.readthedocs.io/en/stable/existing_code.html
+python_version = "3.12"
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+files = ["src/claude_swap"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = [
+    "claude_swap.usage_policy",
+    "claude_swap.protocols",
+    "claude_swap.models",
+    "claude_swap.json_output",
+    "claude_swap.oauth",
+    "claude_swap.credential_refresh",
+    "claude_swap.session",
+    "claude_swap.locking",
+    "claude_swap.logging_config",
+    "claude_swap.migrations",
+    "claude_swap.cli",
+    "claude_swap.printer",
+    "claude_swap.service_spec",
+    "claude_swap.service_backends",
+    "claude_swap.service_backends.launchd",
+    "claude_swap.service_backends.systemd",
+    "claude_swap.service_backends.task_scheduler",
+    "claude_swap.service",
+    "claude_swap.transfer",
+    "claude_swap.cache",
+    "claude_swap.usage_cache",
+    "claude_swap.monitor",
+    "claude_swap.credentials",
+    "claude_swap.list_reporter",
+]
+strict = true
+
+[[tool.mypy.overrides]]
+module = [
+    "claude_swap.switch_cli",
+    "claude_swap.switcher",
+    "claude_swap.tui",
+]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

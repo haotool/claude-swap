@@ -1,0 +1,18 @@
+# https://pre-commit.com — hook versions aligned with CI and pyproject [dependency-groups].dev
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # https://docs.astral.sh/ruff/integrations/#pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        require_serial: true
