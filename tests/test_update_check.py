@@ -6,7 +6,6 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from claude_swap.update_check import (
     CACHE_TTL,
@@ -45,6 +44,18 @@ class TestCheckForUpdate:
         assert result is not None
         assert "0.4.0" in result
         assert "0.3.2" in result
+
+    @patch("claude_swap.update_check.urllib.request.urlopen")
+    def test_pep440_current_version_still_checks(self, mock_urlopen, tmp_path, monkeypatch):
+        # Regression: a PEP 440 pre-release/local version (our own format) must
+        # not make the update check silently no-op via int("0b2") ValueError.
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        mock_urlopen.return_value = _make_pypi_response("0.16.0")
+
+        result = check_for_update("0.15.0b2+haotool.1")
+
+        assert result is not None
+        assert "0.16.0" in result
 
     @patch("claude_swap.update_check.urllib.request.urlopen")
     def test_already_on_latest(self, mock_urlopen, tmp_path, monkeypatch):

@@ -35,7 +35,7 @@ def get_claude_config_home() -> Path:
     """Return the Claude config home directory (CLAUDE_CONFIG_DIR or ~/.claude)."""
     env = os.environ.get("CLAUDE_CONFIG_DIR")
     if env:
-        return Path(env)
+        return Path(env).expanduser()
     return Path.home() / ".claude"
 
 
@@ -49,7 +49,7 @@ def get_global_config_path() -> Path:
     if legacy.exists():
         return legacy
     env = os.environ.get("CLAUDE_CONFIG_DIR")
-    base = Path(env) if env else Path.home()
+    base = Path(env).expanduser() if env else Path.home()
     return base / ".claude.json"
 
 

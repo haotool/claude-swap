@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+from typing import cast
 
 from claude_swap.cache import CACHE_DIR, MISSING, read_cache, write_cache
 
@@ -17,7 +19,17 @@ PYPI_URL = "https://pypi.org/pypi/claude-swap/json"
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
-    return tuple(int(x) for x in v.split("."))
+    # Compare numeric release segments only, tolerating PEP 440 pre-release /
+    # local suffixes (e.g. "0.15.0b2", "0.15.0b2+haotool.1"). Without this,
+    # int("0b2") raised and the update check silently no-op'd on our own
+    # version format.
+    parts: list[int] = []
+    for seg in v.split("+", 1)[0].split("."):
+        m = re.match(r"\d+", seg)
+        if m is None:
+            break
+        parts.append(int(m.group()))
+    return tuple(parts)
 
 
 def _detect_install_method() -> str | None:
@@ -51,7 +63,7 @@ def check_for_update(current_version: str) -> str | None:
         # Try reading cache
         cached_data = read_cache(CACHE_PATH, CACHE_TTL)
         if cached_data is not MISSING:
-            latest_version = cached_data
+            latest_version = cast(str | None, cached_data)
         else:
             # Fetch from PyPI
             try:

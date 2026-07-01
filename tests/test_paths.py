@@ -49,6 +49,14 @@ class TestGetClaudeConfigHome:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
         assert get_claude_config_home() == custom
 
+    def test_expands_tilde_in_env_var(
+        self, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A tilde in CLAUDE_CONFIG_DIR (common in systemd/Docker units) must
+        # resolve to $HOME, not a literal "~" directory.
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/.claude-custom")
+        assert get_claude_config_home() == isolated_home / ".claude-custom"
+
 
 class TestGetGlobalConfigPath:
     def test_default_returns_homedir_claude_json(self, isolated_home: Path):
