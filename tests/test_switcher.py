@@ -451,6 +451,28 @@ class TestMutationLocking:
 
         assert calls["acquired"] >= 1
 
+    def test_add_account_refresh_reresolves_slot_under_lock(
+        self, temp_home: Path, mock_claude_config: Path
+    ):
+        # add_account refresh-in-place must re-resolve the slot INSIDE the lock;
+        # if the account was removed concurrently it raises cleanly rather than
+        # writing a stale slot id.
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._init_sequence_file()
+        creds = json.dumps(
+            {"claudeAiOauth": {"accessToken": "tok", "refreshToken": "rt"}}
+        )
+        with patch.object(
+            switcher, "_get_current_account", return_value=("a@example.com", ""),
+        ), patch.object(switcher, "_account_exists", return_value=True), \
+             patch.object(switcher, "_read_credentials", return_value=creds), \
+             patch.object(
+                 switcher, "_get_sequence_data",
+                 return_value={"accounts": {}, "sequence": []},
+             ), pytest.raises(ConfigError, match="no longer managed"):
+            switcher.add_account()
+
     def test_remove_account_holds_lock(
         self, temp_home: Path, monkeypatch
     ):

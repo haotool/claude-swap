@@ -1111,15 +1111,6 @@ class ClaudeAccountSwitcher:
 
         # When no slot specified and account already exists, refresh credentials in place
         if slot is None and self._account_exists(current_email, current_org_uuid):
-            seq = self._get_sequence_data() or {}
-            account_num = next(
-                (num for num, acc in seq.get("accounts", {}).items()
-                 if acc.get("email") == current_email and
-                 acc.get("organizationUuid", "") == current_org_uuid),
-                None,
-            )
-            matched_org_name = seq["accounts"][account_num].get("organizationName", "") if account_num else ""
-
             current_creds = self._read_credentials()
             if current_creds is None:
                 raise CredentialReadError("Failed to read credentials for current account")
@@ -1135,9 +1126,24 @@ class ClaudeAccountSwitcher:
             except PermissionError:
                 raise ConfigError("Permission denied reading Claude config")
 
-            # Hold the cross-process lock across the credential + sequence
-            # writes so a concurrent switch/add can't lose this update.
+            # Hold the cross-process lock across slot resolution + the credential
+            # and sequence writes so a concurrent switch/remove can't leave us
+            # writing a stale slot id — re-resolve the slot fresh inside the lock.
             with FileLock(self.lock_file):
+                seq = self._get_sequence_data() or {}
+                account_num = next(
+                    (num for num, acc in seq.get("accounts", {}).items()
+                     if acc.get("email") == current_email and
+                     acc.get("organizationUuid", "") == current_org_uuid),
+                    None,
+                )
+                if account_num is None:
+                    raise ConfigError(
+                        f"Active account {current_email} is no longer managed"
+                    )
+                matched_org_name = seq["accounts"][account_num].get(
+                    "organizationName", "",
+                )
                 current_creds = self._write_verified_live_account_credentials(
                     account_num,
                     current_email,
@@ -1145,8 +1151,6 @@ class ClaudeAccountSwitcher:
                     assume_locked=True,
                 )
                 self._write_account_config(account_num, current_email, current_config)
-
-                seq = self._get_sequence_data() or seq
                 seq["activeAccountNumber"] = int(account_num)
                 seq["lastUpdated"] = get_timestamp()
                 self._write_json(self.sequence_file, seq)
