@@ -203,6 +203,50 @@ class TestSelectiveExport:
 # ---------------------------------------------------------------------------
 
 
+class TestImportSizeCap:
+    def test_oversize_import_file_is_rejected(self, temp_home: Path):
+        from unittest.mock import patch
+
+        from claude_swap.exceptions import TransferError
+
+        dst = _linux_switcher(temp_home)
+        big = temp_home / "big.cswap"
+        big.write_text("x" * 4096, encoding="utf-8")
+        with patch("claude_swap.transfer._MAX_IMPORT_BYTES", 1024):
+            with pytest.raises(TransferError, match="exceeds the"):
+                import_accounts(dst, str(big))
+
+
+class TestImportLocking:
+    def test_import_holds_cross_process_lock(self, temp_home: Path):
+        # import_accounts does many sequence.json read-modify-writes; they must
+        # run under the same FileLock _perform_switch uses so a concurrent
+        # auto-switch can't clobber the imported sequence.
+        src = _linux_switcher(temp_home)
+        _seed_account(src, 1, "alice@example.com", "org-a")
+        out = temp_home / "b.cswap"
+        export_accounts(src, str(out))
+
+        from claude_swap.locking import FileLock as RealFileLock
+
+        calls = {"acquired": 0}
+
+        class SpyLock(RealFileLock):
+            def __enter__(self):
+                calls["acquired"] += 1
+                return super().__enter__()
+
+        dst_home = temp_home.parent / "dst_lock"
+        dst_home.mkdir()
+        with patch("pathlib.Path.home", return_value=dst_home), \
+             patch.dict(os.environ, {"HOME": str(dst_home)}), \
+             patch("claude_swap.transfer.FileLock", SpyLock):
+            dst = _linux_switcher(dst_home)
+            import_accounts(dst, str(out))
+
+        assert calls["acquired"] >= 1
+
+
 class TestConflictPolicy:
     def test_skip_when_account_exists_without_force(self, temp_home: Path, capsys):
         src = _linux_switcher(temp_home)
@@ -429,15 +473,16 @@ class TestValidation:
             import_accounts(s, str(f))
 
     def test_credentials_garbage_string_rejected(self, temp_home: Path):
-        # A non-key string credential is interpreted as an API-key account and
-        # rejected because it isn't a valid sk-ant-api… key.
+        # A bare string that is not an sk-ant-api… key is treated as OAuth and
+        # rejected because OAuth credentials must be a JSON object (fork no longer
+        # interprets arbitrary strings as API-key accounts).
         s = _linux_switcher(temp_home)
         env = self._make_envelope()
         env["accounts"][0]["credentials"] = "a string"
         f = temp_home / "c.cswap"
         f.write_text(json.dumps(env))
 
-        with pytest.raises(TransferError, match="must be a raw sk-ant-api"):
+        with pytest.raises(TransferError, match="must be a JSON object"):
             import_accounts(s, str(f))
 
     def test_credentials_non_object_non_string_rejected(self, temp_home: Path):
@@ -671,6 +716,121 @@ class TestValidateAllBeforeWrite:
         f.write_text(json.dumps(env))
         with pytest.raises(TransferError, match="duplicate account"):
             import_accounts(s, str(f))
+
+    def test_import_write_failure_rolls_back_and_surfaces_error(
+        self, temp_home: Path, capsys
+    ):
+        env = {
+            "version": 1,
+            "exportedAt": "2026-01-01T00:00:00Z",
+            "exportedFrom": "linux",
+            "swapVersion": "0.0.0",
+            "encrypted": False,
+            "activeAccountNumber": 1,
+            "accounts": [
+                {
+                    "number": 1,
+                    "email": "one@example.com",
+                    "uuid": "u1",
+                    "organizationUuid": "",
+                    "organizationName": "",
+                    "added": "2024-01-01T00:00:00Z",
+                    "credentials": {**SAMPLE_CREDS, "_marker": "one@example.com"},
+                    "config": {
+                        "oauthAccount": {
+                            "emailAddress": "one@example.com",
+                            "accountUuid": "acct-1",
+                            "organizationUuid": "",
+                            "organizationName": "",
+                        }
+                    },
+                },
+                {
+                    "number": 2,
+                    "email": "two@example.com",
+                    "uuid": "u2",
+                    "organizationUuid": "",
+                    "organizationName": "",
+                    "added": "2024-01-01T00:00:00Z",
+                    "credentials": {**SAMPLE_CREDS, "_marker": "two@example.com"},
+                    "config": {
+                        "oauthAccount": {
+                            "emailAddress": "two@example.com",
+                            "accountUuid": "acct-2",
+                            "organizationUuid": "",
+                            "organizationName": "",
+                        }
+                    },
+                },
+                {
+                    "number": 3,
+                    "email": "three@example.com",
+                    "uuid": "u3",
+                    "organizationUuid": "",
+                    "organizationName": "",
+                    "added": "2024-01-01T00:00:00Z",
+                    "credentials": {**SAMPLE_CREDS, "_marker": "three@example.com"},
+                    "config": {
+                        "oauthAccount": {
+                            "emailAddress": "three@example.com",
+                            "accountUuid": "acct-3",
+                            "organizationUuid": "",
+                            "organizationName": "",
+                        }
+                    },
+                },
+                {
+                    "number": 4,
+                    "email": "four@example.com",
+                    "uuid": "u4",
+                    "organizationUuid": "",
+                    "organizationName": "",
+                    "added": "2024-01-01T00:00:00Z",
+                    "credentials": {**SAMPLE_CREDS, "_marker": "four@example.com"},
+                    "config": {
+                        "oauthAccount": {
+                            "emailAddress": "four@example.com",
+                            "accountUuid": "acct-4",
+                            "organizationUuid": "",
+                            "organizationName": "",
+                        }
+                    },
+                },
+            ],
+        }
+        f = temp_home / "multi.cswap"
+        f.write_text(json.dumps(env))
+        s = _linux_switcher(temp_home)
+        original_write = s._write_account_credentials
+        write_calls: list[str] = []
+
+        def fail_on_third(num: str, email: str, creds: str) -> None:
+            write_calls.append(email)
+            if email == "three@example.com":
+                raise OSError("simulated write failure")
+            original_write(num, email, creds)
+
+        with patch.object(
+            s, "_write_account_credentials", side_effect=fail_on_third
+        ):
+            with pytest.raises(TransferError) as exc_info:
+                import_accounts(s, str(f))
+
+        err = str(exc_info.value)
+        assert "import failed on three@example.com" in err
+        assert "rolled back 2 account(s)" in err
+
+        captured = capsys.readouterr()
+        assert "Done:" not in captured.err
+        assert "Imported one@example.com" in captured.err
+        assert "Imported two@example.com" in captured.err
+
+        seq = s._get_sequence_data()
+        assert seq is not None
+        assert seq.get("accounts", {}) == {}
+        assert not s._read_account_credentials("1", "one@example.com")
+        assert not s._read_account_credentials("2", "two@example.com")
+        assert not s._read_account_credentials("3", "three@example.com")
 
 
 # ---------------------------------------------------------------------------

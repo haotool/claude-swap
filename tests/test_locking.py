@@ -68,22 +68,19 @@ class TestFileLock:
         lock2.release()
 
     def test_context_manager_raises_on_timeout(self, tmp_path: Path):
-        """Test that context manager raises LockError on timeout."""
+        """Context manager raises LockError when the lock is genuinely held."""
         lock_path = tmp_path / ".lock"
 
-        # Hold the lock
         holder = FileLock(lock_path)
         holder.acquire(timeout=1.0)
-
-        # Try to acquire with context manager
-        with pytest.raises(LockError):
-            # Create a lock with very short timeout
-            lock = FileLock(lock_path)
-            lock.acquire = lambda timeout=10.0: False  # Force failure
-            with lock:
-                pass
-
-        holder.release()
+        try:
+            # Real contention: a second lock with a short timeout must give up
+            # and raise (no mocking of acquire — exercises the timeout poll).
+            with pytest.raises(LockError):
+                with FileLock(lock_path, timeout=0.1):
+                    pass
+        finally:
+            holder.release()
 
     def test_double_release_safe(self, tmp_path: Path):
         """Test that releasing twice doesn't raise."""

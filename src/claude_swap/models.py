@@ -2,17 +2,39 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
+
+SwitchPlanOutcome = Literal["no_trusted_signal", "already_optimal", "chosen"]
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
+
+
+_WSL_PROC_PATHS = (Path("/proc/version"), Path("/proc/sys/kernel/osrelease"))
+
+
+def is_wsl() -> bool:
+    """Return True when running under WSL (Microsoft kernel/userspace).
+
+    Single source of truth for WSL detection: probes the Microsoft marker in
+    /proc, falling back to the WSL_DISTRO_NAME env var. Used by both
+    ``Platform.detect`` and the systemd service backend.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    for path in _WSL_PROC_PATHS:  # type: ignore[unreachable]
+        try:
+            if "microsoft" in path.read_text(encoding="utf-8", errors="replace").lower():
+                return True
+        except OSError:
+            continue
+    return bool(os.environ.get("WSL_DISTRO_NAME"))
 
 
 class Platform(Enum):
@@ -37,10 +59,11 @@ class Platform(Enum):
         elif sys.platform == "win32":
             return cls.WINDOWS
         elif sys.platform.startswith("linux"):
-            if os.environ.get("WSL_DISTRO_NAME"):
+            if is_wsl():
                 return cls.WSL
             return cls.LINUX
-        return cls.UNKNOWN
+        else:
+            return cls.UNKNOWN
 
 
 @dataclass
@@ -66,7 +89,7 @@ class AccountInfo:
         return f"{self.email} [{tag}]"
 
     @classmethod
-    def from_dict(cls, number: int, data: dict) -> AccountInfo:
+    def from_dict(cls, number: int, data: dict[str, Any]) -> AccountInfo:
         """Create AccountInfo from dictionary."""
         return cls(
             email=data.get("email", ""),
@@ -77,7 +100,7 @@ class AccountInfo:
             number=number,
         )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
             "email": self.email,
@@ -136,3 +159,87 @@ class SwitchTransaction:
 def get_timestamp() -> str:
     """Get current UTC timestamp in ISO format."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass(frozen=True)
+class AutoSwitchDecisionContext:
+    """Single poll-cycle snapshot for automated target planning."""
+
+    threshold: int
+    active_usage_pct: float | None
+    live_active_slot: str | None
+    sequence_active_slot: str | None
+    usage_by_slot: dict[str, object]
+
+
+@dataclass(frozen=True)
+class SwitchPlanResult:
+    """Explicit automated target-planning outcome."""
+
+    outcome: SwitchPlanOutcome
+    target: str | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ManualSwitchIntent:
+    """Interactive manual rotation (round-robin)."""
+
+    quiet: ClassVar[bool] = False
+    force_refresh: ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class InteractiveAutoSwitchIntent:
+    """TUI monitor: user-visible automated switch."""
+
+    decision: AutoSwitchDecisionContext
+
+    quiet: ClassVar[bool] = False
+    force_refresh: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class BackgroundAutoSwitchIntent:
+    """CLI / launchd monitor: quiet automated switch."""
+
+    decision: AutoSwitchDecisionContext
+
+    quiet: ClassVar[bool] = True
+    force_refresh: ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class CliSwitchIntent:
+    """CLI ``--switch`` path (strategy / JSON)."""
+
+    quiet: bool = False
+    force_refresh: bool = False
+
+
+SwitchIntent = (
+    ManualSwitchIntent
+    | InteractiveAutoSwitchIntent
+    | BackgroundAutoSwitchIntent
+    | CliSwitchIntent
+)
+
+
+class SwitchPreconditionKind(Enum):
+    """Outcome of shared switch() / _switch_cli() preamble classification."""
+
+    FRESH_MACHINE = auto()
+    UNMANAGED = auto()
+    SINGLE_ACCOUNT = auto()
+    READY = auto()
+
+
+@dataclass(frozen=True)
+class SwitchPreconditions:
+    """Neutral switch preamble snapshot — classification only, no actions."""
+
+    kind: SwitchPreconditionKind
+    identity: tuple[str, str] | None = None
+    data: dict[str, Any] | None = None
+    sequence: list[Any] | None = None
+    current_slot: str | None = None

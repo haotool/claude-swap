@@ -11,6 +11,7 @@ import contextlib
 import os
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 # ANSI escape codes
@@ -27,19 +28,19 @@ _colors_enabled: bool | None = None  # lazy-initialized
 
 def _enable_windows_vt() -> bool:
     """Enable VT processing on Windows console."""
-    if sys.platform != "win32":
-        return True
-    try:
-        import ctypes
+    if sys.platform == "win32":
+        try:
+            import ctypes
 
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
-        mode = ctypes.c_ulong()
-        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
-        kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-        return True
-    except Exception:
-        return False
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_ulong()
+            kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            return True
+        except Exception:
+            return False
+    return True
 
 
 def _detect_color_support() -> bool:
@@ -71,7 +72,7 @@ def colors_enabled() -> bool:
 
 
 @contextlib.contextmanager
-def force_color():
+def force_color() -> Iterator[None]:
     """Temporarily force colored output on, restoring the prior cache after.
 
     Used by the TUI when capturing CLI output into a buffer: capture redirects
@@ -174,7 +175,11 @@ def abbreviate_path(path: str) -> str:
 
 
 def format_age(started_at_ms: int) -> str:
-    """Format a millisecond epoch timestamp as a human-readable age."""
+    """Format a millisecond epoch timestamp as a human-readable age.
+
+    Retained for parity with upstream's printer surface; the fork's current
+    callers were refactored away but the helper stays to minimise divergence.
+    """
     elapsed = int(time.time()) - (started_at_ms // 1000)
     if elapsed < 60:
         return "just now"

@@ -450,10 +450,14 @@ class TestMacosKeyringToSecurity:
         _seed_sequence(switcher, {})
         assert migrations.migrate_macos_keyring_to_security(switcher) is True
 
-    def test_relocates_keyring_creds_to_security(self, temp_home):
+    def test_relocates_keyring_creds_to_security(
+        self, temp_home, block_real_keychain
+    ):
         switcher = _make_macos_switcher(temp_home)
         _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
-        fake = FakeKeyring({(KEYRING_SERVICE, "account-1-a@example.com"): "sekret"})
+        username = "account-1-a@example.com"
+        block_real_keychain.set_password(KEYRING_SERVICE, username, "sekret")
+        fake = FakeKeyring({(KEYRING_SERVICE, username): "sekret"})
 
         with _patch_keyring(fake):
             assert migrations.migrate_macos_keyring_to_security(switcher) is True
@@ -461,7 +465,26 @@ class TestMacosKeyringToSecurity:
         # Now readable from the new (security) service…
         assert switcher._read_account_credentials("1", "a@example.com") == "sekret"
         # …and the old keyring entry was deleted only after a verified write.
-        assert (KEYRING_SERVICE, "account-1-a@example.com") in fake.deleted
+        assert (KEYRING_SERVICE, username) in fake.deleted
+
+    def test_prefers_security_read_even_when_keyring_is_importable(
+        self, temp_home, block_real_keychain
+    ):
+        switcher = _make_macos_switcher(temp_home)
+        _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
+        username = "account-1-a@example.com"
+        # Legacy item exists in the real source of truth for this migration:
+        # the macOS Keychain accessed via the security CLI wrapper.
+        block_real_keychain.set_password(KEYRING_SERVICE, username, "sekret")
+        fake = FakeKeyring()
+
+        with _patch_keyring(fake):
+            assert migrations.migrate_macos_keyring_to_security(switcher) is True
+
+        assert switcher._read_account_credentials("1", "a@example.com") == "sekret"
+        # Hotfix invariant: migration must not decrypt through keyring's
+        # in-process Security.framework path when the security CLI path works.
+        assert fake.get_calls == []
 
     def test_denied_legacy_delete_warns_but_completes(
         self, temp_home, block_real_keychain
@@ -514,10 +537,14 @@ class TestMacosKeyringToSecurity:
             assert migrations.migrate_macos_keyring_to_security(switcher) is True
         assert switcher._read_account_credentials("1", "a@example.com") == ""
 
-    def test_read_back_mismatch_keeps_keyring_and_raises(self, temp_home):
+    def test_read_back_mismatch_keeps_keyring_and_raises(
+        self, temp_home, block_real_keychain
+    ):
         switcher = _make_macos_switcher(temp_home)
         _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
-        fake = FakeKeyring({(KEYRING_SERVICE, "account-1-a@example.com"): "sekret"})
+        username = "account-1-a@example.com"
+        block_real_keychain.set_password(KEYRING_SERVICE, username, "sekret")
+        fake = FakeKeyring({(KEYRING_SERVICE, username): "sekret"})
 
         # Force the security read-back to disagree with what was written. The
         # migration reads the security service via the keychain-only helper
@@ -529,7 +556,7 @@ class TestMacosKeyringToSecurity:
                 migrations.migrate_macos_keyring_to_security(switcher)
 
         # Keyring entry left intact (not deleted) for the retry.
-        assert (KEYRING_SERVICE, "account-1-a@example.com") not in fake.deleted
+        assert (KEYRING_SERVICE, username) not in fake.deleted
 
     def test_fallback_to_security_when_keyring_unavailable(
         self, temp_home, block_real_keychain
@@ -553,19 +580,39 @@ class TestMacosKeyringToSecurity:
     def test_locked_keyring_does_not_fall_back(self, temp_home, block_real_keychain):
         switcher = _make_macos_switcher(temp_home)
         _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
-        # The same item exists in the (security) Keychain store…
-        block_real_keychain.data[(KEYRING_SERVICE, "account-1-a@example.com")] = "sekret"
-        # …but keyring raises a *runtime* error (locked/denied), which security
-        # would hit identically → must be a failure, not a security fallback.
+        username = "account-1-a@example.com"
+        # Legacy item lives in the Keychain (same store the security CLI reads).
+        block_real_keychain.data[(KEYRING_SERVICE, username)] = "sekret"
+        # Upstream read via keyring and raised MigrationIncomplete on lock/deny.
+        # Fork reads legacy items via security directly; keyring is delete-only,
+        # so a locked keyring must not block migration or divert to .enc fallback.
         fake = FakeKeyring()
-        fake.raise_get_for.add("account-1-a@example.com")
+        fake.raise_get_for.add(username)
 
         with _patch_keyring(fake):
-            with pytest.raises(MigrationIncomplete):
-                migrations.migrate_macos_keyring_to_security(switcher)
+            assert migrations.migrate_macos_keyring_to_security(switcher) is True
 
-        # No fallback read happened → nothing landed in the new service.
-        assert switcher._read_account_credentials("1", "a@example.com") == ""
+        assert switcher._read_account_credentials("1", "a@example.com") == "sekret"
+        assert fake.get_calls == []
+        assert not (switcher.credentials_dir / ".creds-1-a@example.com.enc").exists()
+
+    def test_keyring_read_errors_no_longer_block_migration(
+        self, temp_home, block_real_keychain
+    ):
+        switcher = _make_macos_switcher(temp_home)
+        _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
+        username = "account-1-a@example.com"
+        # Legacy source of truth is the security-backed Keychain item.
+        block_real_keychain.data[(KEYRING_SERVICE, username)] = "sekret"
+        # Even if keyring would have errored, migration should no longer touch it.
+        fake = FakeKeyring()
+        fake.raise_get_for.add(username)
+
+        with _patch_keyring(fake):
+            assert migrations.migrate_macos_keyring_to_security(switcher) is True
+
+        assert switcher._read_account_credentials("1", "a@example.com") == "sekret"
+        assert fake.get_calls == []
 
     def test_security_keychain_unusable_defers_and_writes_no_enc(self, temp_home):
         # The destination (security-service) Keychain is unusable: the keychain-only

@@ -7,7 +7,9 @@ import logging
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, cast
 
 from claude_swap.printer import warning as print_warning
 
@@ -19,16 +21,79 @@ OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _logger = logging.getLogger("claude-swap")
 
 
+@dataclass(frozen=True)
+class UsageFetchError:
+    """Classified usage-fetch failure for user-visible diagnostics."""
+
+    reason: str
+    status_code: int | None = None
+    message: str = ""
+    retry_after: str | None = None
+
+
+def parse_retry_after_seconds(value: str | None) -> int | None:
+    """Parse a ``Retry-After`` header value into a positive number of seconds.
+
+    Anthropic sends the delta-seconds form (e.g. ``"60"``); the HTTP-date form
+    is not honoured here. Returns ``None`` for absent, non-numeric, or
+    non-positive values so callers fall back to their own backoff.
+    """
+    if not value:
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
+def describe_usage_error(error: UsageFetchError) -> str:
+    """Return a concise user-facing description for a usage failure."""
+    if error.reason == "rate_limited":
+        suffix = f", retry after {error.retry_after}" if error.retry_after else ""
+        return f"usage unavailable (rate limited{suffix})"
+    if error.reason == "unauthorized":
+        return "usage unavailable (unauthorized)"
+    if error.reason == "network_error":
+        return "usage unavailable (network error)"
+    return "usage unavailable"
+
+
+def _usage_error_from_http_error(error: urllib.error.HTTPError) -> UsageFetchError:
+    retry_after = error.headers.get("Retry-After") if error.headers else None
+    try:
+        body = error.read().decode(errors="replace")
+        payload = json.loads(body) if body else {}
+        message = payload.get("error", {}).get("message", "")
+    except Exception:
+        message = ""
+
+    if error.code == 429:
+        reason = "rate_limited"
+    elif error.code == 401:
+        reason = "unauthorized"
+    else:
+        reason = "http_error"
+
+    return UsageFetchError(
+        reason=reason,
+        status_code=error.code,
+        message=message,
+        retry_after=retry_after,
+    )
+
+
 def extract_access_token(credentials: str) -> str | None:
     """Extract the OAuth access token from a credentials JSON string."""
     try:
         data = json.loads(credentials)
-        return data.get("claudeAiOauth", {}).get("accessToken")
+        token = data.get("claudeAiOauth", {}).get("accessToken")
+        return token if isinstance(token, str) else None
     except (json.JSONDecodeError, AttributeError):
         return None
 
 
-def extract_oauth_data(credentials: str) -> dict | None:
+def extract_oauth_data(credentials: str) -> dict[str, Any] | None:
     """Extract the Claude AI OAuth payload from a credentials JSON string."""
     try:
         data = json.loads(credentials)
@@ -88,8 +153,8 @@ def refresh_oauth_credentials(credentials: str) -> str | None:
         data["claudeAiOauth"] = oauth
         return json.dumps(data)
     except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
-        _logger.debug("OAuth refresh failed: %r, body: %s", e, body[:500])
+        error_body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
+        _logger.debug("OAuth refresh failed: %r, body: %s", e, error_body[:500])
         return None
     except Exception as e:
         _logger.debug("OAuth refresh failed: %r", e)
@@ -144,7 +209,7 @@ def format_reset(resets_at: str) -> tuple[str, str]:
     return countdown, time_str
 
 
-def request_usage_data(access_token: str) -> dict:
+def request_usage_data(access_token: str) -> dict[str, Any]:
     """Request raw utilization data from the Anthropic usage API."""
     url = "https://api.anthropic.com/api/oauth/usage"
     headers = {
@@ -154,15 +219,16 @@ def request_usage_data(access_token: str) -> dict:
     }
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
-        return json.loads(resp.read().decode())
+        payload = json.loads(resp.read().decode())
+        return cast(dict[str, Any], payload)
 
 
 
-def build_usage_result(data: dict) -> dict | None:
+def build_usage_result(data: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize raw usage API data into the structure used by the CLI."""
     _logger.debug("Usage API response: %s", json.dumps(data, indent=2))
 
-    result = {}
+    result: dict[str, Any] = {}
 
     h5 = data.get("five_hour")
     if h5:
@@ -191,7 +257,7 @@ def build_usage_result(data: dict) -> dict | None:
         utilization = eu.get("utilization")
         if used_credits is not None and monthly_limit is not None and utilization is not None:
             try:
-                spend_entry: dict = {
+                spend_entry: dict[str, Any] = {
                     "used": float(used_credits) / 100,
                     "limit": float(monthly_limit) / 100,
                     "pct": float(utilization),
@@ -207,7 +273,7 @@ def build_usage_result(data: dict) -> dict | None:
     return result if result else None
 
 
-def account_headroom(usage: dict | None) -> float | None:
+def account_headroom(usage: dict[str, Any] | None) -> float | None:
     """Remaining percentage before this account hits a rate-limit window.
 
     Considers only the 5-hour and 7-day utilization windows — the two that
@@ -217,19 +283,12 @@ def account_headroom(usage: dict | None) -> float | None:
     or over a limit. Returns ``None`` when usage is unavailable or carries no
     window data, which callers treat as "unknown" (never auto-skipped).
     """
-    if not isinstance(usage, dict):
-        return None
-    pcts = [
-        window["pct"]
-        for window in (usage.get("five_hour"), usage.get("seven_day"))
-        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float))
-    ]
-    if not pcts:
-        return None
-    return 100.0 - max(pcts)
+    from claude_swap import usage_policy
+
+    return usage_policy.headroom(usage)
 
 
-def fetch_usage(access_token: str) -> dict | None:
+def fetch_usage(access_token: str) -> dict[str, Any] | None:
     """Fetch 5-hour and 7-day utilization from the Anthropic usage API."""
     try:
         data = request_usage_data(access_token)
@@ -245,13 +304,17 @@ def fetch_usage_for_account(
     credentials: str,
     is_active: bool,
     persist_credentials: Callable[[str, str, str], None] | None = None,
-) -> dict | None:
+    *,
+    persist_mandatory: bool = False,
+) -> dict[str, Any] | UsageFetchError | None:
     """Fetch usage for an account, refreshing expired tokens for inactive accounts only.
 
     Active accounts are never refreshed — Claude Code owns those credentials.
     """
     oauth = extract_oauth_data(credentials)
-    access_token = oauth.get("accessToken") if oauth else None
+    if not oauth:
+        return None
+    access_token = oauth.get("accessToken")
     if not access_token:
         return None
 
@@ -265,7 +328,13 @@ def fetch_usage_for_account(
         refreshed = refresh_oauth_credentials(working_credentials)
         if refreshed:
             working_credentials = refreshed
-            _persist(persist_credentials, account_num, email, working_credentials)
+            _persist(
+                persist_credentials,
+                account_num,
+                email,
+                working_credentials,
+                persist_mandatory=persist_mandatory,
+            )
             oauth = extract_oauth_data(working_credentials) or oauth
             access_token = oauth.get("accessToken") or access_token
 
@@ -273,22 +342,37 @@ def fetch_usage_for_account(
         data = request_usage_data(access_token)
         return build_usage_result(data)
     except urllib.error.HTTPError as e:
-        _logger.debug("Usage fetch failed: %r", e)
+        usage_error = _usage_error_from_http_error(e)
+        _logger.debug(
+            "Usage fetch failed: account=%s email=%s active=%s reason=%s status=%s message=%r",
+            account_num,
+            email,
+            is_active,
+            usage_error.reason,
+            usage_error.status_code,
+            usage_error.message,
+        )
         if (
             e.code != 401
             or is_active
             or not oauth
             or not oauth.get("refreshToken")
         ):
-            return None
+            return usage_error
 
         # Retry once after refreshing on 401 (inactive accounts only).
         refreshed = refresh_oauth_credentials(working_credentials)
         if not refreshed:
-            return None
+            return usage_error
 
         working_credentials = refreshed
-        _persist(persist_credentials, account_num, email, working_credentials)
+        _persist(
+            persist_credentials,
+            account_num,
+            email,
+            working_credentials,
+            persist_mandatory=persist_mandatory,
+        )
         refreshed_oauth = extract_oauth_data(working_credentials)
         new_token = refreshed_oauth.get("accessToken") if refreshed_oauth else None
         if not new_token:
@@ -297,12 +381,36 @@ def fetch_usage_for_account(
         try:
             data = request_usage_data(new_token)
             return build_usage_result(data)
+        except urllib.error.HTTPError as retry_error:
+            usage_error = _usage_error_from_http_error(retry_error)
+            _logger.debug(
+                "Usage fetch failed after refresh: account=%s email=%s active=%s reason=%s status=%s message=%r",
+                account_num,
+                email,
+                is_active,
+                usage_error.reason,
+                usage_error.status_code,
+                usage_error.message,
+            )
+            return usage_error
         except Exception as retry_error:
-            _logger.debug("Usage fetch failed after refresh: %r", retry_error)
-            return None
+            _logger.debug(
+                "Usage fetch failed after refresh: account=%s email=%s active=%s error=%r",
+                account_num,
+                email,
+                is_active,
+                retry_error,
+            )
+            return UsageFetchError(reason="network_error", message=str(retry_error))
     except Exception as e:
-        _logger.debug("Usage fetch failed: %r", e)
-        return None
+        _logger.debug(
+            "Usage fetch failed: account=%s email=%s active=%s error=%r",
+            account_num,
+            email,
+            is_active,
+            e,
+        )
+        return UsageFetchError(reason="network_error", message=str(e))
 
 
 def _persist(
@@ -310,8 +418,10 @@ def _persist(
     account_num: str,
     email: str,
     credentials: str,
+    *,
+    persist_mandatory: bool = False,
 ) -> None:
-    """Call the persist callback, warning loudly on failure."""
+    """Call the persist callback, warning loudly on best-effort failure."""
     if not callback:
         return
     try:
@@ -329,3 +439,5 @@ def _persist(
             f"Warning: failed to save refreshed token for account {account_num} ({email}). "
             f"If the next refresh fails, re-run `cswap --add-account` after logging in."
         )
+        if persist_mandatory:
+            raise

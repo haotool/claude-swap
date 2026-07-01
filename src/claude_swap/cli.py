@@ -6,12 +6,13 @@ import argparse
 import json
 import os
 import sys
+from typing import Any, cast
 
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
-from claude_swap.printer import dimmed, error, muted
-from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.printer import bolded, dimmed, error, muted
+from claude_swap.switcher import ClaudeAccountSwitcher, auto_switch_display
 
 
 def _run_command(argv: list[str]) -> None:
@@ -90,12 +91,142 @@ Examples:
         sys.exit(130)
 
 
-def main() -> None:
-    """Main entry point for the CLI."""
-    if len(sys.argv) > 1 and sys.argv[1] == "run":
-        _run_command(sys.argv[2:])
-        return  # only reachable in tests where exec/exit is mocked
+def _service_command(argv: list[str]) -> None:
+    """Handle `cswap service install|uninstall|status|logs`.
 
+    Pre-dispatched before the main parser is built, mirroring `_run_command`:
+    a positional subcommand can't coexist with main()'s required mutually-
+    exclusive flag group, and this keeps the existing parser untouched.
+    Limitation: `service` must be the first argument (`cswap --debug service
+    status` is not supported; use `cswap service status --debug`).
+    """
+    parser = argparse.ArgumentParser(
+        prog="cswap service",
+        description=(
+            "Manage the background auto-switch monitor (launchd on macOS, "
+            "systemd --user on Linux/WSL, Task Scheduler on Windows). "
+            "Runs `cswap --monitor` at login and restarts it on failure."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap service install
+  cswap service status
+  cswap service logs
+  cswap service uninstall
+        """,
+    )
+    parser.add_argument(
+        "action",
+        choices=("install", "uninstall", "status", "logs"),
+        help="install | uninstall | status | logs",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        from claude_swap import service
+
+        action = {
+            "install": service.install,
+            "uninstall": service.uninstall,
+            "status": service.status,
+            "logs": service.logs,
+        }[args.action]
+        sys.exit(action(switcher))
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}")
+        sys.exit(130)
+
+
+def _print_auto_switch_config(config: dict[str, Any]) -> None:
+    _enabled, threshold, on_off, _state = auto_switch_display(config)
+    print(f"{bolded('Auto-switch:')} {on_off} {muted(f'(threshold {threshold}%)')}")
+
+
+def _auto_switch_command(argv: list[str]) -> None:
+    """Handle `cswap auto-switch status|enable|disable|set-threshold N`."""
+    parser = argparse.ArgumentParser(
+        prog="cswap auto-switch",
+        description="Manage persisted auto-switch configuration.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap auto-switch status
+  cswap auto-switch enable
+  cswap auto-switch disable
+  cswap auto-switch set-threshold 95
+        """,
+    )
+    parser.add_argument(
+        "action",
+        choices=("status", "enable", "disable", "set-threshold"),
+        help="status | enable | disable | set-threshold",
+    )
+    parser.add_argument(
+        "threshold",
+        nargs="?",
+        type=int,
+        metavar="NUM",
+        help="Threshold percentage (required for set-threshold)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging",
+    )
+    args = parser.parse_args(argv)
+
+    if args.action == "set-threshold" and args.threshold is None:
+        parser.error("set-threshold requires NUM")
+    if args.action != "set-threshold" and args.threshold is not None:
+        parser.error("threshold is only accepted with set-threshold")
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+
+        if sys.platform != "win32":
+            if os.geteuid() == 0 and not switcher._is_running_in_container():
+                error("Error: Do not run this script as root (unless running in a container)")
+                sys.exit(1)
+
+        if args.action == "status":
+            config = switcher.get_auto_switch_config()
+        elif args.action == "enable":
+            config = switcher.set_auto_switch_config(enabled=True)
+        elif args.action == "disable":
+            config = switcher.set_auto_switch_config(enabled=False)
+        else:
+            config = switcher.set_auto_switch_config(threshold=args.threshold)
+
+        _print_auto_switch_config(config)
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}")
+        sys.exit(130)
+
+
+# Map subcommand -> handler name; resolved via globals() at call time so tests
+# can monkeypatch the module-level handler (e.g. cli._service_command).
+_SUBCOMMANDS = {
+    "run": "_run_command",
+    "service": "_service_command",
+    "auto-switch": "_auto_switch_command",
+}
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the top-level flag parser (the bare-flag, non-subcommand UI)."""
     parser = argparse.ArgumentParser(
         description="Multi-Account Switcher for Claude Code",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -108,6 +239,7 @@ Examples:
   %(prog)s --add-token sk-ant-oat01-... --email me@example.com
   %(prog)s --add-token - --slot 3
   %(prog)s --list
+  %(prog)s --health
   %(prog)s --switch
   %(prog)s --switch --strategy best             # switch to the account with most quota left
   %(prog)s --switch --strategy next-available   # rotate, skipping rate-limited accounts
@@ -121,6 +253,8 @@ Examples:
   %(prog)s --export backup.cswap
   %(prog)s --import backup.cswap
   %(prog)s --tui                              # interactive arrow-key menu
+  %(prog)s --monitor                          # foreground auto-switch monitor
+  %(prog)s service install                    # background auto-switch monitor
   %(prog)s --upgrade                          # self-upgrade to latest version
         """,
     )
@@ -208,6 +342,11 @@ Examples:
         help="List all managed accounts",
     )
     group.add_argument(
+        "--health",
+        action="store_true",
+        help="Show account health, usage, and OAuth token status",
+    )
+    group.add_argument(
         "--switch",
         action="store_true",
         help="Rotate to next account in sequence",
@@ -244,6 +383,11 @@ Examples:
         help="Launch interactive arrow-key menu (single-level)",
     )
     group.add_argument(
+        "--monitor",
+        action="store_true",
+        help="Run the auto-switch monitor in the foreground",
+    )
+    group.add_argument(
         "--upgrade",
         action="store_true",
         help="Upgrade claude-swap to the latest version on PyPI",
@@ -259,39 +403,121 @@ Examples:
             "stdin or omit the value to be prompted securely."
         ),
     )
+    return parser
 
-    args = parser.parse_args()
 
-    if args.token_status and not args.list:
-        parser.error("--token-status can only be used with --list")
-
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Enforce cross-flag constraints argparse cannot express directly."""
+    if args.token_status and not (args.list or args.health):
+        parser.error("--token-status can only be used with --list or --health")
     if args.json and not (args.list or args.status or args.switch or args.switch_to):
         parser.error(
             "--json can only be used with --list, --status, --switch, or --switch-to"
         )
-
     if args.json and args.token_status:
-        # Token status is not part of the JSON v1 schema; reject rather than
-        # silently ignore it (a future additive field can add it).
         parser.error("--token-status cannot be combined with --json")
-
     if args.strategy is not None and not args.switch:
         parser.error("--strategy can only be used with --switch")
-
     if args.slot is not None and not (args.add_account or args.add_token is not None):
         parser.error("--slot can only be used with --add-account or --add-token")
-
     if args.email is not None and args.add_token is None:
         parser.error("--email can only be used with --add-token")
-
     if args.account is not None and not args.export:
         parser.error("--account can only be used with --export")
-
     if args.force and not args.import_:
         parser.error("--force can only be used with --import")
-
     if args.full and not args.export:
         parser.error("--full can only be used with --export")
+
+
+def _cmd_export(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    from claude_swap.transfer import export_accounts
+
+    export_accounts(switcher, args.export, account=args.account, full=args.full)
+
+
+def _cmd_import(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    from claude_swap.transfer import import_accounts
+
+    import_accounts(switcher, args.import_, force=args.force)
+
+
+def _cmd_tui(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    try:
+        from claude_swap.tui import run as tui_run
+    except ImportError:
+        error(
+            "TUI mode requires the 'curses' module. "
+            "On Windows, install with: pip install windows-curses"
+        )
+        sys.exit(1)
+    sys.exit(tui_run(switcher))
+
+
+def _cmd_monitor(switcher: ClaudeAccountSwitcher, args: argparse.Namespace) -> None:
+    from claude_swap.monitor import run_cli_monitor
+
+    sys.exit(run_cli_monitor(switcher))
+
+
+def _dispatch_action(
+    switcher: ClaudeAccountSwitcher, args: argparse.Namespace
+) -> dict[str, Any] | None:
+    """Run the single selected mutually-exclusive action. Returns JSON payload when applicable."""
+    if args.add_account:
+        switcher.add_account(slot=args.slot)
+    elif args.add_token is not None:
+        switcher.add_account_from_token(
+            token=args.add_token, email=args.email, slot=args.slot
+        )
+    elif args.remove_account:
+        switcher.remove_account(args.remove_account)
+    elif args.list:
+        if args.json:
+            return switcher.list_accounts(
+                show_token_status=args.token_status, json_output=True
+            )
+        switcher.list_accounts(show_token_status=args.token_status)
+    elif args.health:
+        switcher.list_accounts(show_token_status=True, show_health=True)
+    elif args.switch:
+        if args.json:
+            return cast(
+                dict[str, Any],
+                switcher.switch(strategy=args.strategy, json_output=True),
+            )
+        switcher.switch(strategy=args.strategy)
+    elif args.switch_to:
+        if args.json:
+            return switcher.switch_to(args.switch_to, json_output=True)
+        switcher.switch_to(args.switch_to)
+    elif args.status:
+        if args.json:
+            return switcher.status(json_output=True)
+        switcher.status()
+    elif args.purge:
+        switcher.purge()
+    elif args.export:
+        _cmd_export(switcher, args)
+    elif args.import_:
+        _cmd_import(switcher, args)
+    elif args.tui:
+        _cmd_tui(switcher, args)
+    elif args.monitor:
+        _cmd_monitor(switcher, args)
+    return None
+
+
+def main() -> None:
+    """Main entry point for the CLI."""
+    if len(sys.argv) > 1 and sys.argv[1] in _SUBCOMMANDS:
+        # Subcommands return only in tests where exec/sys.exit is mocked.
+        globals()[_SUBCOMMANDS[sys.argv[1]]](sys.argv[2:])
+        return
+
+    parser = _build_parser()
+    args = parser.parse_args()
+    _validate_args(parser, args)
 
     # Self-upgrade runs before switcher init so we don't touch config/keychain
     # just to upgrade the tool itself.
@@ -308,9 +534,6 @@ Examples:
     # init-time failures (e.g. MigrationError on a backup-dir collision)
     # are presented like every other ClaudeSwitchError: clean stderr line,
     # exit 1, no traceback.
-    # JSON-capable commands return a payload; the CLI is the single point that
-    # serializes it (so no command writes JSON to stdout itself).
-    payload: dict | None = None
     try:
         switcher = ClaudeAccountSwitcher(debug=args.debug)
 
@@ -320,58 +543,14 @@ Examples:
                 error("Error: Do not run this script as root (unless running in a container)")
                 sys.exit(1)
 
-        if args.add_account:
-            switcher.add_account(slot=args.slot)
-        elif args.add_token is not None:
-            switcher.add_account_from_token(
-                token=args.add_token,
-                email=args.email,
-                slot=args.slot,
-            )
-        elif args.remove_account:
-            switcher.remove_account(args.remove_account)
-        elif args.list:
-            payload = switcher.list_accounts(
-                show_token_status=args.token_status,
-                json_output=args.json,
-            )
-        elif args.switch:
-            payload = switcher.switch(strategy=args.strategy, json_output=args.json)
-        elif args.switch_to:
-            payload = switcher.switch_to(args.switch_to, json_output=args.json)
-        elif args.status:
-            payload = switcher.status(json_output=args.json)
-        elif args.purge:
-            switcher.purge()
-        elif args.export:
-            from claude_swap.transfer import export_accounts
-
-            export_accounts(switcher, args.export, account=args.account, full=args.full)
-        elif args.import_:
-            from claude_swap.transfer import import_accounts
-
-            import_accounts(switcher, args.import_, force=args.force)
-        elif args.tui:
-            try:
-                from claude_swap.tui import run as tui_run
-            except ImportError as e:
-                error(
-                    "TUI mode requires the 'curses' module. "
-                    "On Windows, install with: pip install windows-curses"
-                )
-                sys.exit(1)
-            sys.exit(tui_run(switcher))
+        payload = _dispatch_action(switcher, args)
     except ClaudeSwitchError as e:
-        # In JSON mode keep stdout pure JSON: emit the structured error envelope
-        # there (exit 1) instead of a red stderr line.
         if args.json:
             print(json.dumps(error_envelope(e), indent=2))
         else:
             error(f"Error: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
-        # Route the cancellation note to stderr in JSON mode so stdout stays
-        # parseable (the guarantee covers completion / handled errors, not Ctrl-C).
         print(
             f"\n{dimmed('Operation cancelled')}",
             file=sys.stderr if args.json else sys.stdout,

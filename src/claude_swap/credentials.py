@@ -24,7 +24,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Callable, Protocol, TypeVar
 
 from claude_swap import macos_keychain
 from claude_swap.exceptions import CredentialWriteError
@@ -50,6 +50,9 @@ CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # (``getApiKeyFromConfigOrMacOSKeychain``). On non-macOS the managed key instead
 # lives in ``~/.claude.json`` as ``primaryApiKey`` (see below).
 CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE = "Claude Code"
+
+
+_T = TypeVar("_T")
 
 
 def looks_like_api_key(credentials: str | None) -> bool:
@@ -106,7 +109,7 @@ class CredentialStore:
         self._keychain_usable_cache: bool | None = None
         self._last_active_credentials_backend: str | None = None
 
-    def _kc_call(self, fn, *args):
+    def _kc_call(self, fn: Callable[..., _T], *args: object) -> _T:
         """Run a ``macos_keychain`` wrapper call, learning Keychain usability.
 
         A success (including ``get_password`` returning ``None`` for a missing
@@ -216,7 +219,7 @@ class CredentialStore:
                 return key
         return ""
 
-    def _read_global_config(self) -> dict | None:
+    def _read_global_config(self) -> dict[str, Any] | None:
         """Read and parse ``~/.claude.json``, or None when absent/unreadable."""
         path = get_global_config_path()
         if not path.exists():
@@ -228,7 +231,7 @@ class CredentialStore:
             return None
         return data if isinstance(data, dict) else None
 
-    def _update_global_config(self, mutator) -> None:
+    def _update_global_config(self, mutator: Callable[[dict[str, Any]], None]) -> None:
         """Atomically apply ``mutator(dict)`` to ``~/.claude.json``, key-scoped.
 
         Reads the current config, lets ``mutator`` change only the keys it owns
@@ -265,7 +268,6 @@ class CredentialStore:
         cred_dir = get_claude_config_home()
         cred_dir.mkdir(parents=True, exist_ok=True)
         cred_file = cred_dir / ".credentials.json"
-        import tempfile
         fd, tmp_path = tempfile.mkstemp(dir=str(cred_dir), suffix=".tmp")
         try:
             os.write(fd, credentials.encode("utf-8"))
@@ -300,7 +302,7 @@ class CredentialStore:
         except Exception:
             pass  # best-effort; a down Keychain can't be cleaned now
 
-    def _write_credentials(self, credentials: str) -> None:
+    def _write_credentials(self, credentials: str, *, verify: bool = False) -> None:
         """Write Claude Code's active credential, enforcing a single auth axis.
 
         Detects the kind from the payload (raw ``sk-ant-api…`` key vs OAuth JSON) and
@@ -314,14 +316,27 @@ class CredentialStore:
           Keychain "Claude Code" when usable, else ``~/.claude.json`` ``primaryApiKey``),
           then clear the OAuth credential (Keychain item + ``.credentials.json``).
 
+        ``verify=True`` (OAuth path only) read-backs and confirms the payload matches
+        what was written — guards against silent Keychain corruption on activation.
+
         Raises:
-            CredentialWriteError: If writing credentials fails.
+            CredentialWriteError: If writing credentials fails, or if ``verify=True``
+                (OAuth) and readback differs from the intended payload.
         """
         if looks_like_api_key(credentials):
             self._write_managed_credentials(credentials.strip())
         else:
             self._write_oauth_credentials(credentials)
             self._clear_managed_key()
+
+        if verify and not looks_like_api_key(credentials):
+            readback = self._read_credentials()
+            if readback != credentials:
+                raise CredentialWriteError(
+                    "Credential write verification failed: readback differs "
+                    "from intended payload. Possible silent Keychain corruption "
+                    "or concurrent overwrite. Aborting switch."
+                )
 
     def _write_managed_credentials(self, api_key: str) -> None:
         """Activate a managed API key, then clear OAuth (mutual exclusion).
@@ -354,7 +369,7 @@ class CredentialStore:
 
         approved = approved_form(api_key)
 
-        def _mutate(cfg: dict) -> None:
+        def _mutate(cfg: dict[str, Any]) -> None:
             responses = cfg.get("customApiKeyResponses")
             if not isinstance(responses, dict):
                 responses = {}
@@ -404,7 +419,7 @@ class CredentialStore:
                 pass  # best-effort; a down Keychain can't be cleaned now
         cfg = self._read_global_config()
         if cfg is not None and cfg.get("primaryApiKey") is not None:
-            def _drop(c: dict) -> None:
+            def _drop(c: dict[str, Any]) -> None:
                 c.pop("primaryApiKey", None)
 
             try:
@@ -539,7 +554,6 @@ class CredentialStore:
         self._host.credentials_dir.mkdir(parents=True, exist_ok=True)
         enc_file = self._backup_enc_path(account_num, email)
         encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
-        import tempfile
         fd, tmp_path = tempfile.mkstemp(dir=str(self._host.credentials_dir), suffix=".tmp")
         try:
             os.write(fd, encoded.encode("utf-8"))

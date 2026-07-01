@@ -1,6 +1,9 @@
 """Logging configuration for Claude Swap."""
 
 import logging
+import os
+import sys
+from io import TextIOWrapper
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -15,9 +18,16 @@ class _LazyDirRotatingFileHandler(RotatingFileHandler):
     check if a legacy directory appeared between runs.
     """
 
-    def _open(self):  # type: ignore[override]
+    def _open(self) -> TextIOWrapper:
         Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
-        return super()._open()
+        stream = super()._open()
+        # The log can carry OAuth diagnostics at DEBUG; keep it owner-only.
+        if sys.platform != "win32":
+            try:
+                os.chmod(self.baseFilename, 0o600)
+            except OSError:
+                pass
+        return stream
 
 
 def setup_logging(log_dir: Path, debug: bool = False) -> logging.Logger:

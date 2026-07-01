@@ -37,7 +37,7 @@ import sys
 import tempfile
 import unicodedata
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from claude_swap import macos_keychain
 from claude_swap.exceptions import SessionError
@@ -385,7 +385,7 @@ class SessionManager:
         # `theme` key is load-bearing: claude shows onboarding when
         # `!config.theme || !config.hasCompletedOnboarding`.
         config_path = session_dir / ".claude.json"
-        existing: dict = {}
+        existing: dict[str, Any] = {}
         if config_path.exists():
             try:
                 existing = json.loads(config_path.read_text(encoding="utf-8")) or {}

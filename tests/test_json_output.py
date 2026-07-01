@@ -9,9 +9,18 @@ from unittest.mock import patch
 import pytest
 
 from claude_swap.exceptions import ConfigError, SwitchError
+from claude_swap import oauth
 from claude_swap.json_output import (
     SCHEMA_VERSION,
+    USAGE_API_KEY,
+    USAGE_API_KEY_DISPLAY,
+    USAGE_NO_CREDENTIALS,
+    USAGE_NO_CREDENTIALS_DISPLAY,
+    USAGE_TOKEN_EXPIRED,
+    USAGE_TOKEN_EXPIRED_DISPLAY,
+    empty_list_payload,
     error_envelope,
+    usage_display_line,
     usage_fields,
     usage_to_json,
 )
@@ -42,14 +51,41 @@ class TestJsonHelpers:
         assert out["spend"]["resetsAt"] == "2026-07-01T00:00:00Z"
 
     def test_usage_fields_variants(self):
-        from claude_swap.json_output import USAGE_NO_CREDENTIALS, USAGE_TOKEN_EXPIRED
-
         assert usage_fields({"five_hour": {"pct": 1.0}})[0] == "ok"
         assert usage_fields({"five_hour": {"pct": 1.0}})[1] == {"fiveHour": {"pct": 1.0}}
         assert usage_fields(USAGE_NO_CREDENTIALS) == ("no_credentials", None)
         assert usage_fields("no credentials") == ("no_credentials", None)
         assert usage_fields(USAGE_TOKEN_EXPIRED) == ("token_expired", None)
+        assert usage_fields(USAGE_API_KEY) == ("api_key", None)
         assert usage_fields(None) == ("unavailable", None)
+
+    def test_usage_fields_usage_fetch_error(self):
+        err = oauth.UsageFetchError(
+            reason="rate_limited",
+            status_code=429,
+            retry_after="30s",
+        )
+        status, usage = usage_fields(err)
+        assert status == "unavailable"
+        assert usage == {
+            "reason": "rate_limited",
+            "statusCode": 429,
+            "retryAfter": "30s",
+        }
+
+    def test_usage_display_line_sentinels(self):
+        assert usage_display_line(USAGE_API_KEY) == USAGE_API_KEY_DISPLAY
+        assert usage_display_line(USAGE_TOKEN_EXPIRED) == USAGE_TOKEN_EXPIRED_DISPLAY
+        assert usage_display_line(USAGE_NO_CREDENTIALS) == USAGE_NO_CREDENTIALS_DISPLAY
+        assert usage_display_line("other string") == "other string"
+        assert usage_display_line(None) is None
+
+    def test_empty_list_payload_shape(self):
+        assert empty_list_payload() == {
+            "schemaVersion": SCHEMA_VERSION,
+            "activeAccountNumber": None,
+            "accounts": [],
+        }
 
     def test_error_envelope_shape(self):
         env = error_envelope(SwitchError("boom"))
@@ -129,6 +165,26 @@ class TestListJson:
         assert by_num[1]["usageStatus"] == "unavailable"
         assert by_num[1]["usage"] is None
         assert by_num[2]["usageStatus"] == "no_credentials"
+
+    def test_list_json_api_key_account(
+        self, temp_home: Path, capsys,
+    ):
+        from claude_swap.models import Platform
+
+        switcher = ClaudeAccountSwitcher()
+        switcher.platform = Platform.LINUX
+        switcher._setup_directories()
+        switcher.add_account_from_token(
+            "sk-ant-api03-abcdefghij1234567890XYZ",
+        )
+        capsys.readouterr()
+        with patch("claude_swap.oauth.fetch_usage_for_account") as mock_fetch:
+            payload = switcher.list_accounts(json_output=True)
+        mock_fetch.assert_not_called()
+        assert capsys.readouterr().out == ""
+        acct = payload["accounts"][0]
+        assert acct["usageStatus"] == "api_key"
+        assert acct["usage"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -217,7 +273,7 @@ def _install_patches(switcher, creds_store, configs_store, live_state):
         patch.object(switcher, "_read_credentials",
                      side_effect=lambda: live_state.get("creds", "")),
         patch.object(switcher, "_write_credentials",
-                     side_effect=lambda c: live_state.__setitem__("creds", c)),
+                     side_effect=lambda c, verify=False: live_state.__setitem__("creds", c)),
         # Don't make network calls from the (suppressed) post-switch usage path.
         patch("claude_swap.oauth.fetch_usage_for_account", return_value=None),
     ]

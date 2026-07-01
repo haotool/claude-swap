@@ -11,15 +11,13 @@ from unittest.mock import patch
 import pytest
 
 from claude_swap.process_detection import (
-    ClaudeSession,
-    IdeInstance,
     get_claude_dir,
     get_running_instances,
     is_pid_alive,
     list_ide_instances,
     list_sessions,
 )
-from claude_swap.printer import abbreviate_path, entrypoint_label, format_age
+from claude_swap.printer import abbreviate_path, entrypoint_label
 
 
 # --- get_claude_dir ---
@@ -320,17 +318,25 @@ class TestAbbreviatePath:
 
 class TestFormatAge:
     def test_just_now(self):
+        from claude_swap.printer import format_age
+
         now_ms = int(time.time() * 1000)
         assert format_age(now_ms) == "just now"
 
     def test_minutes(self):
+        from claude_swap.printer import format_age
+
         ms = int((time.time() - 300) * 1000)  # 5 minutes ago
         assert format_age(ms) == "5m ago"
 
     def test_hours(self):
+        from claude_swap.printer import format_age
+
         ms = int((time.time() - 7200) * 1000)  # 2 hours ago
         assert format_age(ms) == "2h ago"
 
     def test_days(self):
+        from claude_swap.printer import format_age
+
         ms = int((time.time() - 172800) * 1000)  # 2 days ago
         assert format_age(ms) == "2d ago"

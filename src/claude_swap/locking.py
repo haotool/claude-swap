@@ -22,7 +22,7 @@ class FileLock:
     def __init__(self, lock_path: Path, timeout: float = 10.0):
         self.lock_path = lock_path
         self.timeout = timeout
-        self._lock_file: IO | None = None
+        self._lock_file: IO[str] | None = None
         self._locked = False
 
     def acquire(self, timeout: float | None = None) -> bool:
@@ -79,5 +79,10 @@ class FileLock:
             raise LockError("Failed to acquire lock - another instance may be running")
         return self
 
-    def __exit__(self, *args) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         self.release()

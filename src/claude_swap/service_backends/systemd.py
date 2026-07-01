@@ -1,0 +1,330 @@
+"""Linux/WSL systemd --user backend for the auto-switch monitor."""
+
+from __future__ import annotations
+
+import getpass
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+from claude_swap import service_spec
+from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.printer import bolded, dimmed, muted, warning
+from claude_swap.protocols import ServiceHost, ServiceState
+
+UNIT_NAME = "cswap-monitor.service"
+_SYSTEMCTL = "systemctl"
+_LOGinctl = "loginctl"
+_ENV_LINE = re.compile(r"^Environment=(.+)$", re.MULTILINE)
+
+
+def _config_home() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg)
+    return Path.home() / ".config"
+
+
+def _unit_path() -> Path:
+    return _config_home() / "systemd" / "user" / UNIT_NAME
+
+
+def _pid1_is_systemd() -> bool:
+    try:
+        return Path("/proc/1/comm").read_text(encoding="utf-8").strip() == "systemd"
+    except OSError:
+        return False
+
+
+def _user_manager_available() -> bool:
+    """Best-effort check that the per-user systemd manager is reachable.
+
+    ``_pid1_is_systemd`` only proves the *system* manager runs; ``systemctl
+    --user`` can still be unreachable (no ``XDG_RUNTIME_DIR`` / D-Bus session —
+    common on headless SSH or a WSL session without linger), which would make a
+    later ``enable --now`` fail with a confusing message. Treat only an explicit
+    "offline" status or a bus-connection failure as unavailable, so a
+    present-but-degraded (or mocked) manager still passes.
+    """
+    proc = _systemctl("is-system-running", check=False)
+    state = proc.stdout.strip().lower()
+    if state == "offline":
+        return False
+    if not state and proc.returncode != 0 and "bus" in proc.stderr.lower():
+        return False
+    return True
+
+
+def _require_systemd() -> None:
+    if not sys.platform.startswith("linux"):
+        raise ClaudeSwitchError(
+            "cswap service (systemd) requires Linux or WSL. "
+            "Use `cswap --monitor` in the foreground on this platform."
+        )
+    if not _pid1_is_systemd():  # type: ignore[unreachable]
+        raise ClaudeSwitchError(
+            "systemd is not running as PID 1 on this system. "
+            "On WSL2, enable user systemd in /etc/wsl.conf:\n"
+            "  [boot]\n"
+            "  systemd=true\n"
+            "Then run `wsl --shutdown` from Windows and reopen your distro."
+        )
+    if not _user_manager_available():
+        raise ClaudeSwitchError(
+            "systemd is running, but its per-user manager (systemctl --user) is "
+            "not reachable in this session. Ensure you have a login session with "
+            "XDG_RUNTIME_DIR set; on a headless/SSH or WSL session run "
+            "`loginctl enable-linger <user>` and reopen the session."
+        )
+
+
+def _build_unit(switcher: ServiceHost) -> str:
+    argv = service_spec.program_arguments()
+    exec_start = " ".join(_systemd_escape(arg) for arg in argv)
+    env_lines = [
+        f'Environment="{key}={_systemd_escape_value(value)}"'
+        for key, value in service_spec.passthrough_env().items()
+    ]
+    lines = [
+        "[Unit]",
+        "Description=Claude Swap auto-switch monitor",
+        "After=network.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        f"ExecStart={exec_start}",
+        "Restart=on-failure",
+        "RestartSec=30",
+        *env_lines,
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _systemd_escape(arg: str) -> str:
+    if not arg:
+        return '""'
+    if re.fullmatch(r"[A-Za-z0-9_/@:.,+-]+", arg):
+        return arg
+    return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _systemd_escape_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _unescape_env_value(value: str) -> str:
+    out: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            out.append(value[index + 1])
+            index += 2
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
+
+
+def _run(
+    argv: list[str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    from claude_swap import service
+
+    try:
+        proc: subprocess.CompletedProcess[str] = service.subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=service_spec.SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise ClaudeSwitchError(
+            f"{' '.join(argv)} timed out after {service_spec.SUBPROCESS_TIMEOUT}s"
+        )
+    if check and proc.returncode != 0:
+        raise ClaudeSwitchError(
+            f"{' '.join(argv)} failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip()}"
+        )
+    return proc
+
+
+def _systemctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return _run([_SYSTEMCTL, "--user", *args], check=check)
+
+
+def _loginctl(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return _run([_LOGinctl, *args], check=check)
+
+
+def _installed_version() -> str | None:
+    unit_path = _unit_path()
+    try:
+        text = unit_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    env_vars: dict[str, str] = {}
+    for match in _ENV_LINE.finditer(text):
+        pair = match.group(1).strip()
+        if len(pair) >= 2 and pair.startswith('"') and pair.endswith('"'):
+            # Current form: the whole KEY=value assignment is quoted.
+            key, sep, value = _unescape_env_value(pair[1:-1]).partition("=")
+        else:
+            # Legacy form: Environment=KEY="value" (value optionally quoted).
+            key, sep, value = pair.partition("=")
+            value = value.strip()
+            if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+                value = _unescape_env_value(value[1:-1])
+        if not sep:
+            continue
+        env_vars[key.strip()] = value
+    return service_spec.installed_version_from_env(env_vars)
+
+
+def _print_wsl_guidance() -> None:
+    distro = os.environ.get("WSL_DISTRO_NAME", "<distro>")
+    user = os.environ.get("USER") or getpass.getuser()
+    print(f"{bolded('WSL note:')} {muted('this service runs inside Linux/WSL only.')}")
+    print(
+        f"  {dimmed('Boot the distro at Windows login via Task Scheduler (At log on):')}"
+    )
+    print(
+        f"  {dimmed(f'wsl.exe -d {distro} -u {user} --exec /usr/bin/true')}"
+    )
+    print(
+        f"  {dimmed('WSL may shut down your distro when idle — the monitor stops until WSL restarts.')}"
+    )
+    print(
+        f"  {dimmed('WSL ~/.claude and Windows %USERPROFILE%\\\\.claude are separate; install cswap in the same environment as Claude Code.')}"
+    )
+
+
+class SystemdBackend:
+    """Linux/WSL systemd --user supervisor implementing ``ServiceBackend``."""
+
+    @property
+    def platform_label(self) -> str:
+        return "systemd"
+
+    def describe(self) -> str:
+        return "Linux/WSL systemd user unit"
+
+    def install(self, switcher: ServiceHost) -> int:
+        _require_systemd()
+        unit_path = _unit_path()
+        unit_path.parent.mkdir(parents=True, exist_ok=True)
+        log_dir = service_spec.log_dir(switcher)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(switcher.backup_dir, 0o700)
+        os.chmod(log_dir, 0o700)
+        unit_path.write_text(_build_unit(switcher), encoding="utf-8")
+        os.chmod(unit_path, 0o644)
+        _systemctl("daemon-reload")
+        _systemctl("enable", "--now", UNIT_NAME)
+        user = os.environ.get("USER") or getpass.getuser()
+        linger = _loginctl("enable-linger", user)
+        if linger.returncode != 0:
+            warning(
+                f"loginctl enable-linger {user} failed (rc={linger.returncode}): "
+                f"{linger.stderr.strip() or linger.stdout.strip()}. "
+                "The monitor may stop when you log out unless linger is enabled."
+            )
+        if service_spec.is_wsl():
+            _print_wsl_guidance()
+        service_spec.print_install_success(
+            switcher,
+            artifact_path=unit_path,
+            run_hint="runs `cswap --monitor` at login; stdout/stderr → systemd journal",
+        )
+        return 0
+
+    def uninstall(self, switcher: ServiceHost) -> int:
+        unit_path = _unit_path()
+        existed = unit_path.exists()
+        _systemctl("disable", "--now", UNIT_NAME, check=False)
+        unit_path.unlink(missing_ok=True)
+        if existed:
+            _systemctl("daemon-reload", check=False)
+        service_spec.print_uninstall_result(
+            switcher,
+            existed=existed,
+            retained_hint="journal history retained on disk",
+        )
+        return 0
+
+    def state(self) -> ServiceState:
+        unit_path = _unit_path()
+        if not unit_path.exists():
+            return "not installed"
+        active = _systemctl("is-active", UNIT_NAME, check=False)
+        if active.returncode == 0 and active.stdout.strip() == "active":
+            return "loaded"
+        return "installed but not loaded"
+
+    def status(self, switcher: ServiceHost) -> int:
+        state = self.state()
+        if state == "not installed":
+            service_spec.print_status_not_installed()
+            return 0
+
+        installed_ver = _installed_version()
+        service_spec.warn_version_drift(installed_ver)
+
+        if state == "installed but not loaded":
+            service_spec.print_status_installed_but_not_loaded()
+            return 0
+
+        proc = _systemctl("status", UNIT_NAME, check=False)
+        service_spec.print_status_loaded(supervisor_stdout=proc.stdout)
+        service_spec.print_status_decision_log(switcher)
+        return 0
+
+    def logs(self, switcher: ServiceHost, lines: int = 40) -> int:
+        structured = switcher.backup_dir / "claude-swap.log"
+        print(bolded("== claude-swap.log (structured) =="))
+        print(f"  {dimmed(str(structured))}")
+        if not structured.exists():
+            print(f"  {dimmed('(none yet)')}")
+        else:
+            tail = structured.read_text(encoding="utf-8", errors="replace").splitlines()[
+                -lines:
+            ]
+            for line in tail:
+                print(f"  {muted(line)}")
+
+        print(bolded(f"== journal ({UNIT_NAME}) =="))
+        proc = _systemctl(
+            "status",
+            UNIT_NAME,
+            check=False,
+        )
+        if proc.returncode != 0 and "could not be found" in proc.stderr.lower():
+            print(f"  {dimmed('(unit not loaded yet)')}")
+            return 0
+        journal = _run(
+            [
+                "journalctl",
+                "--user",
+                "-u",
+                UNIT_NAME,
+                "-n",
+                str(lines),
+                "--no-pager",
+            ],
+            check=False,
+        )
+        if journal.returncode != 0:
+            print(f"  {dimmed(journal.stderr.strip() or '(no journal entries yet)')}")
+            return 0
+        for line in journal.stdout.splitlines():
+            print(f"  {muted(line)}")
+        return 0

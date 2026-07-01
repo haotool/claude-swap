@@ -29,12 +29,12 @@ import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from claude_swap import macos_keychain
 from claude_swap.exceptions import MigrationIncomplete
 from claude_swap.models import Platform, get_timestamp
-from claude_swap.switcher import KEYRING_SERVICE, SECURITY_SERVICE
+from claude_swap.switcher import KEYRING_SERVICE
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
@@ -43,16 +43,14 @@ STATE_FILENAME = ".migrations.json"
 STATE_VERSION = 1
 
 
-# ---------------------------------------------------------------------------
 # State file
-# ---------------------------------------------------------------------------
 
 
 def _state_path(switcher: "ClaudeAccountSwitcher") -> Path:
     return switcher.backup_dir / STATE_FILENAME
 
 
-def _load_applied(switcher: "ClaudeAccountSwitcher") -> dict:
+def _load_applied(switcher: "ClaudeAccountSwitcher") -> dict[str, str]:
     """Return the ``{migration_id: timestamp}`` map; {} if missing or corrupt.
 
     A missing or unparseable state file is treated as "nothing applied" so a
@@ -100,13 +98,14 @@ def _mark_applied(switcher: "ClaudeAccountSwitcher", migration_id: str) -> None:
         raise
 
 
-# ---------------------------------------------------------------------------
 # Migrations
-# ---------------------------------------------------------------------------
 
 
 def _delete_keyring_quietly(
-    keyring, switcher, username: str, context: str = "windows_keyring_to_files"
+    keyring: Any,
+    switcher: "ClaudeAccountSwitcher",
+    username: str,
+    context: str = "windows_keyring_to_files",
 ) -> None:
     """Best-effort delete of a keyring entry; never raises.
 
@@ -266,27 +265,6 @@ def migrate_windows_keyring_to_files(switcher: "ClaudeAccountSwitcher") -> bool:
     return True
 
 
-def _keyring_backend_unavailable(keyring, exc: Exception) -> bool:
-    """Whether ``exc`` from a keyring call means the backend is *unusable* (vs. a
-    locked/denied Keychain).
-
-    Only an unusable backend justifies the ``security`` fallback — `security` is a
-    real alternative path to the same data. A locked/denied Keychain would hit
-    `security` identically, so that must stay a genuine failure (retry), not a
-    fallback that just re-prompts.
-    """
-    errs = getattr(keyring, "errors", None)
-    candidates = tuple(
-        c
-        for c in (
-            getattr(errs, "NoKeyringError", None),
-            getattr(errs, "InitError", None),
-        )
-        if isinstance(c, type)
-    )
-    return bool(candidates) and isinstance(exc, candidates)
-
-
 def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool:
     """Move macOS backup credentials from the ``keyring`` service to the
     ``security`` service.
@@ -305,11 +283,15 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
     :class:`MigrationIncomplete` if any account could not be safely relocated, so
     the runner retries on the next launch rather than marking it done.
 
-    Source reads prefer ``keyring`` (silent, same-app). They fall back to the
-    ``security`` CLI *only* when ``keyring`` is genuinely unavailable (not
-    installed / no usable backend) — where ``security`` is a real alternative and
-    may prompt once. This branch is dormant while ``keyring`` is a dependency; it
-    exists so a future ``keyring`` removal can't strand a long-absent user.
+    Source reads use the same ``security`` CLI wrapper as the destination backend.
+    This avoids keyring's in-process Security.framework access path, which can
+    repeatedly trigger Keychain authorization prompts when the Python interpreter
+    identity changes across tool upgrades.
+
+    If ``keyring`` is importable it is used only for best-effort deletion of the
+    old legacy item after a verified copy. A failed or denied delete is harmless:
+    the migrated item already lives in the new service and the leftover can be
+    cleaned up later.
     """
     if switcher.platform != Platform.MACOS:
         return False
@@ -353,7 +335,8 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
     # account-None-{email} maps to a slot only when its email is unique.
     email_counts = Counter(info.get("email", "") for info in accounts.values())
 
-    # Source backend: keyring if importable, else None → security fallback.
+    # Import keyring only for best-effort deletion of legacy items after a
+    # verified copy. Reads intentionally do NOT go through keyring on macOS.
     keyring = None
     try:
         import keyring as _keyring  # noqa: PLC0415 - only on the migration path
@@ -361,29 +344,12 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
         keyring = _keyring
     except Exception as e:  # noqa: BLE001
         switcher._logger.warning(
-            "macos_keyring_to_security: keyring unavailable, using security "
-            f"fallback for legacy reads (may prompt once): {e}"
+            "macos_keyring_to_security: keyring unavailable for legacy delete "
+            f"cleanup; legacy reads still use security directly: {e}"
         )
 
     def _read_old(username: str) -> str:
-        """Read a legacy ``KEYRING_SERVICE`` item: ``""`` if absent, else its value.
-
-        Prefers ``keyring``; downgrades to ``security`` only if the keyring backend
-        is unusable. Raises on a genuine read failure (e.g. locked Keychain).
-        """
-        nonlocal keyring
-        if keyring is not None:
-            try:
-                creds = keyring.get_password(KEYRING_SERVICE, username)
-                return creds or ""
-            except Exception as e:  # noqa: BLE001
-                if not _keyring_backend_unavailable(keyring, e):
-                    raise  # locked/denied → real failure, security can't help
-                switcher._logger.warning(
-                    "macos_keyring_to_security: keyring backend unusable, "
-                    f"falling back to security (may prompt once): {e}"
-                )
-                keyring = None  # subsequent reads use security too
+        """Read a legacy ``KEYRING_SERVICE`` item via the security CLI wrapper."""
         creds = macos_keychain.get_password(KEYRING_SERVICE, username)
         return creds or ""
 
@@ -499,9 +465,7 @@ MIGRATIONS: list[tuple[str, Callable[["ClaudeAccountSwitcher"], bool]]] = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Runner
-# ---------------------------------------------------------------------------
 
 
 def run_migrations(switcher: "ClaudeAccountSwitcher") -> None:
