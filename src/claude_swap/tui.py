@@ -23,10 +23,10 @@ import re
 import sys
 import time
 from datetime import datetime
-from typing import Callable
+from typing import Any, Callable, cast
 
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.models import InteractiveAutoSwitchIntent
+from claude_swap.models import AutoSwitchDecisionContext, InteractiveAutoSwitchIntent
 from claude_swap import printer, service
 from claude_swap.monitor import (
     MONITOR_POLL_SECONDS,
@@ -68,6 +68,8 @@ _SGR_PARAM_TO_STYLE: dict[str, int] = {
 }
 
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+CursesWindow = curses.window
 
 
 def _ansi_segments(text: str) -> list[tuple[str, int]]:
@@ -152,7 +154,7 @@ def _style_to_attr(flags: int) -> int:
     return attr
 
 
-def _addstr_ansi(stdscr, y: int, x: int, text: str, max_width: int) -> None:
+def _addstr_ansi(stdscr: CursesWindow, y: int, x: int, text: str, max_width: int) -> None:
     """Draw an ANSI-styled line clipped to ``max_width`` visible characters."""
     remaining = max_width
     cx = x
@@ -181,7 +183,7 @@ class _ExitRequested(Exception):
     """Control-flow signal to exit the curses wrapper cleanly (not a user error)."""
 
 
-def _main_loop(stdscr: "curses._CursesWindow", switcher: ClaudeAccountSwitcher) -> int:
+def _main_loop(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> int:
     rows, cols = stdscr.getmaxyx()
     if rows < _MIN_ROWS or cols < _MIN_COLS:
         curses.endwin()
@@ -196,7 +198,7 @@ def _main_loop(stdscr: "curses._CursesWindow", switcher: ClaudeAccountSwitcher) 
     has_token_flow = hasattr(switcher, "add_account_from_token")
 
     while True:
-        items: list[tuple[str, str]] = [
+        items: list[tuple[str, str | None]] = [
             ("Switch account", "switch"),
             ("Add account", "add"),
             ("Remove account", "remove"),
@@ -250,7 +252,7 @@ def _main_loop(stdscr: "curses._CursesWindow", switcher: ClaudeAccountSwitcher) 
 
 
 # Sub-flows
-def _do_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
+def _do_switch(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
     items = _account_items(switcher)
     if not items:
         _show_message(stdscr, "No managed accounts. Add one first.")
@@ -262,8 +264,8 @@ def _do_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     _run_inline(stdscr, "Switch account", lambda: switcher.switch_to(choice))
 
 
-def _do_add(stdscr, switcher: ClaudeAccountSwitcher, has_token_flow: bool) -> None:
-    items: list[tuple[str, str]] = [
+def _do_add(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, has_token_flow: bool) -> None:
+    items: list[tuple[str, str | None]] = [
         ("From current Claude Code login   (cswap --add-account)", "login"),
     ]
     if has_token_flow:
@@ -293,7 +295,7 @@ def _do_add(stdscr, switcher: ClaudeAccountSwitcher, has_token_flow: bool) -> No
     )
 
 
-def _do_remove(stdscr, switcher: ClaudeAccountSwitcher) -> None:
+def _do_remove(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
     items = _account_items(switcher)
     if not items:
         _show_message(stdscr, "No managed accounts.")
@@ -311,7 +313,7 @@ def _do_remove(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     )
 
 
-def _do_refresh(stdscr, switcher: ClaudeAccountSwitcher) -> None:
+def _do_refresh(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
     identity = switcher._get_current_account()
     if identity is None:
         _show_message(
@@ -324,7 +326,7 @@ def _do_refresh(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     _shell_out(stdscr, lambda: switcher.add_account(slot=None))
 
 
-def _do_watch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
+def _do_watch(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
     """Live, auto-refreshing dashboard of status + usage (read-only)."""
     seq = switcher._get_sequence_data() or {}
     if not seq.get("accounts"):
@@ -333,7 +335,9 @@ def _do_watch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
     _watch_loop(stdscr, switcher)
 
 
-def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> None:
+def _watch_loop(
+    stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, interval: int = 5,
+) -> None:
     """Re-capture ``list_accounts()`` every ``interval`` seconds and redraw."""
     stdscr.timeout(250)
     try:
@@ -380,11 +384,13 @@ def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> N
 
 
 # Auto-switch flow
-def _auto_toggle(stdscr, switcher: ClaudeAccountSwitcher, cfg: dict) -> None:
+def _auto_toggle(
+    stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, cfg: dict[str, Any],
+) -> None:
     switcher.set_auto_switch_config(enabled=not cfg["enabled"])
 
 
-def _auto_threshold(stdscr, switcher: ClaudeAccountSwitcher) -> None:
+def _auto_threshold(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
     raw = _prompt_text(stdscr, "Switch when usage reaches (%): ")
     if not raw:
         return
@@ -397,7 +403,7 @@ def _auto_threshold(stdscr, switcher: ClaudeAccountSwitcher) -> None:
 
 
 def _auto_service_toggle(
-    stdscr, switcher: ClaudeAccountSwitcher, current_service_state: str
+    stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, current_service_state: str,
 ) -> None:
     if current_service_state == "unsupported":
         _show_service_unsupported(stdscr)
@@ -408,7 +414,7 @@ def _auto_service_toggle(
 
 
 def _auto_service_status(
-    stdscr, switcher: ClaudeAccountSwitcher, current_service_state: str
+    stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, current_service_state: str,
 ) -> None:
     if current_service_state == "unsupported":
         _show_service_unsupported(stdscr)
@@ -416,12 +422,12 @@ def _auto_service_status(
         _shell_out(stdscr, lambda: service.status(switcher))
 
 
-def _auto_start_monitor(stdscr, switcher: ClaudeAccountSwitcher) -> None:
+def _auto_start_monitor(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
     cfg = switcher.ensure_auto_switch_enabled()
     _run_auto_monitor(stdscr, switcher, cfg["threshold"])
 
 
-def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
+def _do_auto_switch(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
     """Settings + launcher for auto-switch (Beta).
 
     Lets the user enable cooldown-aware auto-switch when the active account's
@@ -476,7 +482,7 @@ def _do_auto_switch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
 
 
 def _run_auto_monitor(
-    stdscr, switcher: ClaudeAccountSwitcher, threshold: int
+    stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, threshold: int,
 ) -> None:
     """Foreground watcher: TUI adapter over the shared monitor engine."""
     running_pid = _acquire_monitor_pid(switcher)
@@ -507,7 +513,7 @@ def _run_auto_monitor(
     seconds_to_next = 0
     usage_display = "unavailable"
 
-    def perform_switch(decision) -> bool:
+    def perform_switch(decision: AutoSwitchDecisionContext) -> bool:
         return _auto_perform_switch(stdscr, switcher, decision)
 
     try:
@@ -547,9 +553,9 @@ def _run_auto_monitor(
 
 
 def _auto_perform_switch(
-    stdscr,
+    stdscr: CursesWindow,
     switcher: ClaudeAccountSwitcher,
-    decision,
+    decision: AutoSwitchDecisionContext,
 ) -> bool:
     """Suspend curses, run automated ``switch()``, then resume."""
     curses.def_prog_mode()
@@ -557,8 +563,11 @@ def _auto_perform_switch(
     switched = False
     try:
         try:
-            switched = switcher.switch(
-                InteractiveAutoSwitchIntent(decision=decision),
+            switched = cast(
+                bool,
+                switcher.switch(
+                    InteractiveAutoSwitchIntent(decision=decision),
+                ),
             )
         except ClaudeSwitchError as e:
             print(f"Auto-switch error: {e}")
@@ -575,7 +584,7 @@ def _auto_perform_switch(
 
 
 def _draw_monitor(
-    stdscr,
+    stdscr: CursesWindow,
     threshold: int,
     usage_display: str,
     last_checked: str,
@@ -650,7 +659,7 @@ def _service_menu_label(service_state: str) -> str:
     return "Background service: Install"
 
 
-def _show_service_unsupported(stdscr) -> None:
+def _show_service_unsupported(stdscr: CursesWindow) -> None:
     """Render a consistent TUI error when no service backend fits this platform."""
     _show_message(
         stdscr,
@@ -660,7 +669,7 @@ def _show_service_unsupported(stdscr) -> None:
     )
 
 
-def _account_items(switcher: ClaudeAccountSwitcher) -> list[tuple[str, str]]:
+def _account_items(switcher: ClaudeAccountSwitcher) -> list[tuple[str, str | None]]:
     """Build (label, account_num) list for switch/remove sub-pages.
 
     No network — usage % is intentionally omitted to keep the picker snappy.
@@ -670,7 +679,7 @@ def _account_items(switcher: ClaudeAccountSwitcher) -> list[tuple[str, str]]:
     if not accounts:
         return []
     active = str(seq.get("activeAccountNumber", ""))
-    items: list[tuple[str, str]] = []
+    items: list[tuple[str, str | None]] = []
     for num in sorted(seq.get("sequence", []), key=int):
         acc = accounts.get(str(num), {})
         email = acc.get("email", "?")
@@ -683,7 +692,7 @@ def _account_items(switcher: ClaudeAccountSwitcher) -> list[tuple[str, str]]:
 
 # Curses primitives — kept thin so we can mock them in tests
 def _select_from(
-    stdscr,
+    stdscr: CursesWindow,
     title: str,
     items: list[tuple[str, str | None]],
     subtitle: str = "",
@@ -725,7 +734,9 @@ def _select_from(
             return None
 
 
-def _prompt_text(stdscr, label: str, password: bool = False) -> str | None:
+def _prompt_text(
+    stdscr: CursesWindow, label: str, password: bool = False,
+) -> str | None:
     """Single-line text prompt. Returns string or ``None`` on Esc.
 
     When ``password`` is True, keystrokes are not echoed.
@@ -768,13 +779,13 @@ def _prompt_text(stdscr, label: str, password: bool = False) -> str | None:
         curses.curs_set(0)
 
 
-def _confirm(stdscr, prompt: str) -> bool:
+def _confirm(stdscr: CursesWindow, prompt: str) -> bool:
     """Y/N prompt. Returns True only on 'y' / 'Y'."""
     answer = _prompt_text(stdscr, prompt)
-    return bool(answer) and answer.lower() in ("y", "yes")
+    return answer is not None and answer.lower() in ("y", "yes")
 
 
-def _show_message(stdscr, msg: str, is_error: bool = False) -> None:
+def _show_message(stdscr: CursesWindow, msg: str, is_error: bool = False) -> None:
     """Display a single-line message and wait for any key."""
     stdscr.erase()
     rows, cols = stdscr.getmaxyx()
@@ -789,13 +800,15 @@ def _show_message(stdscr, msg: str, is_error: bool = False) -> None:
     stdscr.getch()
 
 
-def _draw_header(stdscr, title: str, subtitle: str, cols: int) -> None:
+def _draw_header(stdscr: CursesWindow, title: str, subtitle: str, cols: int) -> None:
     stdscr.addstr(1, 2, title[: cols - 4], curses.A_BOLD)
     if subtitle:
         stdscr.addstr(2, 2, subtitle[: cols - 4], curses.A_DIM)
 
 
-def _pager(stdscr, title: str, lines: list[str], subtitle: str = "") -> None:
+def _pager(
+    stdscr: CursesWindow, title: str, lines: list[str], subtitle: str = "",
+) -> None:
     """Scrollable read-only view of ``lines`` (which may contain ANSI codes)."""
     top = 0
     while True:
@@ -836,7 +849,7 @@ def _pager(stdscr, title: str, lines: list[str], subtitle: str = "") -> None:
             return
 
 
-def _capture(fn: Callable[[], None]) -> str:
+def _capture(fn: Callable[..., Any]) -> str:
     """Run ``fn`` capturing stdout+stderr (with color forced on) into a string."""
     buf = io.StringIO()
     saved_stdin = sys.stdin
@@ -858,12 +871,12 @@ def _capture(fn: Callable[[], None]) -> str:
     return buf.getvalue()
 
 
-def _run_inline(stdscr, title: str, fn: Callable[[], None]) -> None:
+def _run_inline(stdscr: CursesWindow, title: str, fn: Callable[..., Any]) -> None:
     """Run ``fn``, capturing its output and showing it in the in-TUI pager."""
     _pager(stdscr, title, _capture(fn).splitlines())
 
 
-def _shell_out(stdscr, fn: Callable[[], None]) -> None:
+def _shell_out(stdscr: CursesWindow, fn: Callable[..., Any]) -> None:
     """Temporarily exit curses to run ``fn`` with normal stdout/stdin.
 
     Pauses afterwards so the user can read output, then restores the curses

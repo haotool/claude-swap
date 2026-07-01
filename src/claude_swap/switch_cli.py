@@ -6,7 +6,7 @@ without duplicating switch logic.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from claude_swap import oauth
 from claude_swap.json_output import account_ref
@@ -17,12 +17,23 @@ if TYPE_CHECKING:
     from claude_swap.protocols import SwitchCliHost
 
 
+class _RotationParams(TypedDict):
+    intent: CliSwitchIntent
+    strategy_label: str
+    sequence: list[Any]
+    active_account: Any
+    current_num: str | None
+    current_ref: dict[str, Any] | None
+    json_output: bool
+    warnings: list[str]
+
+
 def run_switch_cli(
     switcher: SwitchCliHost,
     *,
     strategy: str | None = None,
     json_output: bool = False,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Run a strategy-aware CLI switch via *switcher*."""
     return SwitchCliDispatcher(switcher).run(
         strategy=strategy, json_output=json_output,
@@ -37,7 +48,7 @@ class SwitchCliDispatcher:
 
     def run(
         self, strategy: str | None = None, json_output: bool = False,
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Switch to next account in sequence.
 
         Args:
@@ -73,6 +84,9 @@ class SwitchCliDispatcher:
         if handled:
             return result
 
+        assert preconditions.identity is not None
+        assert preconditions.data is not None
+        assert preconditions.sequence is not None
         current_email, current_org_uuid = preconditions.identity
         data = preconditions.data
         sequence = preconditions.sequence
@@ -87,16 +101,16 @@ class SwitchCliDispatcher:
             account_ref(int(current_num), current_email) if current_num else None
         )
 
-        rotation_kwargs = dict(
-            intent=intent,
-            strategy_label=strategy_label,
-            sequence=sequence,
-            active_account=active_account,
-            current_num=current_num,
-            current_ref=current_ref,
-            json_output=json_output,
-            warnings=warnings,
-        )
+        rotation_kwargs: _RotationParams = {
+            "intent": intent,
+            "strategy_label": strategy_label,
+            "sequence": sequence,
+            "active_account": active_account,
+            "current_num": current_num,
+            "current_ref": current_ref,
+            "json_output": json_output,
+            "warnings": warnings,
+        }
 
         if strategy == "best":
             handled, result = self._best(
@@ -111,9 +125,27 @@ class SwitchCliDispatcher:
                 return result
 
         if strategy == "next-available":
-            return self._next_available(**rotation_kwargs)
+            return self._next_available(
+                intent=rotation_kwargs["intent"],
+                strategy_label=rotation_kwargs["strategy_label"],
+                sequence=rotation_kwargs["sequence"],
+                active_account=rotation_kwargs["active_account"],
+                current_num=rotation_kwargs["current_num"],
+                current_ref=rotation_kwargs["current_ref"],
+                json_output=rotation_kwargs["json_output"],
+                warnings=rotation_kwargs["warnings"],
+            )
 
-        return self._rotation(**rotation_kwargs)
+        return self._rotation(
+            intent=rotation_kwargs["intent"],
+            strategy_label=rotation_kwargs["strategy_label"],
+            sequence=rotation_kwargs["sequence"],
+            active_account=rotation_kwargs["active_account"],
+            current_num=rotation_kwargs["current_num"],
+            current_ref=rotation_kwargs["current_ref"],
+            json_output=rotation_kwargs["json_output"],
+            warnings=rotation_kwargs["warnings"],
+        )
 
     def _preconditions(
         self,
@@ -123,7 +155,7 @@ class SwitchCliDispatcher:
         strategy_label: str,
         json_output: bool,
         warnings: list[str],
-    ) -> tuple[bool, dict | None]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """Handle fresh-machine / unmanaged / single-account paths.
 
         Returns ``(handled, result)``. When ``handled`` is true, the caller should
@@ -137,13 +169,17 @@ class SwitchCliDispatcher:
             op = s._perform_switch(
                 target, intent=intent, emit_output=not json_output,
             )
-            result = (
-                s._switch_result_from_op(op, strategy_label, warnings)
-                if json_output else None
-            )
+            if json_output:
+                assert op is not None
+                result: dict[str, Any] | None = s._switch_result_from_op(
+                    op, strategy_label, warnings,
+                )
+            else:
+                result = None
             return True, result
 
         if preconditions.kind == SwitchPreconditionKind.UNMANAGED:
+            assert preconditions.identity is not None
             current_email, _ = preconditions.identity
             if json_output:
                 ref = account_ref(None, current_email)
@@ -157,12 +193,14 @@ class SwitchCliDispatcher:
             print(f"{accent('Notice:')} Active account '{current_email}' was not managed.")
             s.add_account()
             data = s._get_sequence_data()
+            assert data is not None
             account_num = data.get("activeAccountNumber")
             print(f"It has been automatically added as Account-{account_num}.")
             print(dimmed("Please run the switch command again to switch to the next account."))
             return True, None
 
         if preconditions.kind == SwitchPreconditionKind.SINGLE_ACCOUNT:
+            assert preconditions.identity is not None
             current_email, _ = preconditions.identity
             if json_output:
                 num = preconditions.current_slot
@@ -183,10 +221,10 @@ class SwitchCliDispatcher:
         intent: CliSwitchIntent,
         strategy_label: str,
         current_num: str | None,
-        current_ref: dict | None,
+        current_ref: dict[str, Any] | None,
         json_output: bool,
         warnings: list[str],
-    ) -> tuple[bool, dict | None]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """Usage-aware jump to the account with the most remaining quota.
 
         Returns ``(handled, result)``. When ``handled`` is false, fall through to
@@ -198,10 +236,11 @@ class SwitchCliDispatcher:
             op = s._perform_switch(
                 target, intent=intent, emit_output=not json_output,
             )
-            result = (
-                s._switch_result_from_op(op, strategy_label, warnings)
-                if json_output else None
-            )
+            if json_output:
+                assert op is not None
+                result = s._switch_result_from_op(op, strategy_label, warnings)
+            else:
+                result = None
             return True, result
         if note == "current-unavailable":
             if json_output:
@@ -286,18 +325,18 @@ class SwitchCliDispatcher:
         strategy: str | None,
         intent: CliSwitchIntent,
         strategy_label: str,
-        sequence: list,
-        active_account,
+        sequence: list[Any],
+        active_account: Any,
         current_num: str | None,
-        current_ref: dict | None,
+        current_ref: dict[str, Any] | None,
         json_output: bool,
         warnings: list[str],
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         """Find the next rotation target and perform the switch."""
         s = self._switcher
         anchor = current_num if strategy == "next-available" else active_account
         try:
-            current_index = sequence.index(int(anchor))
+            current_index = sequence.index(int(cast(Any, anchor)))
         except (TypeError, ValueError):
             try:
                 current_index = sequence.index(active_account)
@@ -323,7 +362,9 @@ class SwitchCliDispatcher:
                     )
                 continue
             if strategy == "next-available":
-                headroom = oauth.account_headroom(usage.get(candidate))
+                headroom = oauth.account_headroom(
+                    cast("dict[str, Any] | None", usage.get(candidate)),
+                )
                 if headroom is not None and headroom <= 0:
                     skipped_exhausted.append(candidate)
                     if json_output:
@@ -368,23 +409,23 @@ class SwitchCliDispatcher:
         op = s._perform_switch(
             next_account, intent=intent, emit_output=not json_output,
         )
-        return (
-            s._switch_result_from_op(op, strategy_label, warnings)
-            if json_output else None
-        )
+        if json_output:
+            assert op is not None
+            return s._switch_result_from_op(op, strategy_label, warnings)
+        return None
 
     def _next_available(
         self,
         *,
         intent: CliSwitchIntent,
         strategy_label: str,
-        sequence: list,
-        active_account,
+        sequence: list[Any],
+        active_account: Any,
         current_num: str | None,
-        current_ref: dict | None,
+        current_ref: dict[str, Any] | None,
         json_output: bool,
         warnings: list[str],
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         return self._rotation_target(
             strategy="next-available",
             intent=intent,
@@ -402,13 +443,13 @@ class SwitchCliDispatcher:
         *,
         intent: CliSwitchIntent,
         strategy_label: str,
-        sequence: list,
-        active_account,
+        sequence: list[Any],
+        active_account: Any,
         current_num: str | None,
-        current_ref: dict | None,
+        current_ref: dict[str, Any] | None,
         json_output: bool,
         warnings: list[str],
-    ) -> dict | None:
+    ) -> dict[str, Any] | None:
         return self._rotation_target(
             strategy=None,
             intent=intent,

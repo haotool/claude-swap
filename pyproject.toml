@@ -98,12 +98,6 @@ module = [
 ]
 strict = true
 
-[[tool.mypy.overrides]]
-module = [
-    "claude_swap.switch_cli",
-    "claude_swap.tui",
-]
-ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
