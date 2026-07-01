@@ -396,17 +396,39 @@ class ListReporter:
                 live = self._host._read_credentials() or ""
                 live_oauth = oauth.extract_oauth_data(live) if live else None
                 live_refresh = live_oauth.get("refreshToken") if live_oauth else None
-                if (
-                    self._active_cc_running()
-                    or self._host._live_session_pids(num, acct_email)
-                    or live_refresh != original_refresh
-                ):
+                if live_refresh != original_refresh:
+                    # Someone else already rotated the live token while we were
+                    # refreshing; ours is stale — drop it (no back-up either).
                     persist_skipped = True
                     self._logger.warning(
-                        "Active-account refresh for %s (%s): owner appeared or refresh "
-                        "token changed mid-refresh; discarding rotated credential.",
+                        "Active-account refresh for %s (%s): refresh token changed "
+                        "mid-refresh; discarding rotated credential.",
                         num, acct_email,
                     )
+                    return
+                if self._active_cc_running() or self._host._live_session_pids(
+                    num, acct_email
+                ):
+                    # Claude Code appeared mid-refresh and owns the live store.
+                    # We already consumed the single-use refresh token, so do NOT
+                    # discard the rotation (that would leave a dead token on disk):
+                    # back it up so a later switch recovers it, but leave the live
+                    # credentials untouched to avoid clobbering the owner.
+                    persist_skipped = True
+                    try:
+                        self._host._write_account_credentials(num, acct_email, new_creds)
+                    except Exception:
+                        self._logger.warning(
+                            "Active-account refresh for %s (%s): owner appeared and "
+                            "backing up the rotated credential failed.",
+                            num, acct_email, exc_info=True,
+                        )
+                    else:
+                        self._logger.warning(
+                            "Active-account refresh for %s (%s): owner appeared "
+                            "mid-refresh; kept live, backed up rotated credential.",
+                            num, acct_email,
+                        )
                     return
                 try:
                     self._host._write_credentials(new_creds)

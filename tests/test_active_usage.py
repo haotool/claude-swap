@@ -658,6 +658,38 @@ class TestActiveAccountRefresh:
         write_live.assert_not_called()
         write_backup.assert_not_called()
 
+    def test_owner_appears_mid_refresh_backs_up_rotation_keeps_live(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        # No owner at the pre-check, so the refresh runs and consumes the
+        # single-use token; the owner then appears before persist. The rotated
+        # credential must NOT be discarded (that would leave a dead token) — it
+        # is backed up (recoverable on a later switch) while live is untouched.
+        from claude_swap.json_output import USAGE_TOKEN_EXPIRED
+
+        switcher = self._switcher(sample_sequence_data)
+        usage_result = {"five_hour": {"pct": 10}}
+
+        def mock_fetch(account_num, email, credentials, is_active, persist_credentials):
+            assert is_active is False  # not owned at pre-check
+            persist_credentials(account_num, email, self._REFRESHED)
+            return usage_result
+
+        with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch(
+                 "claude_swap.list_reporter.ListReporter._active_cc_running",
+                 side_effect=[False, True],
+             ), \
+             patch.object(switcher, "_live_session_pids", return_value=[]), \
+             patch.object(switcher, "_write_credentials") as write_live, \
+             patch.object(switcher, "_write_account_credentials") as write_backup, \
+             patch("claude_swap.oauth.fetch_usage_for_account", side_effect=mock_fetch):
+            result = switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
+
+        assert result == USAGE_TOKEN_EXPIRED
+        write_live.assert_not_called()  # do not clobber the owner's live store
+        write_backup.assert_called_once_with("1", "test@example.com", self._REFRESHED)
+
     def test_write_failure_reports_token_expired(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
