@@ -18,8 +18,11 @@ Release version is defined in `pyproject.toml` (currently `0.15.0b2+haotool.1`).
 - **`switcher` is now mypy-strict:** the `ignore_errors` carve-out for
   `claude_swap.switcher` was removed after typing its `sequence.json`,
   usage-cache, and config-dict flows and fixing the `ListHost` /
-  `SwitchCliHost` protocol signatures. Only `switch_cli` and `tui` remain
-  carved out. Internal typing only — no behavior change.
+  `SwitchCliHost` protocol signatures. Internal typing only — no behavior change.
+- **Whole package is now mypy-strict:** `switch_cli` and `tui` were typed too
+  (a `_RotationParams` TypedDict, precondition None-narrowing, and `curses.window`
+  annotations), removing the last `ignore_errors` entry — all 35 modules now pass
+  `mypy --strict`. Typing only — no behavior change.
 
 ## [0.15.0b2+haotool.1] — 2026-06-28
 

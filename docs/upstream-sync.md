@@ -10,8 +10,11 @@ After merging upstream changes or when preparing a clean publish branch from int
 
 ```bash
 git fetch upstream
-./scripts/build-clean-history.sh [SOURCE] [TARGET]
-# defaults: SOURCE=improve/p1-clean-code-convergence  TARGET=publish/clean
+# Regenerate publish/clean via the maintainer's build-clean-history.sh helper
+# (kept in the maintainer's working repo — NOT shipped in this tree): back up
+# the branch, replay the fork's logical commit groups on top of upstream/main,
+# verify each commit is green and the final tree matches the backup, then
+# force-with-lease push. defaults: SOURCE=improve/p1-clean-code-convergence  TARGET=publish/clean
 ```
 
 Review the log:

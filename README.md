@@ -154,7 +154,7 @@ guess from stale cache — they require fresh usage snapshots (from polling or
 
 > **Beta:** automated switching is new. Usage percentages come from the same
 > API as `cswap --list`. Please report any rough
-> edges via [Issues](https://github.com/realiti4/claude-swap/issues).
+> edges via [Issues](https://github.com/haotool/claude-swap/issues).
 
 #### Run it in the background
 
