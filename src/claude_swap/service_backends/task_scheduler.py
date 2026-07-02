@@ -134,6 +134,13 @@ def _build_task_xml(switcher: ServiceHost) -> str:
     ET.SubElement(settings, f"{{{_TASK_NS}}}StartWhenAvailable").text = "true"
     ET.SubElement(settings, f"{{{_TASK_NS}}}Hidden").text = "true"
     ET.SubElement(settings, f"{{{_TASK_NS}}}Enabled").text = "true"
+    # The monitor is a resident process, so the schema defaults are hostile:
+    # ExecutionTimeLimit defaults to PT72H (task hard-killed after 72 hours)
+    # and the battery settings default to true (never starts on battery,
+    # killed when unplugging). PT0S means "no time limit".
+    ET.SubElement(settings, f"{{{_TASK_NS}}}ExecutionTimeLimit").text = "PT0S"
+    ET.SubElement(settings, f"{{{_TASK_NS}}}DisallowStartIfOnBatteries").text = "false"
+    ET.SubElement(settings, f"{{{_TASK_NS}}}StopIfGoingOnBatteries").text = "false"
     restart = ET.SubElement(settings, f"{{{_TASK_NS}}}RestartOnFailure")
     ET.SubElement(restart, f"{{{_TASK_NS}}}Interval").text = "PT1M"
     ET.SubElement(restart, f"{{{_TASK_NS}}}Count").text = "3"

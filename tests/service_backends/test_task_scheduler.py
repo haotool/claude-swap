@@ -88,6 +88,15 @@ class TestBuildTaskXml:
         assert "<Command>C:\\venv\\Scripts\\pythonw.exe</Command>" in xml
         assert "<Arguments>-m claude_swap --monitor</Arguments>" in xml
 
+    def test_long_running_monitor_settings(self, temp_home: Path):
+        # Schema defaults would kill the resident monitor: ExecutionTimeLimit
+        # defaults to PT72H, and both battery settings default to true.
+        switcher = ClaudeAccountSwitcher()
+        xml = ts_backend._build_task_xml(switcher)
+        assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml
+        assert "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" in xml
+        assert "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>" in xml
+
     def test_arguments_carry_service_monitor_flag(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         xml = ts_backend._build_task_xml(switcher)
