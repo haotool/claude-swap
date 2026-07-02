@@ -14,20 +14,28 @@ from claude_swap.cache import MISSING, read_cache, write_cache
 class TestReadCache:
     def test_returns_data_within_ttl(self, tmp_path):
         cache_file = tmp_path / "test.json"
-        cache_file.write_text(json.dumps({
-            "timestamp": time.time(),
-            "data": {"key": "value"},
-        }))
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "timestamp": time.time(),
+                    "data": {"key": "value"},
+                }
+            )
+        )
 
         result = read_cache(cache_file, ttl=60)
         assert result == {"key": "value"}
 
     def test_returns_missing_when_expired(self, tmp_path):
         cache_file = tmp_path / "test.json"
-        cache_file.write_text(json.dumps({
-            "timestamp": time.time() - 100,
-            "data": {"key": "value"},
-        }))
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "timestamp": time.time() - 100,
+                    "data": {"key": "value"},
+                }
+            )
+        )
 
         result = read_cache(cache_file, ttl=60)
         assert result is MISSING
@@ -45,10 +53,14 @@ class TestReadCache:
 
     def test_cached_none_is_distinguishable_from_miss(self, tmp_path):
         cache_file = tmp_path / "test.json"
-        cache_file.write_text(json.dumps({
-            "timestamp": time.time(),
-            "data": None,
-        }))
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "timestamp": time.time(),
+                    "data": None,
+                }
+            )
+        )
 
         result = read_cache(cache_file, ttl=60)
         assert result is None
@@ -134,7 +146,9 @@ class TestUsageSlotTrusted:
         legacy = {"five_hour": {"pct": 10.0}}
         assert _usage_slot_trusted(legacy, now) is False
 
-        fresh_error = _usage_error_to_cache(oauth.UsageFetchError(reason="network_error"))
+        fresh_error = _usage_error_to_cache(
+            oauth.UsageFetchError(reason="network_error")
+        )
         assert isinstance(fresh_error.get("_cached_at"), float)
         assert _usage_slot_trusted(fresh_error, now) is True
         assert _usage_slot_trusted(legacy, now) is False
@@ -237,10 +251,21 @@ class TestPersistRetryAfter:
         # rather than return an undecayed (stale) backoff.
         from claude_swap.usage_cache import extract_retry_after
 
-        assert extract_retry_after({"_last_rate_limit": {"retry_after": "90"}}, 5.0) is None
-        assert extract_retry_after(
-            {"_last_rate_limit": {"retry_after": "90", "at": 0}}, 5.0,
-        ) is None
-        assert extract_retry_after(
-            {"_last_rate_limit": {"retry_after": "90", "at": "bad"}}, 5.0,
-        ) is None
+        assert (
+            extract_retry_after({"_last_rate_limit": {"retry_after": "90"}}, 5.0)
+            is None
+        )
+        assert (
+            extract_retry_after(
+                {"_last_rate_limit": {"retry_after": "90", "at": 0}},
+                5.0,
+            )
+            is None
+        )
+        assert (
+            extract_retry_after(
+                {"_last_rate_limit": {"retry_after": "90", "at": "bad"}},
+                5.0,
+            )
+            is None
+        )

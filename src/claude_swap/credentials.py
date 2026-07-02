@@ -23,8 +23,9 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
-from typing import Any, Callable, Protocol, TypeVar
+from typing import Any, Callable, NamedTuple, Protocol, TypeVar
 
 from claude_swap import macos_keychain
 from claude_swap.exceptions import CredentialWriteError
@@ -51,8 +52,18 @@ CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # lives in ``~/.claude.json`` as ``primaryApiKey`` (see below).
 CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE = "Claude Code"
 
+_ACTIVE_READ_ATTEMPTS = 2
+_ACTIVE_READ_RETRY_DELAY = 0.3
+
 
 _T = TypeVar("_T")
+
+
+class ActiveCredentials(NamedTuple):
+    """Classified result of reading Claude Code's active credential."""
+
+    value: str | None
+    keychain_unavailable: bool
 
 
 def looks_like_api_key(credentials: str | None) -> bool:
@@ -146,35 +157,56 @@ class CredentialStore:
     def _read_credentials(self) -> str | None:
         """Read Claude Code's active credential — OAuth *or* managed API key.
 
-        Tries the OAuth credential first (Keychain "Claude Code-credentials" on
-        macOS when usable, then the plaintext ``~/.claude/.credentials.json`` Claude
-        Code also falls back to), and only then the managed-key locations (macOS
-        Keychain "Claude Code", then ``~/.claude.json`` ``primaryApiKey``). Trying
-        OAuth fully first means a macOS OAuth login that only has a file fallback
-        (Keychain empty) is never misread as an API key. A returned managed key is a
-        raw ``sk-ant-api…`` string — callers distinguish it via ``looks_like_api_key``.
-        Non-mutating.
-
-        Returns:
-            Credential string if found, "" if not found, None on a file read error.
+        Thin wrapper preserving the historic ``str | None`` contract: credential
+        string if found, ``""`` if absent, ``None`` on plaintext-file read error.
+        Callers that need to distinguish an unreadable macOS Keychain from a real
+        empty slot should use :meth:`_read_active_credentials`.
         """
-        # 1. OAuth Keychain (macOS, when usable).
-        if self._use_keychain():
+        return self._read_active_credentials().value
+
+    def _read_active_oauth_keychain(self) -> tuple[str | None, bool]:
+        """Read the active OAuth Keychain item with one bounded retry.
+
+        Returns ``(value, failed)``. A missing item returns ``(None, False)``; a
+        locked/denied/timed-out Keychain returns ``(None, True)`` only after every
+        attempt fails.
+        """
+        last_error: Exception | None = None
+        for attempt in range(_ACTIVE_READ_ATTEMPTS):
             try:
-                val = self._kc_call(
+                value = self._kc_call(
                     macos_keychain.get_password,
                     CLAUDE_CODE_KEYCHAIN_SERVICE,
                     macos_keychain.keychain_account_name(),
                 )
+                self._keychain_usable_cache = True
+                return value, False
             except macos_keychain.KEYCHAIN_ERRORS as e:
-                # Locked / denied / unavailable Keychain (rc-44 "not found" comes
-                # back as None, not raised). _kc_call has flipped routing to file
-                # mode; fall through to the plaintext file Claude Code uses too.
-                # (A programming error is NOT caught here — it propagates.)
-                self._host._logger.warning(f"Keychain read failed, trying file: {e}")
-                val = None
+                last_error = e
+                if attempt + 1 < _ACTIVE_READ_ATTEMPTS:
+                    time.sleep(_ACTIVE_READ_RETRY_DELAY)
+        self._host._logger.warning(
+            f"Keychain read failed after {_ACTIVE_READ_ATTEMPTS} attempt(s), "
+            f"trying file: {last_error}"
+        )
+        return None, True
+
+    def _read_active_credentials(self) -> ActiveCredentials:
+        """Read Claude Code's active credential, classifying Keychain failures.
+
+        Tries the OAuth credential first (Keychain "Claude Code-credentials" on
+        macOS when usable, then the plaintext file), and only then managed-key
+        locations. ``keychain_unavailable`` is True only when the OAuth Keychain
+        read failed and no file/managed-key fallback covered it.
+        """
+        keychain_failed = False
+
+        if self._use_keychain():
+            val, keychain_failed = self._read_active_oauth_keychain()
             if val:
-                return val
+                return ActiveCredentials(val, False)
+        elif self._host.platform == Platform.MACOS:
+            keychain_failed = True
 
         # 2. OAuth plaintext file (Claude Code's own fallback; every platform).
         cred_file = get_credentials_path()
@@ -183,15 +215,15 @@ class CredentialStore:
                 text = cred_file.read_text(encoding="utf-8")
             except Exception as e:
                 self._host._logger.error(f"Failed to read credentials file: {e}")
-                return None
+                return ActiveCredentials(None, False)
             if text.strip():
-                return text
+                return ActiveCredentials(text, False)
 
         # 3. Managed API key (Keychain "Claude Code" on macOS, then primaryApiKey).
         key = self._read_managed_key()
         if key:
-            return key
-        return ""
+            return ActiveCredentials(key, False)
+        return ActiveCredentials("", keychain_failed)
 
     def _read_managed_key(self) -> str:
         """Read the active managed API key, or "" when absent. Non-mutating.

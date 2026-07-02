@@ -135,7 +135,8 @@ class TestSelectFrom:
         screen = stub_screen()
         screen.getch.side_effect = [tui.curses.KEY_UP, 10]
         result = tui._select_from(
-            screen, "t",
+            screen,
+            "t",
             items=[("a", "1"), ("b", "2"), ("c", "3")],
         )
         assert result == "3"  # wrapped to last
@@ -145,7 +146,8 @@ class TestSelectFrom:
         screen.getch.side_effect = [tui.curses.KEY_DOWN, 10]
         # second item has value=None — selecting it should return None
         result = tui._select_from(
-            screen, "t",
+            screen,
+            "t",
             items=[("real", "x"), ("-- Cancel --", None)],
         )
         assert result is None
@@ -201,11 +203,13 @@ class TestDoAdd:
         screen = stub_screen()
         # First menu: Enter on "From current Claude Code login" (idx 0)
         screen.getch.side_effect = [10]
-        with patch.object(switcher, "add_account") as mock_add, \
-             patch("claude_swap.tui.curses.def_prog_mode"), \
-             patch("claude_swap.tui.curses.endwin"), \
-             patch("claude_swap.tui.curses.reset_prog_mode"), \
-             patch("builtins.input", return_value=""):
+        with (
+            patch.object(switcher, "add_account") as mock_add,
+            patch("claude_swap.tui.curses.def_prog_mode"),
+            patch("claude_swap.tui.curses.endwin"),
+            patch("claude_swap.tui.curses.reset_prog_mode"),
+            patch("builtins.input", return_value=""),
+        ):
             tui._do_add(screen, switcher, has_token_flow=False)
         mock_add.assert_called_once_with()
 
@@ -237,11 +241,13 @@ class TestDoAdd:
         keys += [ord(c) for c in "tok"] + [10]  # token + Enter
         screen.getch.side_effect = keys
 
-        with patch("claude_swap.tui.curses.def_prog_mode"), \
-             patch("claude_swap.tui.curses.endwin"), \
-             patch("claude_swap.tui.curses.reset_prog_mode"), \
-             patch("claude_swap.tui.curses.curs_set"), \
-             patch("builtins.input", return_value=""):
+        with (
+            patch("claude_swap.tui.curses.def_prog_mode"),
+            patch("claude_swap.tui.curses.endwin"),
+            patch("claude_swap.tui.curses.reset_prog_mode"),
+            patch("claude_swap.tui.curses.curs_set"),
+            patch("builtins.input", return_value=""),
+        ):
             tui._do_add(screen, switcher, has_token_flow=True)
 
         switcher.add_account_from_token.assert_called_once_with(
@@ -268,8 +274,10 @@ class TestDoRemove:
         keys += [ord("n"), 10]  # confirm: "n"
         screen.getch.side_effect = keys
 
-        with patch.object(switcher, "remove_account") as mock_rm, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch.object(switcher, "remove_account") as mock_rm,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._do_remove(screen, switcher)
 
         mock_rm.assert_not_called()
@@ -281,8 +289,10 @@ class TestDoRemove:
         screen = stub_screen()
         screen.getch.side_effect = [10, ord("y"), 10, ord("q")]
 
-        with patch.object(switcher, "remove_account") as mock_rm, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch.object(switcher, "remove_account") as mock_rm,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._do_remove(screen, switcher)
 
         mock_rm.assert_called_once_with("3", assume_yes=True)
@@ -306,7 +316,8 @@ class TestMainLoopHealth:
         switcher = MagicMock(spec=ClaudeAccountSwitcher)
         # _status_line consults the switcher; keep it cheap and deterministic.
         switcher.get_auto_switch_config.return_value = {
-            "enabled": False, "threshold": 90,
+            "enabled": False,
+            "threshold": 90,
         }
         switcher._get_sequence_data_migrated.return_value = None
         switcher._get_current_account.return_value = None
@@ -314,12 +325,12 @@ class TestMainLoopHealth:
         screen = stub_screen(rows=40, cols=120)
         # Menu order: switch, add, remove, refresh, list, health(5),
         # status, watch, auto, quit(9). Pick "health" (idx 5), then quit (idx 9).
-        screen.getch.side_effect = (
-            self._select_keys(5) + self._select_keys(9)
-        )
+        screen.getch.side_effect = self._select_keys(5) + self._select_keys(9)
 
-        with patch("claude_swap.tui._run_inline") as mock_inline, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch("claude_swap.tui._run_inline") as mock_inline,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             rc = tui._main_loop(screen, switcher)
 
         assert rc == 0
@@ -329,26 +340,28 @@ class TestMainLoopHealth:
         assert title == "Account health & usage"
         fn()
         switcher.list_accounts.assert_called_once_with(
-            show_token_status=True, show_health=True,
+            show_token_status=True,
+            show_health=True,
         )
 
     def test_quick_list_entry_uses_no_flags(self, temp_home: Path):
         """Regression: the list entry stays flag-free."""
         switcher = MagicMock(spec=ClaudeAccountSwitcher)
         switcher.get_auto_switch_config.return_value = {
-            "enabled": False, "threshold": 90,
+            "enabled": False,
+            "threshold": 90,
         }
         switcher._get_sequence_data_migrated.return_value = None
         switcher._get_current_account.return_value = None
 
         screen = stub_screen(rows=40, cols=120)
         # Pick "list" (idx 4), then quit (idx 9).
-        screen.getch.side_effect = (
-            self._select_keys(4) + self._select_keys(9)
-        )
+        screen.getch.side_effect = self._select_keys(4) + self._select_keys(9)
 
-        with patch("claude_swap.tui._run_inline") as mock_inline, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch("claude_swap.tui._run_inline") as mock_inline,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             rc = tui._main_loop(screen, switcher)
 
         assert rc == 0
@@ -385,7 +398,9 @@ class TestCliIntegration:
             env.pop(_var, None)
         result = subprocess.run(
             [_sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True, text=True, env=env,
+            capture_output=True,
+            text=True,
+            env=env,
         )
         assert result.returncode == 0
         assert "--tui" in result.stdout
@@ -394,11 +409,13 @@ class TestCliIntegration:
         import sys as _sys
         from claude_swap import cli
 
-        with patch.object(_sys, "argv", ["claude-swap", "--tui"]), \
-             patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
-             patch("claude_swap.tui.run", return_value=0) as mock_run, \
-             patch("os.geteuid", return_value=1000), \
-             patch("claude_swap.update_check.check_for_update", return_value=None):
+        with (
+            patch.object(_sys, "argv", ["claude-swap", "--tui"]),
+            patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls,
+            patch("claude_swap.tui.run", return_value=0) as mock_run,
+            patch("os.geteuid", return_value=1000),
+            patch("claude_swap.update_check.check_for_update", return_value=None),
+        ):
             with pytest.raises(SystemExit) as exc:
                 cli.main()
             assert exc.value.code == 0
@@ -499,8 +516,11 @@ class TestPager:
     def test_scroll_down_then_quit_no_error(self):
         screen = stub_screen(rows=8, cols=40)
         screen.getch.side_effect = [
-            tui.curses.KEY_DOWN, tui.curses.KEY_NPAGE,
-            tui.curses.KEY_END, tui.curses.KEY_HOME, ord("q"),
+            tui.curses.KEY_DOWN,
+            tui.curses.KEY_NPAGE,
+            tui.curses.KEY_END,
+            tui.curses.KEY_HOME,
+            ord("q"),
         ]
         tui._pager(screen, "T", [f"row{i}" for i in range(100)])
 
@@ -522,17 +542,21 @@ class TestAutoSwitchHandlers:
     def test_auto_threshold_persists_valid_value(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        with patch("claude_swap.tui._prompt_text", return_value="80"), \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch("claude_swap.tui._prompt_text", return_value="80"),
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._auto_threshold(screen, switcher)
         assert switcher.get_auto_switch_config()["threshold"] == 80
 
     def test_auto_threshold_rejects_non_integer(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        with patch("claude_swap.tui._prompt_text", return_value="abc"), \
-             patch("claude_swap.tui._show_message") as mock_message, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch("claude_swap.tui._prompt_text", return_value="abc"),
+            patch("claude_swap.tui._show_message") as mock_message,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._auto_threshold(screen, switcher)
         mock_message.assert_called_once()
         assert "whole number" in mock_message.call_args.args[1]
@@ -540,9 +564,11 @@ class TestAutoSwitchHandlers:
     def test_auto_threshold_surfaces_switcher_validation(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        with patch("claude_swap.tui._prompt_text", return_value="101"), \
-             patch("claude_swap.tui._show_message") as mock_message, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch("claude_swap.tui._prompt_text", return_value="101"),
+            patch("claude_swap.tui._show_message") as mock_message,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._auto_threshold(screen, switcher)
         mock_message.assert_called_once()
         assert "Invalid threshold:" in mock_message.call_args.args[1]
@@ -559,6 +585,7 @@ class TestRunInline:
 
         def fn():
             from claude_swap import printer
+
             print(printer.accent("hello"))
             print("plain")
 
@@ -573,6 +600,7 @@ class TestRunInline:
 
     def test_stray_input_becomes_message_and_stdin_restored(self):
         import sys as _sys
+
         screen = stub_screen()
         before = _sys.stdin
 
@@ -612,8 +640,10 @@ class TestWatch:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
-        with patch.object(switcher, "list_accounts") as mock_list, \
-             patch("claude_swap.tui.time.monotonic", return_value=100.0):
+        with (
+            patch.object(switcher, "list_accounts") as mock_list,
+            patch("claude_swap.tui.time.monotonic", return_value=100.0),
+        ):
             tui._watch_loop(screen, switcher, interval=5)
         mock_list.assert_called()
         screen.timeout.assert_any_call(250)
@@ -626,19 +656,23 @@ class TestWatch:
         # First loop refreshes (monotonic 100), then '+' (interval→6),
         # then 'q'. monotonic stays 100 so no second refresh.
         screen.getch.side_effect = [ord("+"), ord("q")]
-        with patch.object(switcher, "list_accounts") as mock_list, \
-             patch("claude_swap.tui.time.monotonic", return_value=100.0):
+        with (
+            patch.object(switcher, "list_accounts") as mock_list,
+            patch("claude_swap.tui.time.monotonic", return_value=100.0),
+        ):
             tui._watch_loop(screen, switcher, interval=5)
         assert mock_list.call_count == 1
 
 
 class TestInitColors:
     def test_initializes_pairs_when_color_supported(self):
-        with patch("claude_swap.tui.curses.has_colors", return_value=True), \
-             patch("claude_swap.tui.curses.start_color"), \
-             patch("claude_swap.tui.curses.use_default_colors"), \
-             patch("claude_swap.tui.curses.init_pair") as mock_pair, \
-             patch("claude_swap.tui.curses.COLORS", 256, create=True):
+        with (
+            patch("claude_swap.tui.curses.has_colors", return_value=True),
+            patch("claude_swap.tui.curses.start_color"),
+            patch("claude_swap.tui.curses.use_default_colors"),
+            patch("claude_swap.tui.curses.init_pair") as mock_pair,
+            patch("claude_swap.tui.curses.COLORS", 256, create=True),
+        ):
             tui._colors_initialized = False
             tui._init_colors()
         assert mock_pair.call_count == 4
@@ -656,11 +690,15 @@ class TestMonitorPidFacade:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
-        with patch("claude_swap.tui._acquire_monitor_pid", return_value=None) as mock_acquire, \
-             patch("claude_swap.tui._release_monitor_pid") as mock_release, \
-             patch("claude_swap.tui.monitor_step") as mock_step, \
-             patch("claude_swap.tui.get_logger") as mock_logger, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch(
+                "claude_swap.tui._acquire_monitor_pid", return_value=None
+            ) as mock_acquire,
+            patch("claude_swap.tui._release_monitor_pid") as mock_release,
+            patch("claude_swap.tui.monitor_step") as mock_step,
+            patch("claude_swap.tui.get_logger") as mock_logger,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             mock_step.return_value = MagicMock(
                 threshold=95,
                 pct=10.0,
@@ -675,10 +713,12 @@ class TestMonitorPidFacade:
     def test_run_auto_monitor_blocks_when_acquire_returns_pid(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        with patch("claude_swap.tui._acquire_monitor_pid", return_value=9999), \
-             patch("claude_swap.tui._show_message") as mock_message, \
-             patch("claude_swap.tui.monitor_step") as mock_step, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch("claude_swap.tui._acquire_monitor_pid", return_value=9999),
+            patch("claude_swap.tui._show_message") as mock_message,
+            patch("claude_swap.tui.monitor_step") as mock_step,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
         mock_step.assert_not_called()
         mock_message.assert_called_once()
@@ -693,9 +733,7 @@ class TestServiceStateCrossPlatform:
     ):
         # Any platform with a backend (e.g. Linux/systemd) must surface the real
         # state, not the old hardcoded "unsupported".
-        monkeypatch.setattr(
-            "claude_swap.tui.service.service_state", lambda: "loaded"
-        )
+        monkeypatch.setattr("claude_swap.tui.service.service_state", lambda: "loaded")
         assert tui._service_state() == "loaded"
 
     def test_unsupported_platform_degrades(self, monkeypatch: pytest.MonkeyPatch):

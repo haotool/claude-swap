@@ -166,11 +166,14 @@ class TestInstall:
         assert (switcher.backup_dir / "logs").is_dir()
 
         assert ["systemctl", "--user", "daemon-reload"] in calls
-        assert ["systemctl", "--user", "enable", "--now", systemd_backend.UNIT_NAME] in calls
-        assert any(
-            argv[:2] == ["loginctl", "enable-linger"]
-            for argv in calls
-        )
+        assert [
+            "systemctl",
+            "--user",
+            "enable",
+            "--now",
+            systemd_backend.UNIT_NAME,
+        ] in calls
+        assert any(argv[:2] == ["loginctl", "enable-linger"] for argv in calls)
 
         out = capsys.readouterr().out
         assert "Service installed" in out
@@ -193,7 +196,10 @@ class TestInstall:
         assert "Restart=on-failure" in unit_path.read_text(encoding="utf-8")
 
     def test_wsl_install_prints_guidance(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_linux(monkeypatch)
         config_home = temp_home / ".config"
@@ -201,7 +207,9 @@ class TestInstall:
         monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
         monkeypatch.setenv("USER", "dev")
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
-        monkeypatch.setattr(systemd_backend, "_unit_path", lambda: _unit_path(config_home))
+        monkeypatch.setattr(
+            systemd_backend, "_unit_path", lambda: _unit_path(config_home)
+        )
         monkeypatch.setattr(service.subprocess, "run", _stub_run())
         monkeypatch.setattr(systemd_backend.service_spec, "is_wsl", lambda: True)
 
@@ -214,13 +222,18 @@ class TestInstall:
         assert ".claude" in out
 
     def test_linger_failure_tolerated_with_warning(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_linux(monkeypatch)
         config_home = temp_home / ".config"
         monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
-        monkeypatch.setattr(systemd_backend, "_unit_path", lambda: _unit_path(config_home))
+        monkeypatch.setattr(
+            systemd_backend, "_unit_path", lambda: _unit_path(config_home)
+        )
         monkeypatch.setattr(systemd_backend.service_spec, "is_wsl", lambda: False)
 
         def fake_run(argv, **kwargs):
@@ -257,7 +270,9 @@ class TestInstall:
         config_home = temp_home / ".config"
         monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
-        monkeypatch.setattr(systemd_backend, "_unit_path", lambda: _unit_path(config_home))
+        monkeypatch.setattr(
+            systemd_backend, "_unit_path", lambda: _unit_path(config_home)
+        )
 
         def fake_run(argv, **kwargs):
             completed = MagicMock()
@@ -277,7 +292,10 @@ class TestInstall:
 
 class TestUninstall:
     def test_disables_removes_unit_and_reloads(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_linux(monkeypatch)
         config_home = temp_home / ".config"
@@ -307,7 +325,10 @@ class TestUninstall:
         assert "Service removed" in capsys.readouterr().out
 
     def test_idempotent_when_absent(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_linux(monkeypatch)
         config_home = temp_home / ".config"
@@ -416,7 +437,9 @@ class TestRequireSystemd:
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
         # `systemctl --user is-system-running` -> "offline": manager unreachable.
         monkeypatch.setattr(
-            service.subprocess, "run", _stub_run(returncode=1, stdout="offline"),
+            service.subprocess,
+            "run",
+            _stub_run(returncode=1, stdout="offline"),
         )
         with pytest.raises(ClaudeSwitchError, match="per-user manager"):
             systemd_backend._require_systemd()
@@ -426,12 +449,16 @@ class TestRequireSystemd:
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
         # "degraded" still means the user manager is up — must not raise.
         monkeypatch.setattr(
-            service.subprocess, "run", _stub_run(returncode=1, stdout="degraded"),
+            service.subprocess,
+            "run",
+            _stub_run(returncode=1, stdout="degraded"),
         )
         systemd_backend._require_systemd()
 
     def test_passes_when_bus_reachable_but_empty(self, monkeypatch: pytest.MonkeyPatch):
         _force_linux(monkeypatch)
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
-        monkeypatch.setattr(service.subprocess, "run", _stub_run(returncode=0, stdout=""))
+        monkeypatch.setattr(
+            service.subprocess, "run", _stub_run(returncode=0, stdout="")
+        )
         systemd_backend._require_systemd()

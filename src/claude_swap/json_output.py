@@ -24,6 +24,10 @@ USAGE_TOKEN_EXPIRED = "token expired"
 # reported as this sentinel instead of being fetched from the OAuth usage API.
 USAGE_API_KEY = "api key"
 USAGE_API_KEY_DISPLAY = "API key (no quota)"
+USAGE_KEYCHAIN_UNAVAILABLE = "keychain unavailable"
+USAGE_KEYCHAIN_UNAVAILABLE_DISPLAY = (
+    "keychain unavailable — locked or in use; try again"
+)
 USAGE_TOKEN_EXPIRED_DISPLAY = (
     "token expired — Claude Code refreshes the active account"
 )
@@ -35,6 +39,7 @@ UsageEntry = dict[str, Any] | str | oauth.UsageFetchError | None
 # switcher and the list reporter so trust checks can never diverge.
 _KNOWN_USAGE_SENTINELS = frozenset({
     USAGE_API_KEY,
+    USAGE_KEYCHAIN_UNAVAILABLE,
     USAGE_NO_CREDENTIALS,
     USAGE_TOKEN_EXPIRED,
 })
@@ -111,6 +116,8 @@ def usage_fields(entry: UsageEntry) -> tuple[str, dict[str, Any] | None]:
         return "token_expired", None
     if entry == USAGE_API_KEY:
         return "api_key", None
+    if entry == USAGE_KEYCHAIN_UNAVAILABLE:
+        return "keychain_unavailable", None
     if entry == USAGE_NO_CREDENTIALS:
         return "no_credentials", None
     if isinstance(entry, oauth.UsageFetchError):
@@ -129,6 +136,8 @@ def usage_display_line(entry: UsageEntry) -> str | None:
     """Human-readable one-liner for a collected usage sentinel."""
     if entry == USAGE_API_KEY:
         return USAGE_API_KEY_DISPLAY
+    if entry == USAGE_KEYCHAIN_UNAVAILABLE:
+        return USAGE_KEYCHAIN_UNAVAILABLE_DISPLAY
     if entry == USAGE_TOKEN_EXPIRED:
         return USAGE_TOKEN_EXPIRED_DISPLAY
     if entry == USAGE_NO_CREDENTIALS:

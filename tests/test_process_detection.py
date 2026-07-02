@@ -87,7 +87,9 @@ class TestListSessions:
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
         _write_session(sessions_dir, 1001, entrypoint="cli", cwd="/home/user/app")
-        _write_session(sessions_dir, 1002, entrypoint="claude-vscode", cwd="/home/user/web")
+        _write_session(
+            sessions_dir, 1002, entrypoint="claude-vscode", cwd="/home/user/web"
+        )
 
         with patch("claude_swap.process_detection.is_pid_alive", return_value=True):
             result = list_sessions(tmp_path)
@@ -156,7 +158,8 @@ class TestListSessions:
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
         _write_session(
-            sessions_dir, 5000,
+            sessions_dir,
+            5000,
             sessionId="sess-abc",
             cwd="/projects/foo",
             startedAt=1700000000000,
@@ -213,7 +216,10 @@ class TestListIdeInstances:
         _write_ide_lock(ide_dir, 45000, pid=2001)
         _write_ide_lock(ide_dir, 45001, pid=2002)
 
-        with patch("claude_swap.process_detection.is_pid_alive", side_effect=lambda p: p == 2001):
+        with patch(
+            "claude_swap.process_detection.is_pid_alive",
+            side_effect=lambda p: p == 2001,
+        ):
             result = list_ide_instances(tmp_path)
 
         assert len(result) == 1

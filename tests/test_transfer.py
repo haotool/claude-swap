@@ -53,14 +53,18 @@ def _seed_account(
 ) -> None:
     """Write an account to backup + sequence.json."""
     creds_obj = creds if creds is not None else {**SAMPLE_CREDS, "_marker": email}
-    config_obj = config if config is not None else {
-        "oauthAccount": {
-            "emailAddress": email,
-            "accountUuid": f"acct-{num}",
-            "organizationUuid": org_uuid,
-            "organizationName": org_name,
+    config_obj = (
+        config
+        if config is not None
+        else {
+            "oauthAccount": {
+                "emailAddress": email,
+                "accountUuid": f"acct-{num}",
+                "organizationUuid": org_uuid,
+                "organizationName": org_name,
+            }
         }
-    }
+    )
     switcher._write_account_credentials(str(num), email, json.dumps(creds_obj))
     switcher._write_account_config(str(num), email, json.dumps(config_obj))
 
@@ -238,9 +242,11 @@ class TestImportLocking:
 
         dst_home = temp_home.parent / "dst_lock"
         dst_home.mkdir()
-        with patch("pathlib.Path.home", return_value=dst_home), \
-             patch.dict(os.environ, {"HOME": str(dst_home)}), \
-             patch("claude_swap.transfer.FileLock", SpyLock):
+        with (
+            patch("pathlib.Path.home", return_value=dst_home),
+            patch.dict(os.environ, {"HOME": str(dst_home)}),
+            patch("claude_swap.transfer.FileLock", SpyLock),
+        ):
             dst = _linux_switcher(dst_home)
             import_accounts(dst, str(out))
 
@@ -262,9 +268,7 @@ class TestConflictPolicy:
         seq = src._get_sequence_data()
         assert list(seq["accounts"].keys()) == ["1"]
 
-    def test_force_overwrites_existing_slot_in_place(
-        self, temp_home: Path, capsys
-    ):
+    def test_force_overwrites_existing_slot_in_place(self, temp_home: Path, capsys):
         """Critical: --force updates the local matching slot, NOT the exported slot.
 
         Setup: local slot 3 has alice@x.com. Local slot 1 has bob@x.com (different
@@ -360,9 +364,7 @@ class TestCrossPlatform:
                 dst = _linux_switcher(dst_home)
                 import_accounts(dst, str(out))
 
-                cred_file = (
-                    dst.credentials_dir / ".creds-1-alice@example.com.enc"
-                )
+                cred_file = dst.credentials_dir / ".creds-1-alice@example.com.enc"
                 assert cred_file.exists()
 
 
@@ -810,9 +812,7 @@ class TestValidateAllBeforeWrite:
                 raise OSError("simulated write failure")
             original_write(num, email, creds)
 
-        with patch.object(
-            s, "_write_account_credentials", side_effect=fail_on_third
-        ):
+        with patch.object(s, "_write_account_credentials", side_effect=fail_on_third):
             with pytest.raises(TransferError) as exc_info:
                 import_accounts(s, str(f))
 
@@ -880,7 +880,9 @@ class TestCleanHomeActivation:
                 # Live config + live credentials now exist for alice
                 assert config_path.exists()
                 live_config = json.loads(config_path.read_text())
-                assert live_config["oauthAccount"]["emailAddress"] == "alice@example.com"
+                assert (
+                    live_config["oauthAccount"]["emailAddress"] == "alice@example.com"
+                )
 
                 live_creds_path = dst_home / ".claude" / ".credentials.json"
                 assert live_creds_path.exists()
@@ -942,9 +944,7 @@ class TestCleanHomeActivation:
         final = dst._get_sequence_data()
         assert final["activeAccountNumber"] == 5
 
-    def test_active_seeded_to_resolved_slot_not_envelope_slot(
-        self, temp_home: Path
-    ):
+    def test_active_seeded_to_resolved_slot_not_envelope_slot(self, temp_home: Path):
         """Mixed-state: destination has unrelated account at the envelope's
         active slot number, but the envelope's active account itself was
         imported into a *different* slot. activeAccountNumber must point
@@ -1045,9 +1045,7 @@ class TestCleanHomeActivation:
                 merged = json.loads(config_path.read_text())
                 assert merged["oauthAccount"]["emailAddress"] == "alice@example.com"
 
-    def test_active_seeded_when_envelope_active_was_skipped(
-        self, temp_home: Path
-    ):
+    def test_active_seeded_when_envelope_active_was_skipped(self, temp_home: Path):
         """If the envelope's active account already existed locally and was
         skipped (no --force), activeAccountNumber should still seed to the
         existing local slot — that's where the migration intends to land."""
@@ -1128,9 +1126,7 @@ class TestSlimVsFullConfig:
         """If the source config somehow lacks oauthAccount, slim export
         must fail loudly — there's nothing to switch to without it."""
         s = _linux_switcher(temp_home)
-        _seed_account(
-            s, 1, "alice@example.com", config={"projects": {}, "userID": "x"}
-        )
+        _seed_account(s, 1, "alice@example.com", config={"projects": {}, "userID": "x"})
 
         with pytest.raises(TransferError, match="missing oauthAccount"):
             export_accounts(s, str(temp_home / "x.cswap"))
@@ -1178,17 +1174,17 @@ class TestExportSkipsBrokenSlots:
     backup credentials or config are missing, instead of aborting. --export
     with an explicit --account must keep failing for that one slot."""
 
-    def _break_credentials(self, switcher: ClaudeAccountSwitcher, num: int, email: str) -> None:
-        cred_file = (
-            switcher.credentials_dir / f".creds-{num}-{email}.enc"
-        )
+    def _break_credentials(
+        self, switcher: ClaudeAccountSwitcher, num: int, email: str
+    ) -> None:
+        cred_file = switcher.credentials_dir / f".creds-{num}-{email}.enc"
         if cred_file.exists():
             cred_file.unlink()
 
-    def _break_config(self, switcher: ClaudeAccountSwitcher, num: int, email: str) -> None:
-        cfg_file = (
-            switcher.configs_dir / f".claude-config-{num}-{email}.json"
-        )
+    def _break_config(
+        self, switcher: ClaudeAccountSwitcher, num: int, email: str
+    ) -> None:
+        cfg_file = switcher.configs_dir / f".claude-config-{num}-{email}.json"
         if cfg_file.exists():
             cfg_file.unlink()
 
@@ -1239,13 +1235,9 @@ class TestExportSkipsBrokenSlots:
         from claude_swap.exceptions import CredentialReadError
 
         with pytest.raises(CredentialReadError, match="no backup credentials"):
-            export_accounts(
-                s, str(temp_home / "x.cswap"), account="1"
-            )
+            export_accounts(s, str(temp_home / "x.cswap"), account="1")
 
-    def test_explicit_account_with_missing_config_hard_fails(
-        self, temp_home: Path
-    ):
+    def test_explicit_account_with_missing_config_hard_fails(self, temp_home: Path):
         s = _linux_switcher(temp_home)
         _seed_account(s, 1, "alice@example.com")
         _seed_account(s, 2, "bob@example.com")
@@ -1254,9 +1246,7 @@ class TestExportSkipsBrokenSlots:
         from claude_swap.exceptions import ConfigError
 
         with pytest.raises(ConfigError, match="no backup config"):
-            export_accounts(
-                s, str(temp_home / "x.cswap"), account="1"
-            )
+            export_accounts(s, str(temp_home / "x.cswap"), account="1")
 
     def test_all_slots_broken_raises_transfer_error(self, temp_home: Path):
         s = _linux_switcher(temp_home)
@@ -1268,9 +1258,7 @@ class TestExportSkipsBrokenSlots:
         with pytest.raises(TransferError, match="no exportable accounts"):
             export_accounts(s, str(temp_home / "x.cswap"))
 
-    def test_skipped_active_slot_clears_envelope_active(
-        self, temp_home: Path, capsys
-    ):
+    def test_skipped_active_slot_clears_envelope_active(self, temp_home: Path, capsys):
         """If the recorded activeAccountNumber's backup is missing and there's
         no live session to source it from, the slot is skipped — the envelope
         must not advertise that number as active or import would dangle."""
@@ -1293,9 +1281,7 @@ class TestExportSkipsBrokenSlots:
         assert [a["email"] for a in envelope["accounts"]] == ["bob@example.com"]
         assert envelope["activeAccountNumber"] is None
 
-    def test_stdout_pipe_mode_keeps_stdout_pure_json(
-        self, temp_home: Path, capsys
-    ):
+    def test_stdout_pipe_mode_keeps_stdout_pure_json(self, temp_home: Path, capsys):
         """cswap --export - must produce valid JSON on stdout even when one
         slot is broken — warning must go to stderr."""
         s = _linux_switcher(temp_home)
@@ -1362,9 +1348,7 @@ class TestImportSessionInvalidation:
         session_dir = session_dir_for(s.backup_dir, "1", "alice@example.com")
         pid_dir = session_dir / "sessions"
         pid_dir.mkdir(parents=True)
-        (pid_dir / f"{_os.getpid()}.json").write_text(
-            json.dumps({"pid": _os.getpid()})
-        )
+        (pid_dir / f"{_os.getpid()}.json").write_text(json.dumps({"pid": _os.getpid()}))
         (session_dir / ".credentials.json").write_text("pre-import creds")
 
         import_accounts(s, str(out), force=True)

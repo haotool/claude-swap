@@ -297,9 +297,7 @@ class TestFailures:
         assert fake.deleted == []
         assert not (switcher.backup_dir / ".migrations.json").exists()
         # The bad/partial file must not shadow the intact keyring entry.
-        assert not (
-            switcher.credentials_dir / ".creds-1-a@example.com.enc"
-        ).exists()
+        assert not (switcher.credentials_dir / ".creds-1-a@example.com.enc").exists()
 
     def test_partial_failure_migrates_rest_and_stays_unmarked(self, temp_home):
         switcher = _make_windows_switcher(temp_home)
@@ -450,9 +448,7 @@ class TestMacosKeyringToSecurity:
         _seed_sequence(switcher, {})
         assert migrations.migrate_macos_keyring_to_security(switcher) is True
 
-    def test_relocates_keyring_creds_to_security(
-        self, temp_home, block_real_keychain
-    ):
+    def test_relocates_keyring_creds_to_security(self, temp_home, block_real_keychain):
         switcher = _make_macos_switcher(temp_home)
         _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
         username = "account-1-a@example.com"
@@ -549,8 +545,9 @@ class TestMacosKeyringToSecurity:
         # Force the security read-back to disagree with what was written. The
         # migration reads the security service via the keychain-only helper
         # (_kc_read_backup), not the transparent .enc-wins backup methods.
-        with _patch_keyring(fake), patch.object(
-            switcher, "_kc_read_backup", side_effect=["", "WRONG"]
+        with (
+            _patch_keyring(fake),
+            patch.object(switcher, "_kc_read_backup", side_effect=["", "WRONG"]),
         ):
             with pytest.raises(MigrationIncomplete):
                 migrations.migrate_macos_keyring_to_security(switcher)
@@ -565,7 +562,9 @@ class TestMacosKeyringToSecurity:
         _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
         # Old item lives in the Keychain under the legacy service (here: the
         # in-memory security store seeded directly).
-        block_real_keychain.data[(KEYRING_SERVICE, "account-1-a@example.com")] = "sekret"
+        block_real_keychain.data[(KEYRING_SERVICE, "account-1-a@example.com")] = (
+            "sekret"
+        )
 
         # `import keyring` fails → migration reads old items via the security CLI.
         with patch.dict(sys.modules, {"keyring": None}):
@@ -622,7 +621,9 @@ class TestMacosKeyringToSecurity:
         switcher = _make_macos_switcher(temp_home)
         _seed_sequence(switcher, {"1": {"email": "a@example.com"}})
 
-        with patch.object(switcher, "_kc_read_backup", side_effect=KeychainError("locked")):
+        with patch.object(
+            switcher, "_kc_read_backup", side_effect=KeychainError("locked")
+        ):
             run_migrations(switcher)  # swallows MigrationIncomplete → left unmarked
 
         # Deferred cleanly: no fallback .enc written, migration not recorded.

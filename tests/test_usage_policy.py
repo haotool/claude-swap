@@ -37,8 +37,10 @@ def _headroom_select(
     num_accounts: int = 3,
 ) -> tuple[str | None, str]:
     s = bootstrap_switchable_accounts(temp_home, num_accounts=num_accounts)
-    with patch.object(s, "_usage_by_account", return_value=usage_map), \
-         patch.object(s, "_account_is_switchable", return_value=True):
+    with (
+        patch.object(s, "_usage_by_account", return_value=usage_map),
+        patch.object(s, "_account_is_switchable", return_value=True),
+    ):
         return s._select_best_switchable(current)
 
 
@@ -143,12 +145,15 @@ class TestCooldownPlannerGolden:
             "2": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T13:30:00+00:00"}},
             "3": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
         }
-        assert pick_best_from_snapshots(
-            lambda: {"sequence": [1, 2, 3]},
-            lambda _n: True,
-            95,
-            snapshots,
-        ) == "2"
+        assert (
+            pick_best_from_snapshots(
+                lambda: {"sequence": [1, 2, 3]},
+                lambda _n: True,
+                95,
+                snapshots,
+            )
+            == "2"
+        )
 
     def test_plan_stays_on_both_saturated_within_margin(self):
         decision = AutoSwitchDecisionContext(
@@ -157,8 +162,12 @@ class TestCooldownPlannerGolden:
             live_active_slot="1",
             sequence_active_slot="1",
             usage_by_slot={
-                "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:01:00+00:00"}},
-                "2": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}},
+                "1": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T16:01:00+00:00"}
+                },
+                "2": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}
+                },
             },
         )
         plan = plan_automated_switch(
@@ -181,8 +190,12 @@ class TestCooldownPlannerGolden:
             live_active_slot="1",
             sequence_active_slot="1",
             usage_by_slot={
-                "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:10:00+00:00"}},
-                "2": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}},
+                "1": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T16:10:00+00:00"}
+                },
+                "2": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}
+                },
             },
         )
         plan = plan_automated_switch(

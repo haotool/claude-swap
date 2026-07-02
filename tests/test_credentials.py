@@ -102,13 +102,15 @@ def test_file_backends(tmp_path: Path, platform: Platform):
 
 
 def _oauth_creds(token: str = "live-token") -> str:
-    return json.dumps({
-        "claudeAiOauth": {
-            "accessToken": token,
-            "refreshToken": "rt",
-            "expiresAt": 9_999_999_999_000,
-        },
-    })
+    return json.dumps(
+        {
+            "claudeAiOauth": {
+                "accessToken": token,
+                "refreshToken": "rt",
+                "expiresAt": 9_999_999_999_000,
+            },
+        }
+    )
 
 
 def _refresher_host(tmp_path: Path) -> SimpleNamespace:
@@ -126,7 +128,8 @@ def _refresher_host(tmp_path: Path) -> SimpleNamespace:
     )
     host._read_account_credentials = lambda num, email: store.get((num, email), "")
     host._write_account_credentials = lambda num, email, creds: store.__setitem__(
-        (num, email), creds,
+        (num, email),
+        creds,
     )
     host._read_credentials = lambda: live["creds"]
     host._store = store
@@ -146,21 +149,26 @@ class TestCredentialRefresherLocking:
             return real_acquire(lock_self, timeout)
 
         with patch.object(FileLock, "acquire", track_acquire):
-            result = refresher.write_verified_live("1", "a@example.com", host._live["creds"])
+            result = refresher.write_verified_live(
+                "1", "a@example.com", host._live["creds"]
+            )
 
         assert acquires == [True]
         assert result == host._live["creds"]
         assert host._store[("1", "a@example.com")] == host._live["creds"]
 
     def test_write_verified_live_skips_reentrant_lock_when_already_held(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ):
         host = _refresher_host(tmp_path)
         refresher = CredentialRefresher(host)
 
         with FileLock(host.lock_file):
             result = refresher.write_verified_live(
-                "1", "a@example.com", host._live["creds"],
+                "1",
+                "a@example.com",
+                host._live["creds"],
                 assume_locked=True,
             )
 
@@ -177,7 +185,9 @@ class TestCredentialRefresherLocking:
             body_entered.set()
             return original_body(*args, **kwargs)
 
-        with patch.object(refresher, "_write_verified_live_body", side_effect=tracked_body):
+        with patch.object(
+            refresher, "_write_verified_live_body", side_effect=tracked_body
+        ):
             with FileLock(host.lock_file):
                 thread = threading.Thread(
                     target=refresher.write_verified_live,
@@ -193,7 +203,8 @@ class TestCredentialRefresherLocking:
         assert host._store[("1", "a@example.com")] == host._live["creds"]
 
     def test_sync_live_to_backup_holds_lock_for_read_compare_write(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ):
         host = _refresher_host(tmp_path)
         refresher = CredentialRefresher(host)
@@ -208,7 +219,9 @@ class TestCredentialRefresherLocking:
             lock_held_during_write["value"] = lock.acquire(timeout=0) is False
             return original_write(num, email, creds, assume_locked=assume_locked)
 
-        with patch.object(refresher, "write_verified_live", side_effect=write_under_lock):
+        with patch.object(
+            refresher, "write_verified_live", side_effect=write_under_lock
+        ):
             refresher.sync_live_to_backup("1", "a@example.com", host._live["creds"])
 
         assert lock_held_during_write["value"] is True
@@ -223,17 +236,20 @@ class TestCredentialRefresherLocking:
                 refresher.sync_live_to_backup("1", "a@example.com", host._live["creds"])
 
     def test_refresh_inactive_does_not_hold_lock_during_network_refresh(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ):
         host = _refresher_host(tmp_path)
         refresher = CredentialRefresher(host)
-        expired = json.dumps({
-            "claudeAiOauth": {
-                "accessToken": "old",
-                "refreshToken": "rt-old",
-                "expiresAt": 0,
-            },
-        })
+        expired = json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "old",
+                    "refreshToken": "rt-old",
+                    "expiresAt": 0,
+                },
+            }
+        )
         refreshed = _oauth_creds("new")
         host._store[("1", "a@example.com")] = expired
         lock_events: list[str] = []
@@ -265,7 +281,9 @@ class TestCredentialRefresherLocking:
             ),
         ):
             result, note = refresher.refresh_inactive_if_needed(
-                "1", "a@example.com", expired,
+                "1",
+                "a@example.com",
+                expired,
             )
 
         assert result == refreshed
@@ -278,20 +296,23 @@ class TestCredentialRefresherLocking:
         )
 
     def test_refresh_inactive_raises_when_persist_does_not_stick(
-        self, tmp_path: Path,
+        self,
+        tmp_path: Path,
     ):
         # A single-use refresh token is consumed by the network refresh. If the
         # backup write silently fails to persist (read-back mismatch), the slot
         # must surface CredentialWriteError, not return a stale/bricked backup.
         host = _refresher_host(tmp_path)
         refresher = CredentialRefresher(host)
-        expired = json.dumps({
-            "claudeAiOauth": {
-                "accessToken": "old",
-                "refreshToken": "rt-old",
-                "expiresAt": 0,
-            },
-        })
+        expired = json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "old",
+                    "refreshToken": "rt-old",
+                    "expiresAt": 0,
+                },
+            }
+        )
         host._store[("1", "a@example.com")] = expired
 
         with (

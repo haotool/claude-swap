@@ -14,6 +14,8 @@ from claude_swap.json_output import (
     SCHEMA_VERSION,
     USAGE_API_KEY,
     USAGE_API_KEY_DISPLAY,
+    USAGE_KEYCHAIN_UNAVAILABLE,
+    USAGE_KEYCHAIN_UNAVAILABLE_DISPLAY,
     USAGE_NO_CREDENTIALS,
     USAGE_NO_CREDENTIALS_DISPLAY,
     USAGE_TOKEN_EXPIRED,
@@ -34,16 +36,27 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 class TestJsonHelpers:
     def test_usage_to_json_maps_keys_and_preserves_raw_reset(self):
         usage = {
-            "five_hour": {"pct": 25.0, "resets_at": "2026-06-22T23:00:00Z",
-                          "countdown": "4h", "clock": "02:00"},
+            "five_hour": {
+                "pct": 25.0,
+                "resets_at": "2026-06-22T23:00:00Z",
+                "countdown": "4h",
+                "clock": "02:00",
+            },
             "seven_day": {"pct": 16.0},
-            "spend": {"used": 12.5, "limit": 300.0, "pct": 4.0, "currency": "USD",
-                      "resets_at": "2026-07-01T00:00:00Z"},
+            "spend": {
+                "used": 12.5,
+                "limit": 300.0,
+                "pct": 4.0,
+                "currency": "USD",
+                "resets_at": "2026-07-01T00:00:00Z",
+            },
         }
         out = usage_to_json(usage)
         assert out["fiveHour"] == {
-            "pct": 25.0, "resetsAt": "2026-06-22T23:00:00Z",
-            "countdown": "4h", "clock": "02:00",
+            "pct": 25.0,
+            "resetsAt": "2026-06-22T23:00:00Z",
+            "countdown": "4h",
+            "clock": "02:00",
         }
         # seven_day had no reset → only pct, camelCased key
         assert out["sevenDay"] == {"pct": 16.0}
@@ -52,11 +65,17 @@ class TestJsonHelpers:
 
     def test_usage_fields_variants(self):
         assert usage_fields({"five_hour": {"pct": 1.0}})[0] == "ok"
-        assert usage_fields({"five_hour": {"pct": 1.0}})[1] == {"fiveHour": {"pct": 1.0}}
+        assert usage_fields({"five_hour": {"pct": 1.0}})[1] == {
+            "fiveHour": {"pct": 1.0}
+        }
         assert usage_fields(USAGE_NO_CREDENTIALS) == ("no_credentials", None)
         assert usage_fields("no credentials") == ("no_credentials", None)
         assert usage_fields(USAGE_TOKEN_EXPIRED) == ("token_expired", None)
         assert usage_fields(USAGE_API_KEY) == ("api_key", None)
+        assert usage_fields(USAGE_KEYCHAIN_UNAVAILABLE) == (
+            "keychain_unavailable",
+            None,
+        )
         assert usage_fields(None) == ("unavailable", None)
 
     def test_usage_fields_usage_fetch_error(self):
@@ -77,6 +96,10 @@ class TestJsonHelpers:
         assert usage_display_line(USAGE_API_KEY) == USAGE_API_KEY_DISPLAY
         assert usage_display_line(USAGE_TOKEN_EXPIRED) == USAGE_TOKEN_EXPIRED_DISPLAY
         assert usage_display_line(USAGE_NO_CREDENTIALS) == USAGE_NO_CREDENTIALS_DISPLAY
+        assert (
+            usage_display_line(USAGE_KEYCHAIN_UNAVAILABLE)
+            == USAGE_KEYCHAIN_UNAVAILABLE_DISPLAY
+        )
         assert usage_display_line("other string") == "other string"
         assert usage_display_line(None) is None
 
@@ -102,8 +125,10 @@ class TestListJson:
     def test_empty_list_no_prompt(self, temp_home: Path):
         """No accounts in JSON mode returns an empty payload — never prompts."""
         switcher = ClaudeAccountSwitcher()
-        with patch.object(switcher, "_first_run_setup") as first_run, \
-             patch("builtins.input") as fake_input:
+        with (
+            patch.object(switcher, "_first_run_setup") as first_run,
+            patch("builtins.input") as fake_input,
+        ):
             payload = switcher.list_accounts(json_output=True)
         first_run.assert_not_called()
         fake_input.assert_not_called()
@@ -114,24 +139,35 @@ class TestListJson:
         }
 
     def test_list_payload(
-        self, temp_home: Path, mock_claude_config: Path,
-        sample_sequence_data: dict, capsys,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        capsys,
     ):
         sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
         active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
         backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
         usage = {
-            "five_hour": {"pct": 10.0, "resets_at": "2026-01-01T00:00:00Z",
-                          "countdown": "1h", "clock": "01:00"},
+            "five_hour": {
+                "pct": 10.0,
+                "resets_at": "2026-01-01T00:00:00Z",
+                "countdown": "1h",
+                "clock": "01:00",
+            },
         }
 
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
         switcher._write_json(switcher.sequence_file, sample_sequence_data)
 
-        with patch.object(switcher, "_read_credentials", return_value=active_creds), \
-             patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
-             patch("claude_swap.oauth.fetch_usage_for_account", return_value=usage):
+        with (
+            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(
+                switcher, "_read_account_credentials", return_value=backup_creds
+            ),
+            patch("claude_swap.oauth.fetch_usage_for_account", return_value=usage),
+        ):
             payload = switcher.list_accounts(json_output=True)
 
         # Method itself prints nothing — the CLI serializes.
@@ -144,7 +180,9 @@ class TestListJson:
         assert acct1["usage"]["fiveHour"]["resetsAt"] == "2026-01-01T00:00:00Z"
 
     def test_usage_status_no_credentials_and_unavailable(
-        self, temp_home: Path, mock_claude_config: Path,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
         sample_sequence_data: dict,
     ):
         sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
@@ -156,9 +194,11 @@ class TestListJson:
 
         # Account 1 active with creds but the fetch fails (None → unavailable);
         # account 2 has no backup creds (→ no_credentials).
-        with patch.object(switcher, "_read_credentials", return_value=active_creds), \
-             patch.object(switcher, "_read_account_credentials", return_value=""), \
-             patch("claude_swap.oauth.fetch_usage_for_account", return_value=None):
+        with (
+            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_account_credentials", return_value=""),
+            patch("claude_swap.oauth.fetch_usage_for_account", return_value=None),
+        ):
             payload = switcher.list_accounts(json_output=True)
 
         by_num = {a["number"]: a for a in payload["accounts"]}
@@ -167,7 +207,9 @@ class TestListJson:
         assert by_num[2]["usageStatus"] == "no_credentials"
 
     def test_list_json_api_key_account(
-        self, temp_home: Path, capsys,
+        self,
+        temp_home: Path,
+        capsys,
     ):
         from claude_swap.models import Platform
 
@@ -204,20 +246,31 @@ class TestStatusJson:
         assert payload["active"] == {"email": "test@example.com", "managed": False}
 
     def test_status_managed(
-        self, temp_home: Path, mock_claude_config: Path,
-        sample_sequence_data: dict, capsys,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        capsys,
     ):
         sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
         active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
-        usage = {"five_hour": {"pct": 25.0, "resets_at": "2026-01-01T00:00:00Z",
-                               "countdown": "1h", "clock": "01:00"}}
+        usage = {
+            "five_hour": {
+                "pct": 25.0,
+                "resets_at": "2026-01-01T00:00:00Z",
+                "countdown": "1h",
+                "clock": "01:00",
+            }
+        }
 
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
         switcher._write_json(switcher.sequence_file, sample_sequence_data)
 
-        with patch.object(switcher, "_read_credentials", return_value=active_creds), \
-             patch("claude_swap.oauth.fetch_usage_for_account", return_value=usage):
+        with (
+            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch("claude_swap.oauth.fetch_usage_for_account", return_value=usage),
+        ):
             payload = switcher.status(json_output=True)
 
         assert capsys.readouterr().out == ""
@@ -240,7 +293,9 @@ def _two_account_stores(temp_home: Path, sample_sequence_data: dict):
     switcher.platform = Platform.LINUX
     switcher._write_json(switcher.sequence_file, sample_sequence_data)
 
-    live_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-1", "refreshToken": "rt-1"}})
+    live_creds = json.dumps(
+        {"claudeAiOauth": {"accessToken": "sk-1", "refreshToken": "rt-1"}}
+    )
     (temp_home / ".claude" / ".credentials.json").write_text(live_creds)
 
     creds_store = {
@@ -251,10 +306,20 @@ def _two_account_stores(temp_home: Path, sample_sequence_data: dict):
     }
     configs_store = {
         ("1", "test@example.com"): json.dumps(
-            {"oauthAccount": {"emailAddress": "test@example.com", "accountUuid": "test-uuid-1234"}}
+            {
+                "oauthAccount": {
+                    "emailAddress": "test@example.com",
+                    "accountUuid": "test-uuid-1234",
+                }
+            }
         ),
         ("2", "account2@example.com"): json.dumps(
-            {"oauthAccount": {"emailAddress": "account2@example.com", "accountUuid": "uuid-2"}}
+            {
+                "oauthAccount": {
+                    "emailAddress": "account2@example.com",
+                    "accountUuid": "uuid-2",
+                }
+            }
         ),
     }
     return switcher, creds_store, configs_store, {"creds": live_creds}
@@ -262,18 +327,36 @@ def _two_account_stores(temp_home: Path, sample_sequence_data: dict):
 
 def _install_patches(switcher, creds_store, configs_store, live_state):
     patches = [
-        patch.object(switcher, "_read_account_credentials",
-                     side_effect=lambda n, e: creds_store.get((str(n), e), "")),
-        patch.object(switcher, "_write_account_credentials",
-                     side_effect=lambda n, e, c: creds_store.__setitem__((str(n), e), c)),
-        patch.object(switcher, "_read_account_config",
-                     side_effect=lambda n, e: configs_store.get((str(n), e), "")),
-        patch.object(switcher, "_write_account_config",
-                     side_effect=lambda n, e, c: configs_store.__setitem__((str(n), e), c)),
-        patch.object(switcher, "_read_credentials",
-                     side_effect=lambda: live_state.get("creds", "")),
-        patch.object(switcher, "_write_credentials",
-                     side_effect=lambda c, verify=False: live_state.__setitem__("creds", c)),
+        patch.object(
+            switcher,
+            "_read_account_credentials",
+            side_effect=lambda n, e: creds_store.get((str(n), e), ""),
+        ),
+        patch.object(
+            switcher,
+            "_write_account_credentials",
+            side_effect=lambda n, e, c: creds_store.__setitem__((str(n), e), c),
+        ),
+        patch.object(
+            switcher,
+            "_read_account_config",
+            side_effect=lambda n, e: configs_store.get((str(n), e), ""),
+        ),
+        patch.object(
+            switcher,
+            "_write_account_config",
+            side_effect=lambda n, e, c: configs_store.__setitem__((str(n), e), c),
+        ),
+        patch.object(
+            switcher,
+            "_read_credentials",
+            side_effect=lambda: live_state.get("creds", ""),
+        ),
+        patch.object(
+            switcher,
+            "_write_credentials",
+            side_effect=lambda c, verify=False: live_state.__setitem__("creds", c),
+        ),
         # Don't make network calls from the (suppressed) post-switch usage path.
         patch("claude_swap.oauth.fetch_usage_for_account", return_value=None),
     ]
@@ -284,10 +367,15 @@ def _install_patches(switcher, creds_store, configs_store, live_state):
 
 class TestSwitchJson:
     def test_switch_to_result_no_leakage(
-        self, temp_home: Path, mock_claude_config: Path,
-        sample_sequence_data: dict, capsys,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        capsys,
     ):
-        switcher, creds, configs, live = _two_account_stores(temp_home, sample_sequence_data)
+        switcher, creds, configs, live = _two_account_stores(
+            temp_home, sample_sequence_data
+        )
         patches = _install_patches(switcher, creds, configs, live)
         try:
             result = switcher.switch_to("2", json_output=True)
@@ -305,11 +393,15 @@ class TestSwitchJson:
         assert result["warnings"] == []
 
     def test_switch_to_already_active_short_circuits(
-        self, temp_home: Path, mock_claude_config: Path,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
         sample_sequence_data: dict,
     ):
         """--switch-to onto the active account is a no-op: no mutation at all."""
-        switcher, creds, configs, live = _two_account_stores(temp_home, sample_sequence_data)
+        switcher, creds, configs, live = _two_account_stores(
+            temp_home, sample_sequence_data
+        )
         patches = _install_patches(switcher, creds, configs, live)
         try:
             with patch.object(switcher, "_perform_switch") as perform:
@@ -320,28 +412,41 @@ class TestSwitchJson:
         perform.assert_not_called()  # short-circuited before any write
         assert result["switched"] is False
         assert result["reason"] == "already-active"
-        assert result["from"] == result["to"] == {"number": 1, "email": "test@example.com"}
+        assert (
+            result["from"] == result["to"] == {"number": 1, "email": "test@example.com"}
+        )
 
     def test_noop_from_equals_to(
-        self, temp_home: Path, mock_claude_config: Path,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
     ):
         """Every switched:false payload reports from == to (the current account)."""
         single = {
             "activeAccountNumber": 1,
             "lastUpdated": "2024-01-01T00:00:00Z",
             "sequence": [1],
-            "accounts": {"1": {"email": "test@example.com", "uuid": "u1",
-                               "added": "2024-01-01T00:00:00Z"}},
+            "accounts": {
+                "1": {
+                    "email": "test@example.com",
+                    "uuid": "u1",
+                    "added": "2024-01-01T00:00:00Z",
+                }
+            },
         }
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
         switcher._write_json(switcher.sequence_file, single)
         result = switcher.switch(json_output=True)
         assert result["switched"] is False
-        assert result["from"] == result["to"] == {"number": 1, "email": "test@example.com"}
+        assert (
+            result["from"] == result["to"] == {"number": 1, "email": "test@example.com"}
+        )
 
     def test_switch_to_from_unmanaged_account(
-        self, temp_home: Path, mock_claude_config: Path,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
         sample_sequence_data: dict,
     ):
         """Current live account unmanaged → --switch-to proceeds, from.number is null."""
@@ -353,10 +458,21 @@ class TestSwitchJson:
         switcher._write_json(switcher.sequence_file, sample_sequence_data)
         live_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-x"}})
         (temp_home / ".claude" / ".credentials.json").write_text(live_creds)
-        creds = {("2", "account2@example.com"): json.dumps(
-            {"claudeAiOauth": {"accessToken": "sk-2"}})}
-        configs = {("2", "account2@example.com"): json.dumps(
-            {"oauthAccount": {"emailAddress": "account2@example.com", "accountUuid": "uuid-2"}})}
+        creds = {
+            ("2", "account2@example.com"): json.dumps(
+                {"claudeAiOauth": {"accessToken": "sk-2"}}
+            )
+        }
+        configs = {
+            ("2", "account2@example.com"): json.dumps(
+                {
+                    "oauthAccount": {
+                        "emailAddress": "account2@example.com",
+                        "accountUuid": "uuid-2",
+                    }
+                }
+            )
+        }
         patches = _install_patches(switcher, creds, configs, {"creds": live_creds})
         try:
             result = switcher.switch_to("2", json_output=True)
@@ -368,7 +484,9 @@ class TestSwitchJson:
         assert result["to"]["number"] == 2
 
     def test_switch_to_ambiguous_email_raises(
-        self, temp_home: Path, mock_claude_config: Path,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
         sample_sequence_data_with_org: dict,
     ):
         """Ambiguous email in JSON mode raises (no interactive prompt)."""
@@ -381,14 +499,21 @@ class TestSwitchJson:
         fake_input.assert_not_called()
 
     def test_switch_only_one_account(
-        self, temp_home: Path, mock_claude_config: Path,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
     ):
         single = {
             "activeAccountNumber": 1,
             "lastUpdated": "2024-01-01T00:00:00Z",
             "sequence": [1],
-            "accounts": {"1": {"email": "test@example.com", "uuid": "u1",
-                               "added": "2024-01-01T00:00:00Z"}},
+            "accounts": {
+                "1": {
+                    "email": "test@example.com",
+                    "uuid": "u1",
+                    "added": "2024-01-01T00:00:00Z",
+                }
+            },
         }
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
@@ -398,7 +523,9 @@ class TestSwitchJson:
         assert result["reason"] == "only-one-account"
 
     def test_switch_unmanaged_account_is_noop_without_add(
-        self, temp_home: Path, mock_claude_config: Path,
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
         sample_sequence_data: dict,
     ):
         """Plain --switch from an unmanaged account: structured no-op, no auto-add."""

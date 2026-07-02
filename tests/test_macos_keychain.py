@@ -106,7 +106,11 @@ def test_set_password_large_payload_falls_back_to_argv():
         macos_keychain.set_password("svc", "acct", big)
 
         args = run.call_args.args[0]
-        assert args[:3] == ["/usr/bin/security", "add-generic-password", "-U"]  # argv path
+        assert args[:3] == [
+            "/usr/bin/security",
+            "add-generic-password",
+            "-U",
+        ]  # argv path
         assert "input" not in run.call_args.kwargs  # not via stdin
         # Hex value passed as a raw list element (no shell, no quoting).
         assert big.encode().hex() in args
@@ -168,11 +172,14 @@ def test_calls_pass_timeout_to_subprocess():
         assert run.call_args.kwargs.get("timeout") == macos_keychain._TIMEOUT
 
 
-@pytest.mark.parametrize("fn,args", [
-    ("get_password", ("svc", "acct")),
-    ("set_password", ("svc", "acct", "secret")),
-    ("delete_password", ("svc", "acct")),
-])
+@pytest.mark.parametrize(
+    "fn,args",
+    [
+        ("get_password", ("svc", "acct")),
+        ("set_password", ("svc", "acct", "secret")),
+        ("delete_password", ("svc", "acct")),
+    ],
+)
 def test_timeout_becomes_keychain_error(fn, args):
     timeout = subprocess.TimeoutExpired(cmd="security", timeout=5)
     with patch("claude_swap.macos_keychain.subprocess.run", side_effect=timeout):
@@ -185,7 +192,9 @@ def test_item_exists_stays_false_on_timeout_and_missing_binary():
     timeout = subprocess.TimeoutExpired(cmd="security", timeout=5)
     with patch("claude_swap.macos_keychain.subprocess.run", side_effect=timeout):
         assert macos_keychain.item_exists("svc", "acct") is False
-    with patch("claude_swap.macos_keychain.subprocess.run", side_effect=FileNotFoundError):
+    with patch(
+        "claude_swap.macos_keychain.subprocess.run", side_effect=FileNotFoundError
+    ):
         assert macos_keychain.item_exists("svc", "acct") is False
 
 

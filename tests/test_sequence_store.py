@@ -40,6 +40,7 @@ def _store(tmp_path: Path) -> SequenceStore:
 
 # --- AutoSwitchConfig ------------------------------------------------------
 
+
 def test_auto_switch_defaults_when_absent() -> None:
     cfg = AutoSwitchConfig.from_raw(None)
     assert cfg.enabled is False
@@ -53,6 +54,7 @@ def test_auto_switch_tolerates_bad_threshold() -> None:
 
 
 # --- AccountRecord ---------------------------------------------------------
+
 
 def test_account_record_create_oauth_key_order() -> None:
     rec = AccountRecord.create(
@@ -96,6 +98,7 @@ def test_account_record_to_dict_is_independent_copy() -> None:
 
 
 # --- SequenceData ----------------------------------------------------------
+
 
 def test_empty_shape_matches_init_file() -> None:
     data = SequenceData.empty()
@@ -163,15 +166,17 @@ def test_remove_slot() -> None:
 def test_remove_slot_drops_all_duplicate_sequence_entries() -> None:
     # A corrupt sequence with duplicate ids must be fully cleaned on remove,
     # matching the pre-extraction list-filter (not list.remove which drops one).
-    data = SequenceData({
-        "activeAccountNumber": 2,
-        "lastUpdated": "",
-        "sequence": [1, 1, 2, 1],
-        "accounts": {
-            "1": AccountRecord.create(email="a@x", added="t").to_dict(),
-            "2": AccountRecord.create(email="b@x", added="t").to_dict(),
-        },
-    })
+    data = SequenceData(
+        {
+            "activeAccountNumber": 2,
+            "lastUpdated": "",
+            "sequence": [1, 1, 2, 1],
+            "accounts": {
+                "1": AccountRecord.create(email="a@x", added="t").to_dict(),
+                "2": AccountRecord.create(email="b@x", added="t").to_dict(),
+            },
+        }
+    )
     data = data.remove_slot("1")
     assert data.sequence == (2,)
     assert data.get("1") is None
@@ -180,14 +185,16 @@ def test_remove_slot_drops_all_duplicate_sequence_entries() -> None:
 def test_register_slot_preserves_sibling_unknown_keys() -> None:
     # Mutating one slot must round-trip unknown/future keys on untouched slots
     # (the main switcher mutation path replaces records loaded from disk).
-    data = SequenceData({
-        "activeAccountNumber": 1,
-        "lastUpdated": "",
-        "sequence": [1],
-        "accounts": {
-            "1": {"email": "a@x", "added": "t", "futureField": "keep-me"},
-        },
-    })
+    data = SequenceData(
+        {
+            "activeAccountNumber": 1,
+            "lastUpdated": "",
+            "sequence": [1],
+            "accounts": {
+                "1": {"email": "a@x", "added": "t", "futureField": "keep-me"},
+            },
+        }
+    )
     data = data.register_slot(
         "2", AccountRecord.create(email="b@x", added="t"), set_active=False
     )
@@ -222,6 +229,7 @@ def test_set_active_none() -> None:
 
 
 # --- SequenceStore ---------------------------------------------------------
+
 
 def test_store_load_missing_returns_none(tmp_path: Path) -> None:
     store = _store(tmp_path)
@@ -261,8 +269,12 @@ def test_store_roundtrip_preserves_records(tmp_path: Path) -> None:
     data = SequenceData.empty().register_slot(
         "1",
         AccountRecord.create(
-            email="a@b.co", uuid="u", organization_uuid="o",
-            organization_name="O", added="t", is_api_key=True,
+            email="a@b.co",
+            uuid="u",
+            organization_uuid="o",
+            organization_name="O",
+            added="t",
+            is_api_key=True,
         ),
         set_active=True,
     )

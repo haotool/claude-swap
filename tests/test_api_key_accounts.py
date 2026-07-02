@@ -84,7 +84,9 @@ class _patched_home:
         from unittest.mock import patch
 
         self._patches = [
-            patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}),
+            patch.dict(
+                os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}
+            ),
             patch("pathlib.Path.home", return_value=self.home),
         ]
         for p in self._patches:
@@ -189,7 +191,9 @@ class TestCrossKindCollision:
     def test_oauth_rejected_when_email_is_api_key(self, temp_home: Path):
         s = _linux_switcher()
         s.add_account_from_token(API_KEY, email="dup@example.com")
-        with pytest.raises(ValidationError, match="already exists as an API-key account"):
+        with pytest.raises(
+            ValidationError, match="already exists as an API-key account"
+        ):
             s.add_account_from_token("sk-ant-oat01-abc", email="dup@example.com")
 
 
@@ -236,7 +240,9 @@ class TestWriteCredentialsLinux:
 
 
 class TestWriteCredentialsMacOS:
-    def test_activate_key_uses_keychain_not_config(self, temp_home, block_real_keychain):
+    def test_activate_key_uses_keychain_not_config(
+        self, temp_home, block_real_keychain
+    ):
         store = block_real_keychain
         s = _macos_switcher()
         acct = macos_keychain.keychain_account_name()
@@ -263,7 +269,9 @@ class TestWriteCredentialsMacOS:
         cfg = _read_global_config()
         assert API_KEY[-20:] in cfg["customApiKeyResponses"]["approved"]
 
-    def test_read_credentials_from_managed_keychain(self, temp_home, block_real_keychain):
+    def test_read_credentials_from_managed_keychain(
+        self, temp_home, block_real_keychain
+    ):
         store = block_real_keychain
         s = _macos_switcher()
         acct = macos_keychain.keychain_account_name()
@@ -375,7 +383,9 @@ class TestUsageDisplay:
 
 def test_fetch_account_usage_api_key_no_quota(temp_home: Path):
     s = _linux_switcher()
-    result = s._fetch_account_usage((1, "api-key-1@token.local", "", "", False, API_KEY))
+    result = s._fetch_account_usage(
+        (1, "api-key-1@token.local", "", "", False, API_KEY)
+    )
     assert result == USAGE_API_KEY
 
 
@@ -413,9 +423,10 @@ def test_account_headroom_none_for_api_key_sentinel():
     from claude_swap import oauth
 
     assert oauth.account_headroom(USAGE_API_KEY) is None
-    assert oauth.account_headroom(
-        {"five_hour": {"pct": 40}, "seven_day": {"pct": 10}}
-    ) == 60.0
+    assert (
+        oauth.account_headroom({"five_hour": {"pct": 40}, "seven_day": {"pct": 10}})
+        == 60.0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -488,8 +499,9 @@ def test_monitor_active_api_key_is_idle(temp_home: Path):
     s = _linux_switcher()
     state = MonitorRuntimeState()
     with (
-        patch.object(s, "get_auto_switch_config",
-                     return_value={"enabled": True, "threshold": 95}),
+        patch.object(
+            s, "get_auto_switch_config", return_value={"enabled": True, "threshold": 95}
+        ),
         patch.object(s, "_live_default_mode_claude_pids", return_value=[123]),
         patch.object(s, "get_active_usage_pct", return_value=None),
         patch.object(s, "active_account_is_api_key", return_value=True),
@@ -504,8 +516,9 @@ def test_monitor_real_unavailable_still_backs_off(temp_home: Path):
     s = _linux_switcher()
     state = MonitorRuntimeState()
     with (
-        patch.object(s, "get_auto_switch_config",
-                     return_value={"enabled": True, "threshold": 95}),
+        patch.object(
+            s, "get_auto_switch_config", return_value={"enabled": True, "threshold": 95}
+        ),
         patch.object(s, "_live_default_mode_claude_pids", return_value=[123]),
         patch.object(s, "get_active_usage_pct", return_value=None),
         patch.object(s, "active_account_is_api_key", return_value=False),
@@ -539,7 +552,9 @@ class TestExportImport:
             dst = _linux_switcher()
             import_accounts(dst, str(out))
             assert dst._account_kind("1") == "api_key"
-            assert dst._read_account_credentials("1", "api-key-1@token.local") == API_KEY
+            assert (
+                dst._read_account_credentials("1", "api-key-1@token.local") == API_KEY
+            )
 
 
 def test_transfer_round_trips_api_key(temp_home: Path):
@@ -556,6 +571,8 @@ def test_transfer_round_trips_api_key(temp_home: Path):
     dst = _linux_switcher()
     import_accounts(dst, str(out))
     data = dst._get_sequence_data()
-    num = next(n for n, a in data["accounts"].items() if a["email"] == "key@example.com")
+    num = next(
+        n for n, a in data["accounts"].items() if a["email"] == "key@example.com"
+    )
     assert data["accounts"][num]["kind"] == "api_key"
     assert dst._read_account_credentials(num, "key@example.com") == API_KEY

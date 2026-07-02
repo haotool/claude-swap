@@ -70,7 +70,9 @@ class TestSwitchIntentContract:
         assert capsys.readouterr().out == ""
 
     def test_interactive_single_account_prints_and_returns(
-        self, temp_home: Path, capsys,
+        self,
+        temp_home: Path,
+        capsys,
     ):
         switcher = bootstrap_switchable_accounts(temp_home, num_accounts=1)
         decision = self._single_account_decision()
@@ -80,7 +82,9 @@ class TestSwitchIntentContract:
         assert "Only one account" in out
 
     def test_background_no_trusted_signal_stays_put_without_stdout(
-        self, temp_home: Path, capsys,
+        self,
+        temp_home: Path,
+        capsys,
     ):
         # Background auto-switch treats a planning/cache miss as benign: it stays
         # put (returns False) rather than raising, matching upstream's never-raise
@@ -91,7 +95,9 @@ class TestSwitchIntentContract:
         assert capsys.readouterr().out == ""
 
     def test_interactive_no_trusted_signal_prints_then_raises(
-        self, temp_home: Path, capsys,
+        self,
+        temp_home: Path,
+        capsys,
     ):
         switcher = bootstrap_switchable_accounts(temp_home, num_accounts=3)
         decision = switcher.build_auto_switch_decision(95, 99.0)
@@ -195,22 +201,26 @@ class TestActiveUsagePct:
         switcher = ClaudeAccountSwitcher()
         creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
         usage = {"five_hour": {"pct": 96}, "seven_day": {"pct": 20}}
-        with patch.object(switcher, "_read_credentials", return_value=creds), \
-             patch(
-                 "claude_swap.oauth.fetch_usage_for_account",
-                 return_value=usage,
-             ):
+        with (
+            patch.object(switcher, "_read_credentials", return_value=creds),
+            patch(
+                "claude_swap.oauth.fetch_usage_for_account",
+                return_value=usage,
+            ),
+        ):
             assert switcher.get_active_usage_pct() == 96.0
 
     def test_none_when_api_unavailable(self, temp_home: Path):
         _login(temp_home)
         switcher = ClaudeAccountSwitcher()
         creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
-        with patch.object(switcher, "_read_credentials", return_value=creds), \
-             patch(
-                 "claude_swap.oauth.fetch_usage_for_account",
-                 return_value=None,
-             ):
+        with (
+            patch.object(switcher, "_read_credentials", return_value=creds),
+            patch(
+                "claude_swap.oauth.fetch_usage_for_account",
+                return_value=None,
+            ),
+        ):
             assert switcher.get_active_usage_pct() is None
 
 
@@ -259,11 +269,13 @@ class TestDoAutoSwitch:
         screen = stub_screen()
         # Select by menu value, not KEY_DOWN index — survives label reordering.
         screen.getch.side_effect = [ord("8"), ord("0"), 10, 27]
-        with patch("claude_swap.tui.curses.curs_set"), \
-             patch(
-                 "claude_swap.tui._select_from",
-                 side_effect=["threshold", None],
-             ):
+        with (
+            patch("claude_swap.tui.curses.curs_set"),
+            patch(
+                "claude_swap.tui._select_from",
+                side_effect=["threshold", None],
+            ),
+        ):
             tui._do_auto_switch(screen, switcher)
         assert switcher.get_auto_switch_config()["threshold"] == 80
 
@@ -271,13 +283,15 @@ class TestDoAutoSwitch:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
 
-        with patch("claude_swap.tui.sys.platform", "darwin"), \
-             patch("claude_swap.tui._service_state", return_value="not installed"), \
-             patch(
-                 "claude_swap.tui._select_from",
-                 side_effect=["service-toggle", None],
-             ), \
-             patch("claude_swap.tui._shell_out") as mock_shell:
+        with (
+            patch("claude_swap.tui.sys.platform", "darwin"),
+            patch("claude_swap.tui._service_state", return_value="not installed"),
+            patch(
+                "claude_swap.tui._select_from",
+                side_effect=["service-toggle", None],
+            ),
+            patch("claude_swap.tui._shell_out") as mock_shell,
+        ):
             tui._do_auto_switch(screen, switcher)
 
         _stdscr_arg, fn = mock_shell.call_args.args
@@ -290,18 +304,22 @@ class TestDoAutoSwitch:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
 
-        with patch("claude_swap.tui.sys.platform", "darwin"), \
-             patch("claude_swap.tui._service_state", return_value="loaded"), \
-             patch(
-                 "claude_swap.tui._select_from",
-                 side_effect=["service-toggle", None],
-             ), \
-             patch("claude_swap.tui._shell_out") as mock_shell:
+        with (
+            patch("claude_swap.tui.sys.platform", "darwin"),
+            patch("claude_swap.tui._service_state", return_value="loaded"),
+            patch(
+                "claude_swap.tui._select_from",
+                side_effect=["service-toggle", None],
+            ),
+            patch("claude_swap.tui._shell_out") as mock_shell,
+        ):
             tui._do_auto_switch(screen, switcher)
 
         _stdscr_arg, fn = mock_shell.call_args.args
         assert _stdscr_arg is screen
-        with patch("claude_swap.tui.service.uninstall", return_value=0) as mock_uninstall:
+        with patch(
+            "claude_swap.tui.service.uninstall", return_value=0
+        ) as mock_uninstall:
             fn()
         mock_uninstall.assert_called_once_with(switcher)
 
@@ -309,10 +327,13 @@ class TestDoAutoSwitch:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
 
-        with patch(
-            "claude_swap.tui._select_from",
-            side_effect=["service-status", None],
-        ), patch("claude_swap.tui._shell_out") as mock_shell:
+        with (
+            patch(
+                "claude_swap.tui._select_from",
+                side_effect=["service-status", None],
+            ),
+            patch("claude_swap.tui._shell_out") as mock_shell,
+        ):
             tui._do_auto_switch(screen, switcher)
 
         _stdscr_arg, fn = mock_shell.call_args.args
@@ -325,14 +346,16 @@ class TestDoAutoSwitch:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
 
-        with patch("claude_swap.tui.sys.platform", "linux"), \
-             patch("claude_swap.tui._service_state", return_value="unsupported"), \
-             patch(
-                 "claude_swap.tui._select_from",
-                 side_effect=["service-status", None],
-             ), \
-             patch("claude_swap.tui._show_message") as mock_message, \
-             patch("claude_swap.tui._shell_out") as mock_shell:
+        with (
+            patch("claude_swap.tui.sys.platform", "linux"),
+            patch("claude_swap.tui._service_state", return_value="unsupported"),
+            patch(
+                "claude_swap.tui._select_from",
+                side_effect=["service-status", None],
+            ),
+            patch("claude_swap.tui._show_message") as mock_message,
+            patch("claude_swap.tui._shell_out") as mock_shell,
+        ):
             tui._do_auto_switch(screen, switcher)
 
         mock_message.assert_called_once()
@@ -342,13 +365,15 @@ class TestDoAutoSwitch:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
 
-        with patch("claude_swap.tui.sys.platform", "linux"), \
-             patch("claude_swap.tui._service_state", return_value="unsupported"), \
-             patch(
-                 "claude_swap.tui._select_from",
-                 side_effect=["service-toggle", None],
-             ), \
-             patch("claude_swap.tui._show_message") as mock_message:
+        with (
+            patch("claude_swap.tui.sys.platform", "linux"),
+            patch("claude_swap.tui._service_state", return_value="unsupported"),
+            patch(
+                "claude_swap.tui._select_from",
+                side_effect=["service-toggle", None],
+            ),
+            patch("claude_swap.tui._show_message") as mock_message,
+        ):
             tui._do_auto_switch(screen, switcher)
 
         mock_message.assert_called_once()
@@ -370,14 +395,18 @@ class TestRunAutoMonitor:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=10.0), \
-             patch("claude_swap.tui._auto_perform_switch") as mock_switch, \
-             patch("claude_swap.tui._acquire_monitor_pid", return_value=None), \
-             patch("claude_swap.tui._release_monitor_pid"), \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=10.0),
+            patch("claude_swap.tui._auto_perform_switch") as mock_switch,
+            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
+            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
         mock_switch.assert_not_called()
 
@@ -385,16 +414,20 @@ class TestRunAutoMonitor:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
-             patch(
-                 "claude_swap.tui._auto_perform_switch", return_value=True
-             ) as mock_switch, \
-             patch("claude_swap.tui._acquire_monitor_pid", return_value=None), \
-             patch("claude_swap.tui._release_monitor_pid"), \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch(
+                "claude_swap.tui._auto_perform_switch", return_value=True
+            ) as mock_switch,
+            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
+            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
         mock_switch.assert_called_once()
 
@@ -405,12 +438,19 @@ class TestRunAutoMonitor:
         def boom(_decision):
             raise ClaudeSwitchError("planning failed")
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=boom,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=boom,
             )
 
         assert result.kind == "switch_failed"
@@ -422,24 +462,28 @@ class TestRunAutoMonitor:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=91.0), \
-             patch(
-                 "claude_swap.tui.monitor_step",
-                 return_value=monitor.MonitorStepResult(
-                     kind="polled",
-                     threshold=95,
-                     pct=91.0,
-                     next_interval=12,
-                     pct_text="91%",
-                     user_message="Monitoring active account.",
-                 ),
-             ) as mock_step, \
-             patch("claude_swap.tui._acquire_monitor_pid", return_value=None), \
-             patch("claude_swap.tui._release_monitor_pid"), \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=91.0),
+            patch(
+                "claude_swap.tui.monitor_step",
+                return_value=monitor.MonitorStepResult(
+                    kind="polled",
+                    threshold=95,
+                    pct=91.0,
+                    next_interval=12,
+                    pct_text="91%",
+                    user_message="Monitoring active account.",
+                ),
+            ) as mock_step,
+            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
+            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
         mock_step.assert_called_once()
         drawn = screen.addstr.call_args_list
@@ -458,16 +502,20 @@ class TestRunAutoMonitor:
             pct_text="50%",
             user_message="Monitoring active account.",
         )
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch(
-            "claude_swap.tui.monitor_step",
-            return_value=polled,
-        ) as mock_step, \
-             patch("claude_swap.tui._acquire_monitor_pid", return_value=None), \
-             patch("claude_swap.tui._release_monitor_pid"), \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch(
+                "claude_swap.tui.monitor_step",
+                return_value=polled,
+            ) as mock_step,
+            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
+            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
         assert mock_step.call_count == 2
 
@@ -477,10 +525,12 @@ class TestRunAutoMonitor:
         screen = stub_screen()
         screen.getch.return_value = ord("q")
 
-        with patch("claude_swap.tui._acquire_monitor_pid", return_value=12345), \
-             patch("claude_swap.tui._show_message") as mock_message, \
-             patch("claude_swap.tui.monitor_step") as mock_step, \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch("claude_swap.tui._acquire_monitor_pid", return_value=12345),
+            patch("claude_swap.tui._show_message") as mock_message,
+            patch("claude_swap.tui.monitor_step") as mock_step,
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
 
         mock_step.assert_not_called()
@@ -491,28 +541,33 @@ class TestRunAutoMonitor:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=91.0), \
-             patch(
-                 "claude_swap.tui.monitor_step",
-                 return_value=monitor.MonitorStepResult(
-                     kind="polled",
-                     threshold=80,
-                     pct=91.0,
-                     next_interval=12,
-                     pct_text="91%",
-                     user_message="Monitoring active account.",
-                 ),
-             ), \
-             patch("claude_swap.tui._acquire_monitor_pid", return_value=None), \
-             patch("claude_swap.tui._release_monitor_pid"), \
-             patch("claude_swap.tui.curses.curs_set"):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=91.0),
+            patch(
+                "claude_swap.tui.monitor_step",
+                return_value=monitor.MonitorStepResult(
+                    kind="polled",
+                    threshold=80,
+                    pct=91.0,
+                    next_interval=12,
+                    pct_text="91%",
+                    user_message="Monitoring active account.",
+                ),
+            ),
+            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
+            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.curses.curs_set"),
+        ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
 
         header_calls = [
-            str(c) for c in screen.addstr.call_args_list
+            str(c)
+            for c in screen.addstr.call_args_list
             if "threshold" in str(c).lower()
         ]
         assert any("threshold 80%" in c for c in header_calls)
@@ -524,12 +579,19 @@ class TestRunAutoMonitor:
         def cancel(_decision):
             raise monitor.SwitchCancelled
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=cancel,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=cancel,
             )
 
         assert result.kind == "switch_cancelled"
@@ -544,12 +606,20 @@ class TestMonitorEngine:
         state = monitor.MonitorRuntimeState()
         perform = MagicMock(return_value=False)
 
-        with _already_optimal_plan(switcher), patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0):
+        with (
+            _already_optimal_plan(switcher),
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
 
         assert result.kind == "already_optimal"
@@ -566,15 +636,24 @@ class TestMonitorEngine:
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=50.0), \
-             patch.object(
-                 switcher, "get_active_usage_breakdown", return_value={"max": 50.0},
-             ), patch.object(
-                 switcher, "get_active_usage_retry_after", return_value=120,
-             ):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=50.0),
+            patch.object(
+                switcher,
+                "get_active_usage_breakdown",
+                return_value={"max": 50.0},
+            ),
+            patch.object(
+                switcher,
+                "get_active_usage_retry_after",
+                return_value=120,
+            ),
+        ):
             result = monitor.monitor_step(switcher, state, poll_seconds=30)
 
         assert result.next_interval == 120  # max(normal<=30, min(120, cap=300))
@@ -583,15 +662,24 @@ class TestMonitorEngine:
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=50.0), \
-             patch.object(
-                 switcher, "get_active_usage_breakdown", return_value={"max": 50.0},
-             ), patch.object(
-                 switcher, "get_active_usage_retry_after", return_value=99999,
-             ):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=50.0),
+            patch.object(
+                switcher,
+                "get_active_usage_breakdown",
+                return_value={"max": 50.0},
+            ),
+            patch.object(
+                switcher,
+                "get_active_usage_retry_after",
+                return_value=99999,
+            ),
+        ):
             result = monitor.monitor_step(switcher, state, poll_seconds=30)
 
         assert result.next_interval == monitor.MONITOR_RETRY_AFTER_CAP
@@ -603,12 +691,19 @@ class TestMonitorEngine:
         def perform(decision: AutoSwitchDecisionContext) -> bool:
             return switcher.switch(BackgroundAutoSwitchIntent(decision=decision))
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
 
         assert result.kind == "no_trusted_signal"
@@ -620,12 +715,19 @@ class TestMonitorEngine:
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=99.0):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=99.0),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=None,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=None,
             )
 
         assert result.kind == "threshold_no_handler"
@@ -639,26 +741,38 @@ class TestMonitorEngine:
         def boom(_decision) -> bool:
             raise ClaudeSwitchError("same error")
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
-             patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=99.0),
+            patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
+        ):
             monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=boom,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=boom,
             )
             monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=boom,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=boom,
             )
 
         warnings = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.name == "claude-swap"
             and r.levelno == logging.WARNING
             and "switch failed" in r.getMessage()
         ]
         debugs = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.name == "claude-swap"
             and r.levelno == logging.DEBUG
             and "switch failed (repeat)" in r.getMessage()
@@ -670,17 +784,24 @@ class TestMonitorEngine:
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
-             patch.object(
-                 switcher,
-                 "build_auto_switch_decision",
-                 side_effect=OSError("planning lock failed"),
-             ):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch.object(
+                switcher,
+                "build_auto_switch_decision",
+                side_effect=OSError("planning lock failed"),
+            ),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=MagicMock(),
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=MagicMock(),
             )
 
         assert result.kind == "switch_failed"
@@ -691,16 +812,27 @@ class TestMonitorEngine:
         state = monitor.MonitorRuntimeState()
         perform = MagicMock(return_value=False)
 
-        with _already_optimal_plan(switcher), patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
-             patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+        with (
+            _already_optimal_plan(switcher),
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
+        ):
             result1 = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
             result2 = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
 
         assert result1.kind == "already_optimal"
@@ -708,7 +840,8 @@ class TestMonitorEngine:
         assert perform.call_count == 2
 
     def test_saturated_hold_uses_t_max_not_near_trigger_floor(
-        self, temp_home: Path,
+        self,
+        temp_home: Path,
     ):
         """saturated_hold must poll at t_max (60s), not at the 5s near-trigger
         floor.  Bug: both the first already_optimal result and subsequent
@@ -719,18 +852,29 @@ class TestMonitorEngine:
         state = monitor.MonitorRuntimeState()
         perform = MagicMock(return_value=False)
 
-        with _already_optimal_plan(switcher), patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=100.0), \
-             patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+        with (
+            _already_optimal_plan(switcher),
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=100.0),
+            patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
+        ):
             # First call: perform_switch returns False → sets saturated_hold=True
             result1 = monitor.monitor_step(
-                switcher, state, poll_seconds=60, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=60,
+                perform_switch=perform,
             )
             # Second call: saturated_hold is already True → skips switch
             result2 = monitor.monitor_step(
-                switcher, state, poll_seconds=60, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=60,
+                perform_switch=perform,
             )
 
         assert result1.kind == "already_optimal"
@@ -750,22 +894,34 @@ class TestMonitorEngine:
         state = monitor.MonitorRuntimeState()
         perform = MagicMock(return_value=False)
 
-        with _already_optimal_plan(switcher), patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=100.0), \
-             patch.object(
-                 switcher, "get_active_usage_retry_after", return_value=120,
-             ):
+        with (
+            _already_optimal_plan(switcher),
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=100.0),
+            patch.object(
+                switcher,
+                "get_active_usage_retry_after",
+                return_value=120,
+            ),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=60, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=60,
+                perform_switch=perform,
             )
 
         assert result.kind == "already_optimal"
         assert result.next_interval == 120  # max(t_max=60, min(120, cap))
 
     def test_saturated_hold_poll_log_reflects_real_cadence(
-        self, temp_home: Path, caplog,
+        self,
+        temp_home: Path,
+        caplog,
     ):
         """During a saturated hold the poll log must report the real t_max
         cadence (60s) and must not emit the "— switching" line, since hold
@@ -776,13 +932,21 @@ class TestMonitorEngine:
         perform = MagicMock(return_value=False)
 
         caplog.set_level(logging.INFO, logger="claude-swap")
-        with _already_optimal_plan(switcher), patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=100.0), \
-             patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+        with (
+            _already_optimal_plan(switcher),
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=100.0),
+            patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=60, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=60,
+                perform_switch=perform,
             )
 
         assert result.kind == "already_optimal"
@@ -802,63 +966,90 @@ class TestMonitorEngine:
         state = monitor.MonitorRuntimeState()
         perform = MagicMock(return_value=False)
 
-        with _already_optimal_plan(switcher), patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(
-            switcher,
-            "get_active_usage_pct",
-            side_effect=[96.0, 90.0, 96.0],
-        ), patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+        with (
+            _already_optimal_plan(switcher),
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(
+                switcher,
+                "get_active_usage_pct",
+                side_effect=[96.0, 90.0, 96.0],
+            ),
+            patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
+        ):
             monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
             monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
             monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
 
         assert perform.call_count == 2
 
     def test_saturated_hold_replans_when_peer_account_becomes_unsaturated(
-        self, temp_home: Path,
+        self,
+        temp_home: Path,
     ):
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
         perform = MagicMock(side_effect=[False, True])
 
-        with _already_optimal_plan(switcher), patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
-             patch.object(
-                 switcher,
-                 "build_auto_switch_decision",
-                 side_effect=[
-                     AutoSwitchDecisionContext(
-                         threshold=95,
-                         active_usage_pct=96.0,
-                         live_active_slot="1",
-                         sequence_active_slot="1",
-                         usage_by_slot={},
-                     ),
-                     AutoSwitchDecisionContext(
-                         threshold=95,
-                         active_usage_pct=96.0,
-                         live_active_slot="1",
-                         sequence_active_slot="1",
-                         usage_by_slot={"2": {"five_hour": {"pct": 10}}},
-                     ),
-                 ],
-             ) as mock_decision, \
-             patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+        with (
+            _already_optimal_plan(switcher),
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch.object(
+                switcher,
+                "build_auto_switch_decision",
+                side_effect=[
+                    AutoSwitchDecisionContext(
+                        threshold=95,
+                        active_usage_pct=96.0,
+                        live_active_slot="1",
+                        sequence_active_slot="1",
+                        usage_by_slot={},
+                    ),
+                    AutoSwitchDecisionContext(
+                        threshold=95,
+                        active_usage_pct=96.0,
+                        live_active_slot="1",
+                        sequence_active_slot="1",
+                        usage_by_slot={"2": {"five_hour": {"pct": 10}}},
+                    ),
+                ],
+            ) as mock_decision,
+            patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
+        ):
             result1 = monitor.monitor_step(
-                switcher, state, poll_seconds=60, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=60,
+                perform_switch=perform,
             )
             result2 = monitor.monitor_step(
-                switcher, state, poll_seconds=60, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=60,
+                perform_switch=perform,
             )
 
         assert result1.kind == "already_optimal"
@@ -872,48 +1063,68 @@ class TestMonitorEngine:
         state.saturated_hold = True
         perform = MagicMock(return_value=True)
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(
-            ClaudeAccountSwitcher,
-            "_live_default_mode_claude_pids",
-            side_effect=[[], [99999]],
-        ), patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
-             patch("claude_swap.monitor.time.time", return_value=1_000_000.0):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(
+                ClaudeAccountSwitcher,
+                "_live_default_mode_claude_pids",
+                side_effect=[[], [99999]],
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
+        ):
             idle_result = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
             assert idle_result.kind == "idle"
             assert state.saturated_hold is False
 
             switch_result = monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
 
         assert switch_result.kind == "switched"
         perform.assert_called_once()
 
     def test_step_usage_fetch_error_returns_unavailable_backoff(
-        self, temp_home: Path,
+        self,
+        temp_home: Path,
     ):
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
         _login(temp_home)
         creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "_read_credentials", return_value=creds), \
-             patch(
-                 "claude_swap.oauth.fetch_usage_for_account",
-                 return_value=oauth.UsageFetchError(
-                     reason="rate_limited", status_code=429,
-                 ),
-             ):
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "_read_credentials", return_value=creds),
+            patch(
+                "claude_swap.oauth.fetch_usage_for_account",
+                return_value=oauth.UsageFetchError(
+                    reason="rate_limited",
+                    status_code=429,
+                ),
+            ),
+        ):
             result = monitor.monitor_step(
-                switcher, state, poll_seconds=60, perform_switch=MagicMock(),
+                switcher,
+                state,
+                poll_seconds=60,
+                perform_switch=MagicMock(),
             )
 
         assert result.kind == "usage_unavailable"
@@ -922,7 +1133,8 @@ class TestMonitorEngine:
         assert "unavailable" in result.user_message.lower()
 
     def test_warms_usage_cache_on_first_poll_only(
-        self, temp_home: Path,
+        self,
+        temp_home: Path,
     ):
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
@@ -940,20 +1152,31 @@ class TestMonitorEngine:
         state = monitor.MonitorRuntimeState()
         perform = MagicMock(return_value=False)
 
-        with patch.object(
-            switcher, "get_auto_switch_config",
-            return_value={"enabled": True, "threshold": 95},
-        ), patch.object(switcher, "get_active_usage_pct", return_value=10.0), \
-             patch.object(switcher, "_account_is_switchable", return_value=True), \
-             patch.object(switcher, "_trusted_usage_snapshots", return_value={}), \
-             patch.object(
-                 switcher, "_refresh_switchable_usage_cache",
-             ) as mock_refresh:
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=10.0),
+            patch.object(switcher, "_account_is_switchable", return_value=True),
+            patch.object(switcher, "_trusted_usage_snapshots", return_value={}),
+            patch.object(
+                switcher,
+                "_refresh_switchable_usage_cache",
+            ) as mock_refresh,
+        ):
             monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
             monitor.monitor_step(
-                switcher, state, poll_seconds=0, perform_switch=perform,
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
             )
 
         mock_refresh.assert_called_once()
@@ -984,38 +1207,46 @@ class TestMonitorPidLifecycle:
         pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
         pid_path.write_text("4242", encoding="utf-8")
 
-        with patch("claude_swap.monitor.os.kill"), \
-             patch(
-                 "claude_swap.monitor._pid_command",
-                 return_value="/usr/bin/python sleep 999",
-             ):
+        with (
+            patch("claude_swap.monitor.os.kill"),
+            patch(
+                "claude_swap.monitor._pid_command",
+                return_value="/usr/bin/python sleep 999",
+            ),
+        ):
             assert monitor._read_running_pid(pid_path) is None
 
     def test_pid_is_running_accepts_cli_monitor_entrypoint(self):
-        with patch("claude_swap.monitor.os.kill"), \
-             patch(
-                 "claude_swap.monitor._pid_command",
-                 return_value="/usr/local/bin/cswap --monitor",
-             ):
+        with (
+            patch("claude_swap.monitor.os.kill"),
+            patch(
+                "claude_swap.monitor._pid_command",
+                return_value="/usr/local/bin/cswap --monitor",
+            ),
+        ):
             assert monitor._pid_is_running(4242) is True
 
     def test_pid_is_running_accepts_bare_tui_entrypoint(self):
         # The TUI in-process monitor's argv is just ``cswap`` (no --monitor),
         # yet it writes the PID file and must be visible to the guard so a
         # later CLI/launchd run does not start a second monitor.
-        with patch("claude_swap.monitor.os.kill"), \
-             patch(
-                 "claude_swap.monitor._pid_command",
-                 return_value="/usr/local/bin/cswap",
-             ):
+        with (
+            patch("claude_swap.monitor.os.kill"),
+            patch(
+                "claude_swap.monitor._pid_command",
+                return_value="/usr/local/bin/cswap",
+            ),
+        ):
             assert monitor._pid_is_running(4242) is True
 
     def test_pid_is_running_rejects_unrelated_reused_pid(self):
-        with patch("claude_swap.monitor.os.kill"), \
-             patch(
-                 "claude_swap.monitor._pid_command",
-                 return_value="vim notes.txt",
-             ):
+        with (
+            patch("claude_swap.monitor.os.kill"),
+            patch(
+                "claude_swap.monitor._pid_command",
+                return_value="vim notes.txt",
+            ),
+        ):
             assert monitor._pid_is_running(4242) is False
 
     def test_pid_is_running_windows_uses_tasklist_not_os_kill(
@@ -1034,9 +1265,7 @@ class TestMonitorPidLifecycle:
 
     def test_pid_is_running_windows_rejects_absent_pid(self):
         # tasklist ran, no process owns the PID → not running.
-        with patch(
-            "claude_swap.monitor._tasklist_image", return_value=(True, None)
-        ):
+        with patch("claude_swap.monitor._tasklist_image", return_value=(True, None)):
             assert monitor._pid_is_running_windows(4242) is False
 
     def test_pid_is_running_windows_rejects_unrelated_image(self):
@@ -1058,9 +1287,7 @@ class TestMonitorPidLifecycle:
         self,
     ):
         # tasklist missing → liveness undeterminable → conservatively the holder.
-        with patch(
-            "claude_swap.monitor._tasklist_image", return_value=(False, None)
-        ):
+        with patch("claude_swap.monitor._tasklist_image", return_value=(False, None)):
             assert monitor._pid_is_running_windows(4242) is True
 
     def test_tasklist_image_parses_csv_and_no_task_line(self):
@@ -1073,13 +1300,13 @@ class TestMonitorPidLifecycle:
         )
         with patch("claude_swap.monitor.subprocess.run", return_value=absent):
             assert monitor._tasklist_image(4242) == (True, None)
-        with patch(
-            "claude_swap.monitor.subprocess.run", side_effect=OSError
-        ):
+        with patch("claude_swap.monitor.subprocess.run", side_effect=OSError):
             assert monitor._tasklist_image(4242) == (False, None)
 
     def test_run_cli_monitor_starts_when_pidfile_has_reused_pid(
-        self, temp_home: Path, capsys,
+        self,
+        temp_home: Path,
+        capsys,
     ):
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
@@ -1087,12 +1314,14 @@ class TestMonitorPidLifecycle:
         pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
         pid_path.write_text("4242", encoding="utf-8")
 
-        with patch("claude_swap.monitor.os.kill"), \
-             patch(
-                 "claude_swap.monitor._pid_command",
-                 return_value="/usr/bin/python sleep 999",
-             ), \
-             patch.object(switcher, "get_active_usage_pct", return_value=10.0):
+        with (
+            patch("claude_swap.monitor.os.kill"),
+            patch(
+                "claude_swap.monitor._pid_command",
+                return_value="/usr/bin/python sleep 999",
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=10.0),
+        ):
             code = monitor.run_cli_monitor(switcher, poll_seconds=1, once=True)
 
         out = capsys.readouterr().out
@@ -1107,9 +1336,11 @@ class TestMonitorPidLifecycle:
         pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
         pid_path.write_text("12345", encoding="utf-8")
 
-        with patch("claude_swap.monitor._read_running_pid", side_effect=[None, 12345]), \
-             patch("claude_swap.monitor._pid_is_running", return_value=False), \
-             patch("claude_swap.monitor.os.open", side_effect=FileExistsError):
+        with (
+            patch("claude_swap.monitor._read_running_pid", side_effect=[None, 12345]),
+            patch("claude_swap.monitor._pid_is_running", return_value=False),
+            patch("claude_swap.monitor.os.open", side_effect=FileExistsError),
+        ):
             existing = monitor._acquire_monitor_pid(pid_path)
 
         assert existing == 12345
@@ -1120,11 +1351,14 @@ class TestMonitorPidLifecycle:
         switcher.set_auto_switch_config(enabled=True)
         pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
 
-        with patch.object(
-            ClaudeAccountSwitcher,
-            "_live_default_mode_claude_pids",
-            return_value=[99999],
-        ), patch.object(switcher, "get_active_usage_pct", return_value=10.0):
+        with (
+            patch.object(
+                ClaudeAccountSwitcher,
+                "_live_default_mode_claude_pids",
+                return_value=[99999],
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=10.0),
+        ):
             monitor.run_cli_monitor(switcher, poll_seconds=1, once=True)
 
         assert not pid_path.exists()
@@ -1152,11 +1386,32 @@ class TestCliAutoMonitor:
         assert "Auto-switch monitor (Beta)" in out
         assert "already running (pid 12345)" in out
 
+    def test_service_monitor_pid_collision_is_retryable_failure(
+        self,
+        temp_home: Path,
+        capsys,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
+        pid_path.write_text("12345", encoding="utf-8")
+        monkeypatch.setenv(monitor.SERVICE_MONITOR_ENV_KEY, "1")
+
+        with patch("claude_swap.monitor._pid_is_running", return_value=True):
+            code = monitor.run_cli_monitor(switcher, once=True)
+
+        out = capsys.readouterr().out
+        assert code == 75
+        assert "already running (pid 12345)" in out
+
     def test_once_switches_when_threshold_reached(self, temp_home: Path, capsys):
         switcher = ClaudeAccountSwitcher()
 
-        with patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
-             patch.object(switcher, "switch") as mock_switch:
+        with (
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch.object(switcher, "switch") as mock_switch,
+        ):
             code = monitor.run_cli_monitor(
                 switcher,
                 poll_seconds=1,
@@ -1173,8 +1428,10 @@ class TestCliAutoMonitor:
     def test_once_e2e_holds_below_threshold(self, temp_home: Path, capsys):
         switcher = ClaudeAccountSwitcher()
 
-        with patch.object(switcher, "get_active_usage_pct", return_value=40.0), \
-             patch.object(switcher, "switch") as mock_switch:
+        with (
+            patch.object(switcher, "get_active_usage_pct", return_value=40.0),
+            patch.object(switcher, "switch") as mock_switch,
+        ):
             code = monitor.run_cli_monitor(switcher, poll_seconds=1, once=True)
 
         out = capsys.readouterr().out
@@ -1226,9 +1483,7 @@ class TestCliAutoMonitor:
                 handler(signal.SIGTERM, None)
 
         monkeypatch.setattr("claude_swap.monitor.signal.signal", capture_signal)
-        monkeypatch.setattr(
-            "claude_swap.monitor.time.sleep", fire_sigterm_then_noop
-        )
+        monkeypatch.setattr("claude_swap.monitor.time.sleep", fire_sigterm_then_noop)
 
         with patch.object(switcher, "get_active_usage_pct", return_value=10.0):
             rc = monitor.run_cli_monitor(switcher, poll_seconds=1, once=False)
@@ -1237,9 +1492,7 @@ class TestCliAutoMonitor:
         # finally-block restored the prior handler (not the test's stop_monitor).
         assert signal.getsignal(signal.SIGTERM) == original
 
-    def test_logs_poll_and_switch_at_threshold(
-        self, temp_home: Path, caplog
-    ):
+    def test_logs_poll_and_switch_at_threshold(self, temp_home: Path, caplog):
         switcher = ClaudeAccountSwitcher()
         switched = {"n": 0, "intent": None}
 
@@ -1249,13 +1502,13 @@ class TestCliAutoMonitor:
             return True
 
         caplog.set_level(logging.INFO, logger="claude-swap")
-        with patch.object(switcher, "get_active_usage_pct", return_value=96.0), \
-             patch.object(switcher, "switch", side_effect=_do_switch):
+        with (
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch.object(switcher, "switch", side_effect=_do_switch),
+        ):
             monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
 
-        records = [
-            r for r in caplog.records if r.name == "claude-swap"
-        ]
+        records = [r for r in caplog.records if r.name == "claude-swap"]
         msgs = [r.getMessage() for r in records]
         assert any("monitor poll" in m and "96" in m for m in msgs), msgs
         assert any("monitor threshold reached" in m for m in msgs), msgs
@@ -1274,8 +1527,10 @@ class TestCliAutoMonitor:
             raise ClaudeSwitchError("boom")
 
         caplog.set_level(logging.INFO, logger="claude-swap")
-        with patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
-             patch.object(switcher, "switch", side_effect=_raise):
+        with (
+            patch.object(switcher, "get_active_usage_pct", return_value=99.0),
+            patch.object(switcher, "switch", side_effect=_raise),
+        ):
             monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
 
         warnings = [
@@ -1283,22 +1538,24 @@ class TestCliAutoMonitor:
             for r in caplog.records
             if r.name == "claude-swap" and r.levelno == logging.WARNING
         ]
-        assert warnings, [
-            (r.name, r.levelname, r.getMessage()) for r in caplog.records
-        ]
+        assert warnings, [(r.name, r.levelname, r.getMessage()) for r in caplog.records]
         assert any("monitor switch failed" in r.getMessage() for r in warnings)
         assert any("boom" in r.getMessage() for r in warnings)
 
     def test_cli_stdout_omits_switching_before_switch_failed(
-        self, temp_home: Path, capsys,
+        self,
+        temp_home: Path,
+        capsys,
     ):
         switcher = ClaudeAccountSwitcher()
 
         def _raise(_intent) -> bool:
             raise ClaudeSwitchError("boom")
 
-        with patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
-             patch.object(switcher, "switch", side_effect=_raise):
+        with (
+            patch.object(switcher, "get_active_usage_pct", return_value=99.0),
+            patch.object(switcher, "switch", side_effect=_raise),
+        ):
             monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
 
         out = capsys.readouterr().out
@@ -1308,15 +1565,18 @@ class TestCliAutoMonitor:
     def test_monitor_stops_when_config_disabled_mid_cycle(self, temp_home: Path):
         """Config is re-read each cycle: disabling via TUI stops switching."""
         switcher = ClaudeAccountSwitcher()
-        with patch.object(
-            switcher,
-            "get_auto_switch_config",
-            side_effect=[
-                {"enabled": True, "threshold": 98},
-                {"enabled": False, "threshold": 98},
-            ],
-        ), patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
-           patch.object(switcher, "switch") as mock_switch:
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                side_effect=[
+                    {"enabled": True, "threshold": 98},
+                    {"enabled": False, "threshold": 98},
+                ],
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=99.0),
+            patch.object(switcher, "switch") as mock_switch,
+        ):
             code = monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
 
         assert code == 0
@@ -1327,22 +1587,27 @@ class TestCliAutoMonitor:
         switcher = ClaudeAccountSwitcher()
         # Startup: threshold=98; in-loop: threshold lowered to 50.
         # Usage=60% → below 98 (no switch), but above 50 (switch).
-        with patch.object(
-            switcher,
-            "get_auto_switch_config",
-            side_effect=[
-                {"enabled": True, "threshold": 98},
-                {"enabled": True, "threshold": 50},
-            ],
-        ), patch.object(switcher, "get_active_usage_pct", return_value=60.0), \
-           patch.object(switcher, "switch") as mock_switch:
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                side_effect=[
+                    {"enabled": True, "threshold": 98},
+                    {"enabled": True, "threshold": 50},
+                ],
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=60.0),
+            patch.object(switcher, "switch") as mock_switch,
+        ):
             code = monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
 
         assert code == 0
         mock_switch.assert_called_once()
 
     def test_monitor_idles_when_no_live_claude_sessions(
-        self, temp_home: Path, caplog,
+        self,
+        temp_home: Path,
+        caplog,
     ):
         """With zero default-mode Claude Code processes running there is
         nothing burning tokens, so the monitor skips the usage API call
@@ -1352,12 +1617,15 @@ class TestCliAutoMonitor:
         switcher = ClaudeAccountSwitcher()
         caplog.set_level(logging.INFO, logger="claude-swap")
 
-        with patch.object(
-            ClaudeAccountSwitcher,
-            "_live_default_mode_claude_pids",
-            return_value=[],
-        ), patch.object(switcher, "get_active_usage_pct") as mock_usage, \
-           patch.object(switcher, "switch") as mock_switch:
+        with (
+            patch.object(
+                ClaudeAccountSwitcher,
+                "_live_default_mode_claude_pids",
+                return_value=[],
+            ),
+            patch.object(switcher, "get_active_usage_pct") as mock_usage,
+            patch.object(switcher, "switch") as mock_switch,
+        ):
             monitor.run_cli_monitor(switcher, poll_seconds=0, once=True)
 
         # Usage API is NOT consulted while idle — that's the whole point of
@@ -1384,22 +1652,26 @@ class TestCliAutoMonitor:
         def boom(_intent):
             raise ClaudeSwitchError("slot 2 token expired and refresh failed")
 
-        with patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
-             patch.object(switcher, "switch", side_effect=boom), \
-             patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
+        with (
+            patch.object(switcher, "get_active_usage_pct", return_value=99.0),
+            patch.object(switcher, "switch", side_effect=boom),
+            patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep),
+        ):
             # Explicit poll_seconds=60 so the test does not silently depend on
             # the module-level default; the value itself doesn't matter here
             # because time.sleep is mocked.
             monitor.run_cli_monitor(switcher, poll_seconds=60)
 
         warnings = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.name == "claude-swap"
             and r.levelno == logging.WARNING
             and "switch failed" in r.getMessage()
         ]
         debugs = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.name == "claude-swap"
             and r.levelno == logging.DEBUG
             and "switch failed (repeat)" in r.getMessage()
@@ -1409,7 +1681,9 @@ class TestCliAutoMonitor:
         assert len(debugs) >= 1, [r.getMessage() for r in debugs]
 
     def test_monitor_backs_off_on_consecutive_usage_failures(
-        self, temp_home: Path, caplog,
+        self,
+        temp_home: Path,
+        caplog,
     ):
         """When the usage API returns None, the failure counter increments and
         the next poll interval grows exponentially.  We exercise the in-process
@@ -1427,8 +1701,10 @@ class TestCliAutoMonitor:
             if len(sleeps) >= 3:
                 raise monitor._MonitorStopped
 
-        with patch.object(switcher, "get_active_usage_pct", return_value=None), \
-             patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
+        with (
+            patch.object(switcher, "get_active_usage_pct", return_value=None),
+            patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep),
+        ):
             # Explicit poll_seconds=60 (the production default) so we are not
             # silently coupled to a module-level constant.
             monitor.run_cli_monitor(switcher, poll_seconds=60)
@@ -1467,7 +1743,10 @@ class TestNextPollInterval:
 
     def test_returns_t_max_without_baseline(self):
         """First iteration, no previous sample → no velocity → idle at max."""
-        assert monitor._next_poll_interval(50.0, None, 0.0, 95) == monitor.MONITOR_POLL_SECONDS
+        assert (
+            monitor._next_poll_interval(50.0, None, 0.0, 95)
+            == monitor.MONITOR_POLL_SECONDS
+        )
 
     def test_returns_t_max_when_velocity_zero(self):
         """User idle: same pct, no token consumption — slow poll is correct."""
@@ -1538,7 +1817,10 @@ class TestNextPollIntervalMulti:
     def test_matches_single_window_when_one_window(self):
         """With a lone aggregate window it equals the scalar picker."""
         multi = monitor._next_poll_interval_multi(
-            {"max": 60.0}, {"max": 50.0}, 60.0, 95,
+            {"max": 60.0},
+            {"max": 50.0},
+            60.0,
+            95,
         )
         single = monitor._next_poll_interval(60.0, 50.0, 60.0, 95)
         assert multi == single
@@ -1561,7 +1843,9 @@ class TestSleepWakeAndHeartbeat:
     """
 
     def test_wake_gap_resets_baseline_and_last_switch_error(
-        self, temp_home: Path, caplog,
+        self,
+        temp_home: Path,
+        caplog,
     ):
         """A wall-clock gap > WAKE_GAP_MULTIPLIER * poll_seconds indicates
         sleep/wake.  Baselines and last_switch_error must reset so a stale
@@ -1593,10 +1877,12 @@ class TestSleepWakeAndHeartbeat:
         def boom(_intent):
             raise ClaudeSwitchError("slot 2 token expired and refresh failed")
 
-        with patch.object(switcher, "get_active_usage_pct", return_value=99.0), \
-             patch.object(switcher, "switch", side_effect=boom), \
-             patch("claude_swap.monitor.time.time", side_effect=fake_wall_time), \
-             patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
+        with (
+            patch.object(switcher, "get_active_usage_pct", return_value=99.0),
+            patch.object(switcher, "switch", side_effect=boom),
+            patch("claude_swap.monitor.time.time", side_effect=fake_wall_time),
+            patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep),
+        ):
             monitor.run_cli_monitor(switcher, poll_seconds=60)
 
         msgs = [r.getMessage() for r in caplog.records if r.name == "claude-swap"]
@@ -1606,19 +1892,23 @@ class TestSleepWakeAndHeartbeat:
         # re-surface at WARNING, not DEBUG.  Two WARNINGs (pre + post wake)
         # would prove last_switch_error actually reset.
         warning_failures = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.name == "claude-swap"
             and r.levelno == logging.WARNING
             and "monitor switch failed" in r.getMessage()
             and "(repeat)" not in r.getMessage()
         ]
         assert len(warning_failures) == 2, [
-            (r.levelname, r.getMessage()) for r in caplog.records
+            (r.levelname, r.getMessage())
+            for r in caplog.records
             if "switch failed" in r.getMessage()
         ]
 
     def test_idle_heartbeat_fires_after_long_idle_with_enabled_auto_switch(
-        self, temp_home: Path, caplog,
+        self,
+        temp_home: Path,
+        caplog,
     ):
         """When session detection returns zero PIDs for longer than the
         heartbeat threshold while auto-switch is enabled, emit a WARNING.
@@ -1644,16 +1934,20 @@ class TestSleepWakeAndHeartbeat:
                 return 1_000_000.0
             return 1_000_000.0 + monitor.MONITOR_IDLE_HEARTBEAT_SECONDS + 1
 
-        with patch.object(
-            ClaudeAccountSwitcher,
-            "_live_default_mode_claude_pids",
-            return_value=[],
-        ), patch("claude_swap.monitor.time.time", side_effect=fake_wall_time), \
-           patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep):
+        with (
+            patch.object(
+                ClaudeAccountSwitcher,
+                "_live_default_mode_claude_pids",
+                return_value=[],
+            ),
+            patch("claude_swap.monitor.time.time", side_effect=fake_wall_time),
+            patch("claude_swap.monitor.time.sleep", side_effect=fake_sleep),
+        ):
             monitor.run_cli_monitor(switcher, poll_seconds=60)
 
         warnings = [
-            r.getMessage() for r in caplog.records
+            r.getMessage()
+            for r in caplog.records
             if r.name == "claude-swap" and r.levelno == logging.WARNING
         ]
         assert any("monitor idle for" in m for m in warnings), warnings
@@ -1665,8 +1959,7 @@ class TestFailureBackoffSeconds:
 
     def test_first_failure_returns_base(self):
         assert (
-            monitor._failure_backoff_seconds(1)
-            == monitor.MONITOR_FAILURE_BACKOFF_BASE
+            monitor._failure_backoff_seconds(1) == monitor.MONITOR_FAILURE_BACKOFF_BASE
         )
 
     def test_doubles_each_failure(self):
@@ -1697,8 +1990,13 @@ class TestRetryAfterBackoff:
         state = monitor.MonitorRuntimeState()
         state.consecutive_failures = failures
         return monitor._step_usage_unavailable(
-            state, poll_seconds, 0.0, 95, "unavailable",
-            logging.getLogger("claude-swap"), retry_after=retry_after,
+            state,
+            poll_seconds,
+            0.0,
+            95,
+            "unavailable",
+            logging.getLogger("claude-swap"),
+            retry_after=retry_after,
         )
 
     def test_none_falls_back_to_failure_backoff(self):
@@ -1723,28 +2021,42 @@ class TestRetryAfterBackoff:
 
     def test_switcher_reads_retry_after_from_rate_limited_entry(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        with patch.object(
-            switcher, "_active_account_slot", return_value=("1", "a@example.com"),
-        ), patch.object(
-            switcher, "_resolve_active_usage_entry",
-            return_value=(
-                oauth.UsageFetchError(reason="rate_limited", retry_after="90"), "rl",
+        with (
+            patch.object(
+                switcher,
+                "_active_account_slot",
+                return_value=("1", "a@example.com"),
+            ),
+            patch.object(
+                switcher,
+                "_resolve_active_usage_entry",
+                return_value=(
+                    oauth.UsageFetchError(reason="rate_limited", retry_after="90"),
+                    "rl",
+                ),
             ),
         ):
             assert switcher.get_active_usage_retry_after() == 90
 
     def test_switcher_retry_after_none_when_not_rate_limited(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        with patch.object(
-            switcher, "_active_account_slot", return_value=("1", "a@example.com"),
-        ), patch.object(
-            switcher, "_resolve_active_usage_entry",
-            return_value=({"five_hour": {"utilization": 10}}, "ok"),
+        with (
+            patch.object(
+                switcher,
+                "_active_account_slot",
+                return_value=("1", "a@example.com"),
+            ),
+            patch.object(
+                switcher,
+                "_resolve_active_usage_entry",
+                return_value=({"five_hour": {"utilization": 10}}, "ok"),
+            ),
         ):
             assert switcher.get_active_usage_retry_after() is None
 
     def test_switcher_reads_retry_after_from_masked_rate_limit_side_field(
-        self, temp_home: Path,
+        self,
+        temp_home: Path,
     ):
         # A trusted prior usage row masks the active 429, but the codec stamped
         # the server Retry-After as a side field — the monitor must still see it,
@@ -1755,15 +2067,24 @@ class TestRetryAfterBackoff:
             "_cached_at": 1_000.0,
             "_last_rate_limit": {"retry_after": "90", "at": 1_000.0},
         }
-        with patch.object(
-            switcher, "_active_account_slot", return_value=("1", "a@example.com"),
-        ), patch.object(
-            switcher, "_resolve_active_usage_entry", return_value=(masked, "rl"),
-        ), patch("claude_swap.switcher.time.time", return_value=1_010.0):
+        with (
+            patch.object(
+                switcher,
+                "_active_account_slot",
+                return_value=("1", "a@example.com"),
+            ),
+            patch.object(
+                switcher,
+                "_resolve_active_usage_entry",
+                return_value=(masked, "rl"),
+            ),
+            patch("claude_swap.switcher.time.time", return_value=1_010.0),
+        ):
             assert switcher.get_active_usage_retry_after() == 80
 
     def test_switcher_retry_after_none_when_masked_window_elapsed(
-        self, temp_home: Path,
+        self,
+        temp_home: Path,
     ):
         # Once the server window has fully elapsed, no backoff is reported even
         # though the side field is still present on the cached row.
@@ -1773,9 +2094,17 @@ class TestRetryAfterBackoff:
             "_cached_at": 1_000.0,
             "_last_rate_limit": {"retry_after": "90", "at": 1_000.0},
         }
-        with patch.object(
-            switcher, "_active_account_slot", return_value=("1", "a@example.com"),
-        ), patch.object(
-            switcher, "_resolve_active_usage_entry", return_value=(masked, "rl"),
-        ), patch("claude_swap.switcher.time.time", return_value=1_200.0):
+        with (
+            patch.object(
+                switcher,
+                "_active_account_slot",
+                return_value=("1", "a@example.com"),
+            ),
+            patch.object(
+                switcher,
+                "_resolve_active_usage_entry",
+                return_value=(masked, "rl"),
+            ),
+            patch("claude_swap.switcher.time.time", return_value=1_200.0),
+        ):
             assert switcher.get_active_usage_retry_after() is None

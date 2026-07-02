@@ -70,6 +70,7 @@ from claude_swap.paths import (
 )
 from claude_swap.credentials import (
     SECURITY_SERVICE,
+    ActiveCredentials,
     CredentialStore,
     looks_like_api_key,
 )
@@ -286,6 +287,12 @@ class ClaudeAccountSwitcher:
     def _read_credentials(self) -> str | None:
         """Read Claude Code's active credentials (delegates to CredentialStore)."""
         return self._store._read_credentials()
+
+    def _read_active_credentials(self) -> ActiveCredentials:
+        """Read active credentials with Keychain availability classification."""
+        if "_read_credentials" in self.__dict__:
+            return ActiveCredentials(self._read_credentials(), False)
+        return self._store._read_active_credentials()
 
     def _write_credentials(self, credentials: str, *, verify: bool = False) -> None:
         """Write Claude Code's active credentials (delegates to CredentialStore)."""
@@ -601,11 +608,20 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data() or {}
         switchable = self._switchable_slot_ids(data)
         snapshots = self._trusted_usage_snapshots()
-        # Refresh only on a cold cache (no trusted slot at all). A permanently
-        # unfetchable slot (API-key, expired creds) keeps the trusted count
-        # below the switchable total forever, so gating on completeness would
-        # re-fetch the whole fleet every poll; one trusted peer is enough to plan.
-        if switchable and not snapshots:
+        active_slot = live_slot or sequence_slot
+        has_switchable_peer = active_slot is not None and any(
+            slot != active_slot for slot in switchable
+        )
+        has_trusted_peer = active_slot is not None and any(
+            slot != active_slot for slot in snapshots
+        )
+        # Refresh when there is no trusted signal, or when the only trusted
+        # signal is the active slot. A stale-peer fleet must not plan from a
+        # freshly re-stamped active row alone, but one trusted peer remains
+        # enough to avoid polling permanently-unfetchable slots every cycle.
+        if switchable and (
+            not snapshots or (has_switchable_peer and not has_trusted_peer)
+        ):
             self._refresh_switchable_usage_cache()
             snapshots = self._trusted_usage_snapshots()
 

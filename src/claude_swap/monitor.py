@@ -27,8 +27,10 @@ from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.models import AutoSwitchDecisionContext, BackgroundAutoSwitchIntent
 from claude_swap.printer import accent, bolded, dimmed, muted
 from claude_swap.protocols import MonitorHost
+from claude_swap.service_spec import SERVICE_MONITOR_ENV_KEY
 
 PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
+MONITOR_ALREADY_RUNNING_RETRY_EXIT = 75
 
 MonitorStepKind = Literal[
     "disabled",
@@ -997,6 +999,12 @@ def run_cli_monitor(
             f"{muted(f'already running (pid {running_pid})')}",
             file=out,
         )
+        if os.environ.get(SERVICE_MONITOR_ENV_KEY) == "1":
+            log.warning(
+                "service monitor found existing pid=%s; exiting retryable",
+                running_pid,
+            )
+            return MONITOR_ALREADY_RUNNING_RETRY_EXIT
         return 0
 
     print(bolded("Auto-switch monitor (Beta)"), file=out)

@@ -74,7 +74,9 @@ class TestBuildTaskXml:
         assert "<Interval>PT1M</Interval>" in xml
         assert "<Count>3</Count>" in xml
 
-    def test_action_uses_program_arguments(self, temp_home: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_action_uses_program_arguments(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         _force_win32(monkeypatch)
         monkeypatch.setattr(
             ts_backend,
@@ -93,7 +95,12 @@ class TestBuildTaskXml:
         monkeypatch.setattr(
             ts_backend,
             "_program_arguments",
-            lambda: [r"C:\Program Files\py & co\pythonw.exe", "-m", "claude_swap", "--monitor"],
+            lambda: [
+                r"C:\Program Files\py & co\pythonw.exe",
+                "-m",
+                "claude_swap",
+                "--monitor",
+            ],
         )
         switcher = ClaudeAccountSwitcher()
         xml = ts_backend._build_task_xml(switcher)
@@ -108,7 +115,8 @@ class TestBuildTaskXml:
         _force_win32(monkeypatch)
         captured: dict[str, str] = {}
         monkeypatch.setattr(
-            ts_backend, "_powershell",
+            ts_backend,
+            "_powershell",
             lambda script, **kw: captured.setdefault("script", script),
         )
         xml_path = tmp_path / "o'brien" / "task.xml"
@@ -211,7 +219,10 @@ class TestInstall:
 
 class TestUninstall:
     def test_unregisters_and_removes_xml(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_win32(monkeypatch)
         switcher = ClaudeAccountSwitcher()
@@ -236,7 +247,10 @@ class TestUninstall:
         assert "Service removed" in capsys.readouterr().out
 
     def test_idempotent_when_absent(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_win32(monkeypatch)
         monkeypatch.setattr(ts_backend, "_query_task_state", lambda: (False, ""))
@@ -288,7 +302,9 @@ class TestInstalledVersion:
 
 
 class TestSelectBackendWindows:
-    def test_win32_selects_task_scheduler_backend(self, monkeypatch: pytest.MonkeyPatch):
+    def test_win32_selects_task_scheduler_backend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         from claude_swap.service_backends import select_backend
         from claude_swap.service_backends.task_scheduler import TaskSchedulerBackend
 

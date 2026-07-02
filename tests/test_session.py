@@ -268,7 +268,9 @@ class TestBootstrap:
         )
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
-    def test_profile_permissions(self, manager, auth_status_tracks_seed, refresh_rotates):
+    def test_profile_permissions(
+        self, manager, auth_status_tracks_seed, refresh_rotates
+    ):
         session_dir, _, _ = manager.setup_session("2", share=False)
         assert (session_dir.stat().st_mode & 0o777) == 0o700
         assert ((session_dir / ".credentials.json").stat().st_mode & 0o777) == 0o600
@@ -302,7 +304,9 @@ class TestBootstrap:
         token_creds = json.dumps(
             {"claudeAiOauth": {"accessToken": "sk-ant-oat01-x", "expiresAt": 0}}
         )
-        seeded_switcher._write_account_credentials(ACCOUNT_NUM, ACCOUNT_EMAIL, token_creds)
+        seeded_switcher._write_account_credentials(
+            ACCOUNT_NUM, ACCOUNT_EMAIL, token_creds
+        )
         refresh_calls = []
         monkeypatch.setattr(
             session_mod,
@@ -316,7 +320,9 @@ class TestBootstrap:
         assert "Could not refresh" not in capsys.readouterr().out
         assert (session_dir / ".credentials.json").read_text() == token_creds
 
-    def test_missing_credentials(self, manager, seeded_switcher, auth_status_tracks_seed):
+    def test_missing_credentials(
+        self, manager, seeded_switcher, auth_status_tracks_seed
+    ):
         seeded_switcher._delete_account_credentials(ACCOUNT_NUM, ACCOUNT_EMAIL)
         with pytest.raises(SessionError, match="no stored credentials"):
             manager.setup_session("2", share=False)
@@ -333,7 +339,12 @@ class TestBootstrap:
             manager.setup_session("2", share=False)
 
     def test_validation_failure_cleans_up(
-        self, manager, seeded_switcher, monkeypatch, refresh_rotates, block_real_keychain
+        self,
+        manager,
+        seeded_switcher,
+        monkeypatch,
+        refresh_rotates,
+        block_real_keychain,
     ):
         # Auth status never reports logged in → post-bootstrap validation fails.
         def always_invalid(cmd, env=None, **kwargs):
@@ -467,7 +478,9 @@ class TestIsSessionValid:
         valid_payload["orgId"] = "different-org"
         assert not self.check(manager, tmp_path, monkeypatch, valid_payload)
 
-    def test_lenient_when_org_absent(self, manager, tmp_path, monkeypatch, valid_payload):
+    def test_lenient_when_org_absent(
+        self, manager, tmp_path, monkeypatch, valid_payload
+    ):
         del valid_payload["orgId"]
         assert self.check(manager, tmp_path, monkeypatch, valid_payload)
 
@@ -517,7 +530,9 @@ def share_setup(temp_home: Path, seeded_switcher):
     (source / "skills").mkdir()
     (source / "skills" / "a.md").write_text("skill")
 
-    session_dir = session_dir_for(seeded_switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL)
+    session_dir = session_dir_for(
+        seeded_switcher.backup_dir, ACCOUNT_NUM, ACCOUNT_EMAIL
+    )
     session_dir.mkdir(parents=True)
     return source, session_dir, SessionManager(seeded_switcher)
 
@@ -640,9 +655,7 @@ def capture_exec(monkeypatch):
         raise _ExecCalled(binary, argv, env)
 
     monkeypatch.setattr(session_mod.os, "execvpe", fake_execvpe)
-    monkeypatch.setattr(
-        session_mod.shutil, "which", lambda name: f"/fake/bin/{name}"
-    )
+    monkeypatch.setattr(session_mod.shutil, "which", lambda name: f"/fake/bin/{name}")
 
 
 class TestRun:
@@ -727,9 +740,7 @@ class TestRun:
         assert "ANTHROPIC_AUTH_TOKEN" not in exc.value.env
         assert exc.value.env["UNRELATED_VAR"] == "kept"
 
-    def test_fast_path_keeps_env_untouched(
-        self, manager, capture_exec, monkeypatch
-    ):
+    def test_fast_path_keeps_env_untouched(self, manager, capture_exec, monkeypatch):
         """Plain-claude fast path must NOT scrub: it's normal claude behavior."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
         monkeypatch.setattr(
@@ -900,9 +911,7 @@ class TestGuards:
             seen[num] = is_active
             return None
 
-        monkeypatch.setattr(
-            "claude_swap.oauth.fetch_usage_for_account", fake_fetch
-        )
+        monkeypatch.setattr("claude_swap.oauth.fetch_usage_for_account", fake_fetch)
         seeded_switcher.list_accounts()
 
         assert seen[ACCOUNT_NUM] is True  # treated like active: no refresh

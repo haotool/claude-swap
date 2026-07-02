@@ -85,10 +85,12 @@ class TestBackupCredentialsSecurity:
         with patch("claude_swap.credentials.macos_keychain") as mock_kc:
             macos_switcher._delete_account_credentials("3", "bob@example.com")
 
-            mock_kc.delete_password.assert_has_calls([
-                call("claude-swap", "account-3-bob@example.com"),
-                call("claude-swap", "account-None-bob@example.com"),
-            ])
+            mock_kc.delete_password.assert_has_calls(
+                [
+                    call("claude-swap", "account-3-bob@example.com"),
+                    call("claude-swap", "account-None-bob@example.com"),
+                ]
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -116,12 +118,8 @@ def tmp_keychain(tmp_path: Path):
     shape is kept so the same code is risk-free if anyone copies it.
     """
     test_keychain = str(tmp_path / "test.keychain")
-    subprocess.run(
-        ["security", "create-keychain", "-p", "", test_keychain], check=True
-    )
-    subprocess.run(
-        ["security", "unlock-keychain", "-p", "", test_keychain], check=True
-    )
+    subprocess.run(["security", "create-keychain", "-p", "", test_keychain], check=True)
+    subprocess.run(["security", "unlock-keychain", "-p", "", test_keychain], check=True)
 
     # CI runners don't reliably have a default keychain configured (rc 1,
     # "A default keychain could not be found") — and an earlier swap/restore
@@ -133,9 +131,7 @@ def tmp_keychain(tmp_path: Path):
         text=True,
     )
     original_default = (
-        default_proc.stdout.strip().strip('"')
-        if default_proc.returncode == 0
-        else None
+        default_proc.stdout.strip().strip('"') if default_proc.returncode == 0 else None
     )
     list_proc = subprocess.run(
         ["security", "list-keychains", "-d", "user"],
@@ -161,9 +157,7 @@ def tmp_keychain(tmp_path: Path):
         # headless runner waiting for an unlock prompt nobody can click. Remove
         # the auto-lock timeout and unlock *after* the default/search-list swap
         # (the order fastlane's setup_ci uses).
-        subprocess.run(
-            ["security", "set-keychain-settings", test_keychain], check=True
-        )
+        subprocess.run(["security", "set-keychain-settings", test_keychain], check=True)
         subprocess.run(
             ["security", "unlock-keychain", "-p", "", test_keychain], check=True
         )
@@ -251,6 +245,8 @@ def test_wrapper_roundtrip_real_keychain(tmp_keychain: str):
     deleted, with the rc-44 "not found" contract checked at the end.
     """
     macos_keychain.set_password("claude-swap-test", "acct-1", "round-trip-token")
-    assert macos_keychain.get_password("claude-swap-test", "acct-1") == "round-trip-token"
+    assert (
+        macos_keychain.get_password("claude-swap-test", "acct-1") == "round-trip-token"
+    )
     macos_keychain.delete_password("claude-swap-test", "acct-1")
     assert macos_keychain.get_password("claude-swap-test", "acct-1") is None

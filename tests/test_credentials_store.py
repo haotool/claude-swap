@@ -11,7 +11,11 @@ from unittest.mock import patch
 import pytest
 
 from claude_swap import macos_keychain
-from claude_swap.credentials import CLAUDE_CODE_KEYCHAIN_SERVICE, SECURITY_SERVICE
+from claude_swap.credentials import (
+    CLAUDE_CODE_KEYCHAIN_SERVICE,
+    SECURITY_SERVICE,
+    ActiveCredentials,
+)
 from claude_swap.exceptions import (
     CredentialWriteError,
 )
@@ -33,10 +37,15 @@ class TestWriteVerifiedLiveDriftHandling:
     """
 
     def _creds(self, token: str) -> str:
-        return json.dumps({"claudeAiOauth": {"accessToken": token, "refreshToken": "rt"}})
+        return json.dumps(
+            {"claudeAiOauth": {"accessToken": token, "refreshToken": "rt"}}
+        )
 
     def test_persistent_live_rotation_does_not_raise(
-        self, temp_home: Path, monkeypatch, caplog,
+        self,
+        temp_home: Path,
+        monkeypatch,
+        caplog,
     ):
         """Simulates Claude Code refreshing its token on every verification
         attempt.  The function must terminate with a warning and persist the
@@ -56,11 +65,13 @@ class TestWriteVerifiedLiveDriftHandling:
         def read_acct(num, email):
             return store.get("backup", "")
 
-        live_iter = iter([
-            self._creds("live-1"),
-            self._creds("live-2"),
-            self._creds("live-3"),
-        ])
+        live_iter = iter(
+            [
+                self._creds("live-1"),
+                self._creds("live-2"),
+                self._creds("live-3"),
+            ]
+        )
 
         def read_live():
             return next(live_iter)
@@ -73,7 +84,9 @@ class TestWriteVerifiedLiveDriftHandling:
         caplog.set_level(logging.WARNING, logger="claude-swap")
 
         result = switcher._write_verified_live_account_credentials(
-            "2", "b@example.com", self._creds("intended"),
+            "2",
+            "b@example.com",
+            self._creds("intended"),
         )
 
         # Last sampled live state is what gets persisted as the backup.
@@ -81,7 +94,8 @@ class TestWriteVerifiedLiveDriftHandling:
         assert store["backup"] == self._creds("live-3")
 
         warnings = [
-            r.getMessage() for r in caplog.records
+            r.getMessage()
+            for r in caplog.records
             if r.name == "claude-swap" and r.levelno == logging.WARNING
         ]
         assert any(
@@ -89,7 +103,9 @@ class TestWriteVerifiedLiveDriftHandling:
         ), warnings
 
     def test_persistent_storage_write_failure_raises(
-        self, temp_home: Path, monkeypatch,
+        self,
+        temp_home: Path,
+        monkeypatch,
     ):
         """If live_now is stable but our write never sticks, raise so the
         genuine storage failure surfaces — don't silently swallow it as a
@@ -99,10 +115,14 @@ class TestWriteVerifiedLiveDriftHandling:
 
         # Our writes are no-ops — stored stays empty.  live_now is stable.
         monkeypatch.setattr(
-            switcher, "_write_account_credentials", lambda *_: None,
+            switcher,
+            "_write_account_credentials",
+            lambda *_: None,
         )
         monkeypatch.setattr(
-            switcher, "_read_account_credentials", lambda *_: "",
+            switcher,
+            "_read_account_credentials",
+            lambda *_: "",
         )
         stable_live = self._creds("stable")
         monkeypatch.setattr(switcher, "_read_credentials", lambda: stable_live)
@@ -110,7 +130,9 @@ class TestWriteVerifiedLiveDriftHandling:
 
         with pytest.raises(CredentialWriteError, match="did not match"):
             switcher._write_verified_live_account_credentials(
-                "2", "b@example.com", stable_live,
+                "2",
+                "b@example.com",
+                stable_live,
             )
 
 
@@ -218,6 +240,97 @@ class TestMacosKeychainFallback:
         del block_real_keychain.data[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)]
         assert s._read_credentials() == "FROM-FILE"
 
+    def test_active_read_retries_transient_keychain_failure(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        s = self._macos_switcher()
+        acct = macos_keychain.keychain_account_name()
+        block_real_keychain.data[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)] = "FROM-KC"
+        monkeypatch.setattr("claude_swap.credentials._ACTIVE_READ_RETRY_DELAY", 0)
+
+        calls = {"n": 0}
+        real_get = macos_keychain.get_password
+
+        def flaky_get(service, account):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise KeychainError("transient lock")
+            return real_get(service, account)
+
+        monkeypatch.setattr(macos_keychain, "get_password", flaky_get)
+
+        result = s._read_active_credentials()
+        assert result == ActiveCredentials("FROM-KC", False)
+        assert calls["n"] == 2
+
+        block_real_keychain.data[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)] = "FROM-KC-2"
+        cred = get_credentials_path()
+        cred.parent.mkdir(parents=True, exist_ok=True)
+        cred.write_text("FROM-FILE")
+
+        result = s._read_active_credentials()
+        assert result == ActiveCredentials("FROM-KC-2", False)
+
+    def test_active_read_keychain_unavailable_no_fallback(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        s = self._macos_switcher()
+        monkeypatch.setattr(macos_keychain, "get_password", _raise_locked)
+        monkeypatch.setattr("claude_swap.credentials._ACTIVE_READ_RETRY_DELAY", 0)
+        assert not get_credentials_path().exists()
+
+        result = s._read_active_credentials()
+        assert result == ActiveCredentials("", True)
+        assert s._read_credentials() == ""
+
+    def test_active_read_keychain_failure_covered_by_file(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        s = self._macos_switcher()
+        cred = get_credentials_path()
+        cred.parent.mkdir(parents=True, exist_ok=True)
+        cred.write_text("FROM-FILE")
+        monkeypatch.setattr(macos_keychain, "get_password", _raise_locked)
+        monkeypatch.setattr("claude_swap.credentials._ACTIVE_READ_RETRY_DELAY", 0)
+
+        result = s._read_active_credentials()
+        assert result == ActiveCredentials("FROM-FILE", False)
+
+    def test_active_read_absent_item_is_not_keychain_unavailable(
+        self, temp_home: Path, block_real_keychain
+    ):
+        s = self._macos_switcher()
+        assert not get_credentials_path().exists()
+
+        result = s._read_active_credentials()
+        assert result == ActiveCredentials("", False)
+
+    def test_list_active_shows_keychain_unavailable(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        monkeypatch,
+        block_real_keychain,
+        capsys,
+    ):
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        s = self._macos_switcher()
+        s._write_json(s.sequence_file, sample_sequence_data)
+        monkeypatch.setattr(macos_keychain, "get_password", _raise_locked)
+        monkeypatch.setattr("claude_swap.credentials._ACTIVE_READ_RETRY_DELAY", 0)
+        assert not get_credentials_path().exists()
+
+        payload = s.list_accounts(json_output=True)
+        active = next(a for a in payload["accounts"] if a["number"] == 1)
+        assert active["usageStatus"] == "keychain_unavailable"
+        assert active["usage"] is None
+
+        s.list_accounts()
+        out = capsys.readouterr().out
+        assert "test@example.com" in out
+        assert "keychain unavailable — locked or in use; try again" in out
+
     def test_active_write_falls_back_to_file_and_clears_stale_keychain(
         self, temp_home: Path, monkeypatch, block_real_keychain
     ):
@@ -303,7 +416,10 @@ class TestMacosKeychainFallback:
         with p1, p2:
             s._write_account_credentials("1", "a@example.com", "FILE-CREDS")
         assert s._read_account_credentials("1", "a@example.com") == "FILE-CREDS"
-        assert (SECURITY_SERVICE, "account-1-a@example.com") not in block_real_keychain.data
+        assert (
+            SECURITY_SERVICE,
+            "account-1-a@example.com",
+        ) not in block_real_keychain.data
 
     @pytest.mark.parametrize("bad", ["corrupt", "", "!!!!", "   ", "\n"])
     def test_backup_bad_enc_falls_back_to_keychain(
@@ -322,7 +438,10 @@ class TestMacosKeychainFallback:
         s._store._write_backup_enc("1", "a@example.com", "FILE")
         s._delete_account_credentials("1", "a@example.com")
         assert not s._store._backup_enc_path("1", "a@example.com").exists()
-        assert (SECURITY_SERVICE, "account-1-a@example.com") not in block_real_keychain.data
+        assert (
+            SECURITY_SERVICE,
+            "account-1-a@example.com",
+        ) not in block_real_keychain.data
 
     # -- healthy-Mac no-op guard & follow-up ------------------------------
 
@@ -336,10 +455,10 @@ class TestMacosKeychainFallback:
         assert s._read_credentials() == ""
         assert not get_credentials_path().exists()
 
-    @pytest.mark.skip(reason="_print_switch_followup removed; backend-specific followup no longer exists")
-    def test_switch_followup_reflects_recorded_backend(
-        self, temp_home: Path, capsys
-    ):
+    @pytest.mark.skip(
+        reason="_print_switch_followup removed; backend-specific followup no longer exists"
+    )
+    def test_switch_followup_reflects_recorded_backend(self, temp_home: Path, capsys):
         s = self._macos_switcher()
         s._store._last_active_credentials_backend = "file"
         s._print_switch_followup()
@@ -347,4 +466,3 @@ class TestMacosKeychainFallback:
         s._store._last_active_credentials_backend = "keychain"
         s._print_switch_followup()
         assert "30 seconds" in capsys.readouterr().out
-

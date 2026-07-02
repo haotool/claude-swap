@@ -18,6 +18,11 @@ CACHE_TTL = 24 * 3600  # 24 hours
 PYPI_URL = "https://pypi.org/pypi/claude-swap/json"
 
 
+def _is_local_version(version: str) -> bool:
+    """True for PEP 440 local/source builds that PyPI cannot publish."""
+    return "+" in version
+
+
 def _parse_version(v: str) -> tuple[int, ...]:
     # Compare numeric release segments only, tolerating PEP 440 pre-release /
     # local suffixes (e.g. "0.15.0b2", "0.15.0b2+haotool.1"). Without this,
@@ -55,9 +60,19 @@ def _detect_install_method() -> str | None:
     return None
 
 
+def _current_version() -> str:
+    """Return the installed package version without importing cli/switcher."""
+    from claude_swap import __version__
+
+    return __version__
+
+
 def check_for_update(current_version: str) -> str | None:
     """Return a notification string if a newer version exists, else None."""
     try:
+        if _is_local_version(current_version):
+            return None
+
         latest_version = None
 
         # Try reading cache
@@ -108,6 +123,17 @@ def run_self_upgrade() -> int:
     manager is missing from PATH.
     """
     from claude_swap.printer import accent, error
+
+    if _is_local_version(_current_version()):
+        error(
+            "This is a source/git fork build, not the upstream PyPI release.\n"
+            "Do not run `pip install --upgrade claude-swap` or package-manager "
+            "upgrade commands; they may replace fork-only features such as "
+            "`--monitor`.\n"
+            "Update this checkout with `git pull` (or reinstall from the fork "
+            "source) instead."
+        )
+        return 1
 
     method = _detect_install_method()
     commands = {

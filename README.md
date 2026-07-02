@@ -234,7 +234,7 @@ cswap --add-account --slot 3    # Add account to a specific slot (prompts before
 cswap --remove-account 2        # Remove an account
 cswap --tui                     # Launch the interactive arrow-key menu (incl. Watch + auto-switch, Beta)
 cswap --monitor                 # Run the foreground auto-switch monitor
-cswap --upgrade                 # Upgrade claude-swap to the latest version
+cswap --upgrade                 # Upgrade upstream/PyPI installs; fork builds use git pull
 cswap --purge                   # Remove all claude-swap data
 ```
 

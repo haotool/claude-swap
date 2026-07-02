@@ -25,7 +25,9 @@ def _force_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(service.sys, "platform", "darwin")
 
 
-def _stub_launchctl(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+def _stub_launchctl(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> MagicMock:
     """Build a ``subprocess.run`` replacement that records its calls."""
     completed = MagicMock()
     completed.returncode = returncode
@@ -68,7 +70,9 @@ class TestBuildPlist:
         assert plist["StandardOutPath"] == str(log_dir / "monitor.out")
         assert plist["StandardErrorPath"] == str(log_dir / "monitor.err")
 
-    def test_environment_variables_forwarded(self, temp_home: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_environment_variables_forwarded(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/cswap-cfg")
         switcher = ClaudeAccountSwitcher()
         plist = service._build_plist(switcher)
@@ -87,10 +91,15 @@ class TestBuildPlist:
 
 class TestInstall:
     def test_writes_parseable_plist_and_bootstraps(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
         launchctl = _stub_launchctl()
         monkeypatch.setattr(service.subprocess, "run", launchctl)
@@ -126,7 +135,9 @@ class TestInstall:
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
 
         # First call (bootout, check=False) succeeds; second (bootstrap, check=True) fails.
@@ -148,10 +159,15 @@ class TestInstall:
 
 class TestUninstall:
     def test_removes_plist_and_calls_bootout(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
@@ -169,10 +185,15 @@ class TestUninstall:
         assert "Service removed" in out
 
     def test_idempotent_when_not_installed(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
         # ``bootout`` returns non-zero when the service is not loaded; uninstall
         # must tolerate that (check=False) so the user-visible call stays clean.
@@ -195,7 +216,9 @@ class TestStatus:
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
         assert service.service_state() == "not installed"
 
@@ -203,7 +226,9 @@ class TestStatus:
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
@@ -214,21 +239,32 @@ class TestStatus:
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
-        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(stdout="state = running"))
+        monkeypatch.setattr(
+            service.subprocess, "run", _stub_launchctl(stdout="state = running")
+        )
         assert service.service_state() == "loaded"
 
     def test_not_installed(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
         # ``subprocess.run`` must not be invoked when the plist is missing.
-        sentinel = MagicMock(side_effect=AssertionError("launchctl should not be called"))
+        sentinel = MagicMock(
+            side_effect=AssertionError("launchctl should not be called")
+        )
         monkeypatch.setattr(service.subprocess, "run", sentinel)
 
         rc = service.status(ClaudeAccountSwitcher())
@@ -238,10 +274,15 @@ class TestStatus:
         assert "not installed" in out
 
     def test_installed_but_not_loaded(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
@@ -254,10 +295,15 @@ class TestStatus:
         assert "installed but not loaded" in out
 
     def test_loaded_surfaces_state_lines(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
@@ -283,18 +329,27 @@ class TestStatus:
         assert "program = /usr/bin/python3" not in out
 
     def test_status_warns_on_version_mismatch(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         """status() warns when the plist records an older cswap version."""
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         plist_path.parent.mkdir(parents=True)
         # Write a plist whose installed version differs from the current one.
         plist_data = {"EnvironmentVariables": {service._VERSION_ENV_KEY: "0.0.1"}}
         with plist_path.open("wb") as fh:
             plistlib.dump(plist_data, fh)
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
-        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(returncode=0, stdout="state = running\n"))
+        monkeypatch.setattr(
+            service.subprocess,
+            "run",
+            _stub_launchctl(returncode=0, stdout="state = running\n"),
+        )
 
         rc = service.status(ClaudeAccountSwitcher())
 
@@ -304,17 +359,28 @@ class TestStatus:
         assert "cswap service install" in out
 
     def test_status_no_warning_when_version_matches(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         """No warning when installed version == current version."""
         _force_darwin(monkeypatch)
-        plist_path = temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+        )
         plist_path.parent.mkdir(parents=True)
-        plist_data = {"EnvironmentVariables": {service._VERSION_ENV_KEY: service.__version__}}
+        plist_data = {
+            "EnvironmentVariables": {service._VERSION_ENV_KEY: service.__version__}
+        }
         with plist_path.open("wb") as fh:
             plistlib.dump(plist_data, fh)
         monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
-        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(returncode=0, stdout="state = running\n"))
+        monkeypatch.setattr(
+            service.subprocess,
+            "run",
+            _stub_launchctl(returncode=0, stdout="state = running\n"),
+        )
 
         service.status(ClaudeAccountSwitcher())
 
@@ -324,7 +390,10 @@ class TestStatus:
 
 class TestLogs:
     def test_missing_files_reported_cleanly(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_darwin(monkeypatch)
         rc = service.logs(ClaudeAccountSwitcher())
@@ -339,7 +408,10 @@ class TestLogs:
         assert "(none yet)" in out
 
     def test_tails_existing_files(
-        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
     ):
         _force_darwin(monkeypatch)
         switcher = ClaudeAccountSwitcher()
@@ -386,21 +458,27 @@ class TestPlatformGuard:
 
 
 class TestCliRouting:
-    def test_argv_service_dispatches_to_service_command(self, monkeypatch: pytest.MonkeyPatch):
+    def test_argv_service_dispatches_to_service_command(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
         called: list[list[str]] = []
         monkeypatch.setattr(cli, "_service_command", lambda argv: called.append(argv))
         monkeypatch.setattr(sys, "argv", ["cswap", "service", "status"])
         cli.main()
         assert called == [["status"]]
 
-    def test_service_unknown_action_errors(self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_service_unknown_action_errors(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ):
         monkeypatch.setattr(sys, "argv", ["cswap", "service", "bogus"])
         with pytest.raises(SystemExit) as excinfo:
             cli.main()
         assert excinfo.value.code == 2
         assert "bogus" in capsys.readouterr().err
 
-    def test_service_missing_action_errors(self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_service_missing_action_errors(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ):
         monkeypatch.setattr(sys, "argv", ["cswap", "service"])
         with pytest.raises(SystemExit) as excinfo:
             cli.main()
@@ -408,7 +486,9 @@ class TestCliRouting:
         err = capsys.readouterr().err
         assert "action" in err or "required" in err.lower()
 
-    def test_service_help_exits_zero(self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch):
+    def test_service_help_exits_zero(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ):
         monkeypatch.setattr(sys, "argv", ["cswap", "service", "--help"])
         with pytest.raises(SystemExit) as excinfo:
             cli.main()
@@ -418,7 +498,10 @@ class TestCliRouting:
         assert "launchd" in out
 
     def test_service_status_on_unsupported_platform_clean_error_exit_one(
-        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch, temp_home: Path
+        self,
+        capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_home: Path,
     ):
         # End-to-end through ``main()`` → ``_service_command`` → ``service.status``.
         # On an unsupported host the guard fires and the top-level handler renders
@@ -468,6 +551,7 @@ class TestServiceSpec:
 
         env = service_spec.passthrough_env()
         assert env[service_spec.VERSION_ENV_KEY] == __version__
+        assert env[service_spec.SERVICE_MONITOR_ENV_KEY] == "1"
 
     def test_log_dir_under_backup(self, temp_home: Path):
         from claude_swap import service_spec
@@ -478,7 +562,12 @@ class TestServiceSpec:
     def test_installed_version_from_env(self):
         from claude_swap import service_spec
 
-        assert service_spec.installed_version_from_env({"CSWAP_INSTALLED_VERSION": "1.2.3"}) == "1.2.3"
+        assert (
+            service_spec.installed_version_from_env(
+                {"CSWAP_INSTALLED_VERSION": "1.2.3"}
+            )
+            == "1.2.3"
+        )
         assert service_spec.installed_version_from_env({}) is None
         assert service_spec.installed_version_from_env("not-a-dict") is None
 
@@ -530,9 +619,7 @@ class TestSelectBackend:
         assert isinstance(backend, TaskSchedulerBackend)
         assert backend.platform_label == "task_scheduler"
 
-    def test_unsupported_backend_raises_error(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_unsupported_backend_raises_error(self, monkeypatch: pytest.MonkeyPatch):
         from claude_swap.service_backends import UnsupportedBackend, select_backend
 
         monkeypatch.setattr(service.sys, "platform", "freebsd9")

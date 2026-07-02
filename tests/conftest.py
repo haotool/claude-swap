@@ -52,12 +52,14 @@ def bootstrap_switchable_accounts(
     switcher._write_json(switcher.sequence_file, data)
     (temp_home / ".claude").mkdir(parents=True, exist_ok=True)
     (temp_home / ".claude.json").write_text(
-        json.dumps({
-            "oauthAccount": {
-                "emailAddress": "a1@example.com",
-                "accountUuid": "uuid-1",
-            },
-        })
+        json.dumps(
+            {
+                "oauthAccount": {
+                    "emailAddress": "a1@example.com",
+                    "accountUuid": "uuid-1",
+                },
+            }
+        )
     )
     return switcher
 

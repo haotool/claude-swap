@@ -17,6 +17,7 @@ from claude_swap.printer import accent, bolded, dimmed, muted, warning
 from claude_swap.protocols import ServiceHost
 
 VERSION_ENV_KEY = "CSWAP_INSTALLED_VERSION"
+SERVICE_MONITOR_ENV_KEY = "CSWAP_SERVICE_MONITOR"
 # Bound every service-manager call so a hung launchctl/systemctl/schtasks can't
 # wedge the CLI or monitor; these are short-lived management commands.
 SUBPROCESS_TIMEOUT = 10
@@ -45,6 +46,7 @@ def passthrough_env() -> dict[str, str]:
     """Environment forwarded to the supervised monitor, stamped with the version."""
     env = {k: os.environ[k] for k in _FORWARDED_ENV_KEYS if k in os.environ}
     env[VERSION_ENV_KEY] = __version__
+    env[SERVICE_MONITOR_ENV_KEY] = "1"
     return env
 
 

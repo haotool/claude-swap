@@ -37,23 +37,27 @@ class TestClassifySwitchPreconditions:
             s._write_account_credentials(
                 str(num),
                 email,
-                json.dumps({
-                    "claudeAiOauth": {
-                        "accessToken": f"sk-{num}",
-                        "refreshToken": f"rt-{num}",
-                    },
-                }),
+                json.dumps(
+                    {
+                        "claudeAiOauth": {
+                            "accessToken": f"sk-{num}",
+                            "refreshToken": f"rt-{num}",
+                        },
+                    }
+                ),
             )
         if config:
             s._write_account_config(
                 str(num),
                 email,
-                json.dumps({
-                    "oauthAccount": {
-                        "emailAddress": email,
-                        "accountUuid": f"uuid-{num}",
-                    },
-                }),
+                json.dumps(
+                    {
+                        "oauthAccount": {
+                            "emailAddress": email,
+                            "accountUuid": f"uuid-{num}",
+                        },
+                    }
+                ),
             )
 
         data = s._get_sequence_data() or {
@@ -76,14 +80,20 @@ class TestClassifySwitchPreconditions:
             data["activeAccountNumber"] = num
         s._write_json(s.sequence_file, data)
 
-    def _set_live_identity(self, temp_home: Path, email: str, uuid: str = "uuid-1") -> None:
+    def _set_live_identity(
+        self, temp_home: Path, email: str, uuid: str = "uuid-1"
+    ) -> None:
         (temp_home / ".claude").mkdir(parents=True, exist_ok=True)
-        (temp_home / ".claude.json").write_text(json.dumps({
-            "oauthAccount": {
-                "emailAddress": email,
-                "accountUuid": uuid,
-            },
-        }))
+        (temp_home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "oauthAccount": {
+                        "emailAddress": email,
+                        "accountUuid": uuid,
+                    },
+                }
+            )
+        )
 
     def test_fresh_machine(self, temp_home: Path):
         from claude_swap.models import SwitchPreconditionKind
@@ -156,7 +166,9 @@ class TestClassifySwitchPreconditions:
 
         s = self._setup(temp_home)
         self._set_live_identity(temp_home, "a@example.com", "uuid-1")
-        monkeypatch.setattr(s, "_switch_bootstrap_identity", lambda: ("a@example.com", ""))
+        monkeypatch.setattr(
+            s, "_switch_bootstrap_identity", lambda: ("a@example.com", "")
+        )
         monkeypatch.setattr(s, "_account_exists", lambda email, org: True)
         # Corrupt/missing sequence.json -> _get_sequence_data returns None; the
         # `or {}` guard must let the classifier reach a clean verdict instead of
@@ -185,19 +197,26 @@ class TestUsageAwareSwitch:
         s._write_account_credentials(
             str(num),
             email,
-            json.dumps({
-                "claudeAiOauth": {
-                    "accessToken": f"sk-{num}",
-                    "refreshToken": f"rt-{num}",
-                },
-            }),
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": f"sk-{num}",
+                        "refreshToken": f"rt-{num}",
+                    },
+                }
+            ),
         )
         s._write_account_config(
             str(num),
             email,
-            json.dumps({
-                "oauthAccount": {"emailAddress": email, "accountUuid": f"uuid-{num}"},
-            }),
+            json.dumps(
+                {
+                    "oauthAccount": {
+                        "emailAddress": email,
+                        "accountUuid": f"uuid-{num}",
+                    },
+                }
+            ),
         )
         data = s._get_sequence_data()
         data["accounts"][str(num)] = {
@@ -215,12 +234,26 @@ class TestUsageAwareSwitch:
         s._write_json(s.sequence_file, data)
 
     def _make_live(self, temp_home: Path, email: str, num: int) -> None:
-        (temp_home / ".claude" / ".credentials.json").write_text(json.dumps({
-            "claudeAiOauth": {"accessToken": "sk-live", "refreshToken": "rt-live"},
-        }))
-        (temp_home / ".claude.json").write_text(json.dumps({
-            "oauthAccount": {"emailAddress": email, "accountUuid": f"uuid-{num}"},
-        }))
+        (temp_home / ".claude" / ".credentials.json").write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": "sk-live",
+                        "refreshToken": "rt-live",
+                    },
+                }
+            )
+        )
+        (temp_home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "oauthAccount": {
+                        "emailAddress": email,
+                        "accountUuid": f"uuid-{num}",
+                    },
+                }
+            )
+        )
 
     @staticmethod
     def _usage(pct: float) -> dict:
@@ -234,8 +267,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": self._usage(50), "2": self._usage(90), "3": self._usage(20)}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts"):
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts"),
+        ):
             s.switch(strategy="best")
 
         assert s._get_sequence_data()["activeAccountNumber"] == 3
@@ -247,11 +282,16 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": self._usage(89), "2": self._usage(100)}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts") as mock_list:
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts") as mock_list,
+        ):
             s.switch(strategy="best")
 
-        assert "Already on the account with the most remaining quota" in capsys.readouterr().out
+        assert (
+            "Already on the account with the most remaining quota"
+            in capsys.readouterr().out
+        )
         assert s._get_sequence_data()["activeAccountNumber"] == 1
         mock_list.assert_not_called()
 
@@ -263,8 +303,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": self._usage(100), "2": self._usage(100), "3": self._usage(100)}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts"):
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts"),
+        ):
             s.switch(strategy="best")
 
         out = capsys.readouterr().out
@@ -279,8 +321,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": None, "2": self._usage(10)}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts") as mock_list:
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts") as mock_list,
+        ):
             s.switch(strategy="best")
 
         assert "Current account usage is unavailable" in capsys.readouterr().out
@@ -296,8 +340,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": self._usage(50), "2": None}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts") as mock_list:
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts") as mock_list,
+        ):
             s.switch(strategy="best")
 
         out = capsys.readouterr().out
@@ -317,8 +363,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": self._usage(50), "2": self._usage(90), "3": None}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts") as mock_list:
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts") as mock_list,
+        ):
             s.switch(strategy="best")
 
         out = capsys.readouterr().out
@@ -341,8 +389,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": self._usage(100), "2": self._usage(100), "3": None}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts") as mock_list:
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts") as mock_list,
+        ):
             s.switch(strategy="best")
 
         out = capsys.readouterr().out
@@ -359,8 +409,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": self._usage(0), "2": self._usage(100), "3": self._usage(20)}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts"):
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts"),
+        ):
             s.switch(strategy="next-available")
 
         out = capsys.readouterr().out
@@ -375,8 +427,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "a@example.com", 1)
 
         usage = {"1": self._usage(0), "2": self._usage(100), "3": self._usage(100)}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts") as mock_list:
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts") as mock_list,
+        ):
             s.switch(strategy="next-available")
 
         out = capsys.readouterr().out
@@ -390,15 +444,15 @@ class TestUsageAwareSwitch:
         self._seed(s, 2, "b@example.com")
         self._make_live(temp_home, "a@example.com", 1)
 
-        with patch.object(s, "_usage_by_account", return_value={"1": None, "2": None}), \
-             patch.object(s, "list_accounts"):
+        with (
+            patch.object(s, "_usage_by_account", return_value={"1": None, "2": None}),
+            patch.object(s, "list_accounts"),
+        ):
             s.switch(strategy="next-available")
 
         assert s._get_sequence_data()["activeAccountNumber"] == 2
 
-    def test_next_available_anchors_on_live_account_under_drift(
-        self, temp_home: Path
-    ):
+    def test_next_available_anchors_on_live_account_under_drift(self, temp_home: Path):
         """When the live login has drifted from activeAccountNumber,
         next-available rotates relative to the LIVE account (current_num), not
         the stale record — so it never no-ops onto the account you're already
@@ -413,8 +467,10 @@ class TestUsageAwareSwitch:
         self._make_live(temp_home, "b@example.com", 2)
 
         usage = {"1": self._usage(0), "2": self._usage(0), "3": self._usage(0)}
-        with patch.object(s, "_usage_by_account", return_value=usage), \
-             patch.object(s, "list_accounts"):
+        with (
+            patch.object(s, "_usage_by_account", return_value=usage),
+            patch.object(s, "list_accounts"),
+        ):
             s.switch(strategy="next-available")
 
         assert s._get_sequence_data()["activeAccountNumber"] == 3
@@ -446,10 +502,14 @@ class TestSwitchQuietGuardsRaise:
         # the fresh-machine path and into the len(sequence)<2 guard.
         (temp_home / ".claude").mkdir(parents=True, exist_ok=True)
         (temp_home / ".claude.json").write_text(
-            json.dumps({"oauthAccount": {
-                "emailAddress": "a1@example.com",
-                "accountUuid": "uuid-1",
-            }})
+            json.dumps(
+                {
+                    "oauthAccount": {
+                        "emailAddress": "a1@example.com",
+                        "accountUuid": "uuid-1",
+                    }
+                }
+            )
         )
         return s
 
@@ -469,7 +529,9 @@ class TestSwitchQuietGuardsRaise:
         assert "Only one account" in out
 
     def test_quiet_automated_no_trusted_signal_returns_false_without_stdout_leak(
-        self, temp_home: Path, capsys,
+        self,
+        temp_home: Path,
+        capsys,
     ):
         """Unattended path stays put on planning miss without polluting launchd stdout."""
         from claude_swap.models import BackgroundAutoSwitchIntent
@@ -512,7 +574,8 @@ class TestSlotSwitchScore:
 
         # The blocking limit is the higher of the two; score must reflect it.
         out = slot_switch_score(
-            {"five_hour": {"pct": 20}, "seven_day": {"pct": 70}}, 95,
+            {"five_hour": {"pct": 20}, "seven_day": {"pct": 70}},
+            95,
         )
         assert out == (0, 70.0)
 
@@ -520,10 +583,12 @@ class TestSlotSwitchScore:
         from claude_swap.usage_policy import cooldown_score as slot_switch_score
 
         soon = slot_switch_score(
-            {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}}, 95,
+            {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
+            95,
         )
         later = slot_switch_score(
-            {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}}, 95,
+            {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}},
+            95,
         )
         assert soon < later
         assert soon[0] == 1 and later[0] == 1  # both saturated bucket
@@ -532,7 +597,8 @@ class TestSlotSwitchScore:
         from claude_swap.usage_policy import cooldown_score as slot_switch_score
 
         with_reset = slot_switch_score(
-            {"five_hour": {"pct": 100, "resets_at": "2099-12-31T00:00:00+00:00"}}, 95,
+            {"five_hour": {"pct": 100, "resets_at": "2099-12-31T00:00:00+00:00"}},
+            95,
         )
         no_reset = slot_switch_score({"five_hour": {"pct": 100}}, 95)
         assert with_reset < no_reset
@@ -545,14 +611,18 @@ class TestSlotSwitchScore:
         candidates = [
             ("A-unsat-low", {"five_hour": {"pct": 30}}),
             ("B-unsat-mid", {"five_hour": {"pct": 80}}),
-            ("C-sat-soon", {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}}),
-            ("D-sat-late", {"five_hour": {"pct": 100, "resets_at": "2026-06-14T18:00:00+00:00"}}),
+            (
+                "C-sat-soon",
+                {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
+            ),
+            (
+                "D-sat-late",
+                {"five_hour": {"pct": 100, "resets_at": "2026-06-14T18:00:00+00:00"}},
+            ),
             ("E-sat-no-reset", {"five_hour": {"pct": 100}}),
             ("F-unknown", {}),
         ]
-        scored = sorted(
-            (slot_switch_score(u, 95), name) for name, u in candidates
-        )
+        scored = sorted((slot_switch_score(u, 95), name) for name, u in candidates)
         names_in_order = [name for _, name in scored]
         # Loose contract: unsat comes before sat; sat-with-reset before
         # sat-without; unknown is last.  Exact pct ordering matters within bucket.
@@ -567,7 +637,8 @@ class TestSlotSwitchScore:
         from claude_swap.usage_policy import cooldown_score as slot_switch_score
 
         out = slot_switch_score(
-            {"five_hour": {"pct": 100, "resets_at": "not-a-timestamp"}}, 95,
+            {"five_hour": {"pct": 100, "resets_at": "not-a-timestamp"}},
+            95,
         )
         assert out == (1, math.inf)
 
@@ -575,7 +646,9 @@ class TestSlotSwitchScore:
 class TestPickBestSwitchTarget:
     """Cache-first picker — integration with the on-disk usage cache."""
 
-    def _bootstrap(self, temp_home: Path, num_accounts: int = 3) -> ClaudeAccountSwitcher:
+    def _bootstrap(
+        self, temp_home: Path, num_accounts: int = 3
+    ) -> ClaudeAccountSwitcher:
         s = ClaudeAccountSwitcher()
         s._setup_directories()
         accounts: dict = {}
@@ -619,64 +692,102 @@ class TestPickBestSwitchTarget:
         s = self._bootstrap(temp_home)
         # All switchable but no cache → all bucket-2 → return None
         with patch.object(s, "_account_is_switchable", return_value=True):
-            assert self._pick_best(s,95) is None
+            assert self._pick_best(s, 95) is None
 
     def test_picks_unsaturated_over_saturated(self, temp_home: Path):
         """When at least one slot is unsaturated, it wins regardless of
         how soon a saturated slot would free up."""
         s = self._bootstrap(temp_home, num_accounts=3)
-        self._seed_cache(s, {
-            "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
-            "2": {"five_hour": {"pct": 30}},  # the winner
-            "3": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T13:01:00+00:00"}},
-        })
+        self._seed_cache(
+            s,
+            {
+                "1": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}
+                },
+                "2": {"five_hour": {"pct": 30}},  # the winner
+                "3": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T13:01:00+00:00"}
+                },
+            },
+        )
         with patch.object(s, "_account_is_switchable", return_value=True):
-            assert self._pick_best(s,95, exclude="1") == "2"
+            assert self._pick_best(s, 95, exclude="1") == "2"
 
     def test_picks_soonest_reset_when_all_saturated(self, temp_home: Path):
         """The headline use case: all accounts at limit, pick the one that
         will free up first.  This is what the user explicitly asked for."""
         s = self._bootstrap(temp_home, num_accounts=3)
-        self._seed_cache(s, {
-            "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}},
-            "2": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T13:30:00+00:00"}},  # soonest
-            "3": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
-        })
+        self._seed_cache(
+            s,
+            {
+                "1": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}
+                },
+                "2": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T13:30:00+00:00"}
+                },  # soonest
+                "3": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}
+                },
+            },
+        )
         with patch.object(s, "_account_is_switchable", return_value=True):
-            assert self._pick_best(s,95) == "2"
-            assert self._pick_best(s,95, exclude="1") == "2"
+            assert self._pick_best(s, 95) == "2"
+            assert self._pick_best(s, 95, exclude="1") == "2"
 
     def test_global_pick_orders_saturated_by_cooldown(self, temp_home: Path):
         """From any non-optimal saturated slot, the picker targets the global
         soonest ``resets_at`` (Account-2), not round-robin sequence order."""
         s = self._bootstrap(temp_home, num_accounts=3)
-        self._seed_cache(s, {
-            "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}},
-            "2": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T13:30:00+00:00"}},
-            "3": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
-        })
+        self._seed_cache(
+            s,
+            {
+                "1": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}
+                },
+                "2": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T13:30:00+00:00"}
+                },
+                "3": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}
+                },
+            },
+        )
         with patch.object(s, "_account_is_switchable", return_value=True):
-            assert self._pick_best(s,95) == "2"
+            assert self._pick_best(s, 95) == "2"
             # Active on soonest → global optimum is self.
-            assert self._pick_best(s,95) == "2"
+            assert self._pick_best(s, 95) == "2"
 
     def test_switch_stays_when_already_on_soonest_saturated(self, temp_home: Path):
         """Automated path must not rotate away from the soonest-to-free slot."""
         from claude_swap.models import BackgroundAutoSwitchIntent
 
         s = self._bootstrap(temp_home, num_accounts=3)
-        self._seed_cache(s, {
-            "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}},
-            "2": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T13:30:00+00:00"}},
-            "3": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}},
-        })
+        self._seed_cache(
+            s,
+            {
+                "1": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}
+                },
+                "2": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T13:30:00+00:00"}
+                },
+                "3": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T14:00:00+00:00"}
+                },
+            },
+        )
         data = s._get_sequence_data()
         data["activeAccountNumber"] = 2
         s._write_json(s.sequence_file, data)
-        with patch.object(s, "_account_is_switchable", return_value=True), \
-             patch.object(s, "_get_current_account", return_value=("a2@example.com", "uuid-2")), \
-             patch.object(s, "_account_exists", return_value=True), \
-             patch.object(s, "_perform_switch") as mock_perform:
+        with (
+            patch.object(s, "_account_is_switchable", return_value=True),
+            patch.object(
+                s, "_get_current_account", return_value=("a2@example.com", "uuid-2")
+            ),
+            patch.object(s, "_account_exists", return_value=True),
+            patch.object(s, "_perform_switch") as mock_perform,
+        ):
             decision = s.build_auto_switch_decision(95, 100.0)
             switched = s.switch(BackgroundAutoSwitchIntent(decision=decision))
         assert switched is False
@@ -690,19 +801,21 @@ class TestPickBestSwitchTarget:
         cache_path = s.backup_dir / "cache" / "usage.json"
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
-            json.dumps({
-                "timestamp": time.time(),
-                "data": {
-                    "1": {
-                        "five_hour": {"pct": 30},
-                        "_cached_at": time.time() - 9999,
+            json.dumps(
+                {
+                    "timestamp": time.time(),
+                    "data": {
+                        "1": {
+                            "five_hour": {"pct": 30},
+                            "_cached_at": time.time() - 9999,
+                        },
+                        "2": {
+                            "five_hour": {"pct": 40},
+                            "_cached_at": time.time() - 9999,
+                        },
                     },
-                    "2": {
-                        "five_hour": {"pct": 40},
-                        "_cached_at": time.time() - 9999,
-                    },
-                },
-            }),
+                }
+            ),
             encoding="utf-8",
         )
         decision = s.build_auto_switch_decision(95, 99.0)
@@ -711,16 +824,25 @@ class TestPickBestSwitchTarget:
 
     def test_automated_plan_uses_live_active_slot(self, temp_home: Path):
         s = self._bootstrap(temp_home, num_accounts=3)
-        self._seed_cache(s, {
-            "1": {"five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}},
-            "2": {"five_hour": {"pct": 30}},
-            "3": {"five_hour": {"pct": 80}},
-        })
+        self._seed_cache(
+            s,
+            {
+                "1": {
+                    "five_hour": {"pct": 100, "resets_at": "2026-06-14T16:00:00+00:00"}
+                },
+                "2": {"five_hour": {"pct": 30}},
+                "3": {"five_hour": {"pct": 80}},
+            },
+        )
         data = s._get_sequence_data()
         data["activeAccountNumber"] = 1
         s._write_json(s.sequence_file, data)
-        with patch.object(s, "_account_is_switchable", return_value=True), \
-             patch.object(s, "_get_current_account", return_value=("a3@example.com", "")):
+        with (
+            patch.object(s, "_account_is_switchable", return_value=True),
+            patch.object(
+                s, "_get_current_account", return_value=("a3@example.com", "")
+            ),
+        ):
             decision = s.build_auto_switch_decision(95, 96.0)
             assert decision.live_active_slot == "3"
             plan = s._plan_automated_switch(decision)
@@ -728,7 +850,8 @@ class TestPickBestSwitchTarget:
         assert plan.target == "2"
 
     def test_plan_stays_put_when_both_accounts_saturated_similar_resets(
-        self, temp_home: Path,
+        self,
+        temp_home: Path,
     ):
         """When BOTH accounts are saturated and the target resets at most
         _SATURATED_SWITCH_MARGIN_S=300s sooner, the plan must return
@@ -740,27 +863,34 @@ class TestPickBestSwitchTarget:
         every 60s triggering the multi-session race warning on every swap."""
         s = self._bootstrap(temp_home, num_accounts=2)
         # Both saturated; Account-2 resets only 60s sooner — within 300s margin.
-        self._seed_cache(s, {
-            "1": {
-                "five_hour": {
-                    "pct": 100,
-                    "resets_at": "2026-06-14T16:01:00+00:00",
-                }
+        self._seed_cache(
+            s,
+            {
+                "1": {
+                    "five_hour": {
+                        "pct": 100,
+                        "resets_at": "2026-06-14T16:01:00+00:00",
+                    }
+                },
+                "2": {
+                    "five_hour": {
+                        "pct": 100,
+                        "resets_at": "2026-06-14T16:00:00+00:00",  # 60s sooner
+                    }
+                },
             },
-            "2": {
-                "five_hour": {
-                    "pct": 100,
-                    "resets_at": "2026-06-14T16:00:00+00:00",  # 60s sooner
-                }
-            },
-        })
+        )
         data = s._get_sequence_data()
         data["activeAccountNumber"] = 1
         s._write_json(s.sequence_file, data)
-        with patch.object(s, "_account_is_switchable", return_value=True), \
-             patch.object(
-                 s, "_get_current_account", return_value=("a1@example.com", ""),
-             ):
+        with (
+            patch.object(s, "_account_is_switchable", return_value=True),
+            patch.object(
+                s,
+                "_get_current_account",
+                return_value=("a1@example.com", ""),
+            ),
+        ):
             decision = s.build_auto_switch_decision(95, 100.0)
             plan = s._plan_automated_switch(decision)
         assert plan.outcome == "already_optimal", (
@@ -768,34 +898,42 @@ class TestPickBestSwitchTarget:
         )
 
     def test_plan_switches_when_target_resets_meaningfully_sooner(
-        self, temp_home: Path,
+        self,
+        temp_home: Path,
     ):
         """When the best target is saturated but resets >300s sooner than the
         active account, the switch IS worth making — the user will get capacity
         back meaningfully earlier on the target account."""
         s = self._bootstrap(temp_home, num_accounts=2)
         # Account-2 resets 10 minutes (600s) sooner — outside the 300s margin.
-        self._seed_cache(s, {
-            "1": {
-                "five_hour": {
-                    "pct": 100,
-                    "resets_at": "2026-06-14T16:10:00+00:00",
-                }
+        self._seed_cache(
+            s,
+            {
+                "1": {
+                    "five_hour": {
+                        "pct": 100,
+                        "resets_at": "2026-06-14T16:10:00+00:00",
+                    }
+                },
+                "2": {
+                    "five_hour": {
+                        "pct": 100,
+                        "resets_at": "2026-06-14T16:00:00+00:00",  # 600s sooner
+                    }
+                },
             },
-            "2": {
-                "five_hour": {
-                    "pct": 100,
-                    "resets_at": "2026-06-14T16:00:00+00:00",  # 600s sooner
-                }
-            },
-        })
+        )
         data = s._get_sequence_data()
         data["activeAccountNumber"] = 1
         s._write_json(s.sequence_file, data)
-        with patch.object(s, "_account_is_switchable", return_value=True), \
-             patch.object(
-                 s, "_get_current_account", return_value=("a1@example.com", ""),
-             ):
+        with (
+            patch.object(s, "_account_is_switchable", return_value=True),
+            patch.object(
+                s,
+                "_get_current_account",
+                return_value=("a1@example.com", ""),
+            ),
+        ):
             decision = s.build_auto_switch_decision(95, 100.0)
             plan = s._plan_automated_switch(decision)
         assert plan.outcome == "chosen"
@@ -813,28 +951,36 @@ class TestPickBestSwitchTarget:
         """The active account is excluded by the caller; without exclusion
         a soonest-reset active account would otherwise re-pick itself."""
         s = self._bootstrap(temp_home, num_accounts=3)
-        self._seed_cache(s, {
-            "1": {"five_hour": {"pct": 30}},   # active, best score
-            "2": {"five_hour": {"pct": 60}},
-            "3": {"five_hour": {"pct": 80}},
-        })
+        self._seed_cache(
+            s,
+            {
+                "1": {"five_hour": {"pct": 30}},  # active, best score
+                "2": {"five_hour": {"pct": 60}},
+                "3": {"five_hour": {"pct": 80}},
+            },
+        )
         with patch.object(s, "_account_is_switchable", return_value=True):
             # active=1 excluded → best of {2,3} is 2
-            assert self._pick_best(s,95, exclude="1") == "2"
+            assert self._pick_best(s, 95, exclude="1") == "2"
 
     def test_skips_non_switchable_slots(self, temp_home: Path):
         """A slot with great usage but no stored credentials must never
         be returned — we'd raise SwitchError trying to activate it."""
         s = self._bootstrap(temp_home, num_accounts=3)
-        self._seed_cache(s, {
-            "1": {"five_hour": {"pct": 80}},
-            "2": {"five_hour": {"pct": 10}},   # best by score, but unswitchable
-            "3": {"five_hour": {"pct": 50}},
-        })
+        self._seed_cache(
+            s,
+            {
+                "1": {"five_hour": {"pct": 80}},
+                "2": {"five_hour": {"pct": 10}},  # best by score, but unswitchable
+                "3": {"five_hour": {"pct": 50}},
+            },
+        )
+
         def switchable(num):
             return num != "2"
+
         with patch.object(s, "_account_is_switchable", side_effect=switchable):
-            assert self._pick_best(s,95, exclude="1") == "3"
+            assert self._pick_best(s, 95, exclude="1") == "3"
 
     def test_cold_cache_partial_falls_back_to_signal(self, temp_home: Path):
         """When some slots have cache data and others don't, we still pick
@@ -845,5 +991,4 @@ class TestPickBestSwitchTarget:
         with patch.object(s, "_account_is_switchable", return_value=True):
             # Slot 2 has signal (bucket 0); slots 1 & 3 are bucket 2.
             # exclude=1 (active), so candidates are {2, 3} → 2 wins.
-            assert self._pick_best(s,95, exclude="1") == "2"
-
+            assert self._pick_best(s, 95, exclude="1") == "2"

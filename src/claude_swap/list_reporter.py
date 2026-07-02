@@ -17,6 +17,7 @@ from claude_swap.cache import read_cache_data, read_cache_with_timestamp
 from claude_swap.credentials import looks_like_api_key
 from claude_swap.json_output import (
     USAGE_API_KEY,
+    USAGE_KEYCHAIN_UNAVAILABLE,
     USAGE_NO_CREDENTIALS,
     USAGE_TOKEN_EXPIRED,
     UsageEntry,
@@ -113,6 +114,7 @@ class ListReporter:
 
     def __init__(self, host: ListHost) -> None:
         self._host = host
+        self._active_keychain_unavailable = False
 
     @property
     def sequence_file(self) -> Path:
@@ -211,7 +213,9 @@ class ListReporter:
                 f"({current_email} {muted(f'[{tag}]')})"
             )
             print(f"  {dimmed(f'Total managed accounts: {total}')}")
-            creds = self._host._read_credentials() or ""
+            active = self._host._read_active_credentials()
+            creds = active.value or ""
+            active_keychain_unavailable = active.keychain_unavailable
             if creds:
                 self._host._sync_live_account_credentials_to_backup(
                     account_num,
@@ -220,6 +224,7 @@ class ListReporter:
                 )
             usage, usage_note = self.resolve_active_usage_entry(
                 account_num, current_email, creds=creds,
+                keychain_unavailable=active_keychain_unavailable,
             )
             if isinstance(usage, dict):
                 lines = _format_usage_lines(usage)
@@ -285,6 +290,7 @@ class ListReporter:
                 )
 
         accounts_info: list[tuple[int, str, str, str, bool, str]] = []
+        self._active_keychain_unavailable = False
         for num in data.get("sequence", []):
             account = data.get("accounts", {}).get(str(num), {})
             email = account.get("email", "unknown")
@@ -293,7 +299,9 @@ class ListReporter:
             is_active = str(num) == active_num
 
             if is_active:
-                creds = self._host._read_credentials() or ""
+                active = self._host._read_active_credentials()
+                creds = active.value or ""
+                self._active_keychain_unavailable = active.keychain_unavailable
             else:
                 creds = self._host._read_account_credentials(str(num), email)
 
@@ -347,6 +355,8 @@ class ListReporter:
         if looks_like_api_key(creds):
             return USAGE_API_KEY
         if not creds or not oauth.extract_access_token(creds):
+            if is_active and self._active_keychain_unavailable:
+                return USAGE_KEYCHAIN_UNAVAILABLE
             return USAGE_NO_CREDENTIALS
         if is_active:
             return self.fetch_active_usage(str(num), email, creds)
@@ -455,13 +465,18 @@ class ListReporter:
         email: str,
         *,
         creds: str | None = None,
+        keychain_unavailable: bool = False,
     ) -> tuple[UsageEntry, oauth.UsageFetchError | None]:
         """Usage entry for the active account (cache-first, owner-aware refresh)."""
         if creds is None:
-            creds = self._host._read_credentials() or ""
+            active = self._host._read_active_credentials()
+            creds = active.value or ""
+            keychain_unavailable = active.keychain_unavailable
         if looks_like_api_key(creds):
             return USAGE_API_KEY, None
         if not creds or not oauth.extract_access_token(creds):
+            if keychain_unavailable:
+                return USAGE_KEYCHAIN_UNAVAILABLE, None
             return USAGE_NO_CREDENTIALS, None
 
         cached_data, _ = read_cache_with_timestamp(self.usage_cache_path)

@@ -43,7 +43,7 @@ jobs:
 
       - name: Mypy type check
         if: runner.os == 'Linux'
-        run: uv run mypy src/claude_swap
+        run: uv run mypy --strict src/claude_swap
 
       - name: Supply-chain audit
         # OSV-backed CVE scan; https://github.com/pypa/pip-audit
