@@ -464,6 +464,74 @@ class TestMacosKeychainFallback:
             "account-1-a@example.com",
         ) not in block_real_keychain.data
 
+    # -- write verification targets the backend actually written ----------
+
+    def test_verify_ignores_stale_file_when_keychain_write_succeeded(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        """R2/Bugbot: a successful Keychain write must not be failed by a
+        leftover plaintext file when the verify read-back hits a transiently
+        locked Keychain.
+
+        Reading back through ``_read_credentials`` would fall through to the
+        stale ``.credentials.json`` (#1414 leaves it in place), mismatch, and
+        abort a switch that actually succeeded. An unreadable just-written
+        backend is inconclusive, not a mismatch.
+        """
+        s = self._macos_switcher()
+        cred = get_credentials_path()
+        cred.parent.mkdir(parents=True, exist_ok=True)
+        cred.write_text('{"stale":"other-account"}')
+        monkeypatch.setattr("claude_swap.credentials._ACTIVE_READ_RETRY_DELAY", 0)
+
+        real_get = macos_keychain.get_password
+
+        def get_locked_after_write(service, account):
+            if service == CLAUDE_CODE_KEYCHAIN_SERVICE:
+                raise KeychainError("locked right after write")
+            return real_get(service, account)
+
+        monkeypatch.setattr(macos_keychain, "get_password", get_locked_after_write)
+
+        s._write_credentials('{"fresh":1}', verify=True)  # must not raise
+
+        acct = macos_keychain.keychain_account_name()
+        assert block_real_keychain.data[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)] == '{"fresh":1}'
+        assert cred.read_text() == '{"stale":"other-account"}'
+
+    def test_verify_still_detects_silent_keychain_corruption(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        """A readable Keychain returning a different payload is a genuine
+        verification failure and must still raise."""
+        s = self._macos_switcher()
+        acct = macos_keychain.keychain_account_name()
+
+        real_set = macos_keychain.set_password
+
+        def corrupting_set(service, account, password):
+            if service == CLAUDE_CODE_KEYCHAIN_SERVICE:
+                return real_set(service, account, "TAMPERED")
+            return real_set(service, account, password)
+
+        monkeypatch.setattr(macos_keychain, "set_password", corrupting_set)
+
+        with pytest.raises(CredentialWriteError, match="verification failed"):
+            s._write_credentials('{"fresh":1}', verify=True)
+        assert block_real_keychain.data[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)] == "TAMPERED"
+
+    def test_verify_file_backend_reads_the_file(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        """File-mode writes verify against the file just written."""
+        s = self._macos_switcher()
+        monkeypatch.setattr(macos_keychain, "set_password", _raise_locked)
+
+        s._write_credentials('{"fresh":1}', verify=True)  # must not raise
+
+        assert s._store._last_active_credentials_backend == "file"
+        assert get_credentials_path().read_text() == '{"fresh":1}'
+
     # -- healthy-Mac no-op guard & follow-up ------------------------------
 
     def test_healthy_mac_reads_create_no_files(

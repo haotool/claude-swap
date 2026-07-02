@@ -414,13 +414,47 @@ class CredentialStore:
             self._clear_managed_key()
 
         if verify and not looks_like_api_key(credentials):
-            readback = self._read_credentials()
-            if readback != credentials:
-                raise CredentialWriteError(
-                    "Credential write verification failed: readback differs "
-                    "from intended payload. Possible silent Keychain corruption "
-                    "or concurrent overwrite. Aborting switch."
+            self._verify_oauth_write(credentials)
+
+    def _verify_oauth_write(self, credentials: str) -> None:
+        """Confirm a just-written OAuth credential by re-reading the backend it
+        actually landed on (recorded in ``_last_active_credentials_backend``).
+
+        Reading back through the full ``_read_credentials`` chain would fall
+        through to the plaintext file when the Keychain turns unreadable right
+        after a successful Keychain write — comparing the payload against a
+        leftover file (#1414 keeps it in place) and aborting a switch that in
+        fact succeeded. A backend that cannot be re-read is inconclusive, not a
+        mismatch: the write itself already reported success, so proceed with a
+        warning. A readable backend returning a different payload is the real
+        failure this verification exists for.
+
+        Raises:
+            CredentialWriteError: If the read-back succeeds and differs from
+                the intended payload.
+        """
+        if self._last_active_credentials_backend == "keychain":
+            readback, failed = self._read_active_oauth_keychain()
+            if failed:
+                self._host._logger.warning(
+                    "Post-write verification inconclusive: Keychain became "
+                    "unreadable right after a successful write; proceeding."
                 )
+                return
+        else:
+            try:
+                readback = get_credentials_path().read_text(encoding="utf-8")
+            except OSError as e:
+                raise CredentialWriteError(
+                    f"Credential write verification failed: cannot re-read the "
+                    f"credentials file just written: {e}"
+                )
+        if readback != credentials:
+            raise CredentialWriteError(
+                "Credential write verification failed: readback differs "
+                "from intended payload. Possible silent Keychain corruption "
+                "or concurrent overwrite. Aborting switch."
+            )
 
     def _write_managed_credentials(self, api_key: str) -> None:
         """Activate a managed API key, then clear OAuth (mutual exclusion).
