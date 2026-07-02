@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
 
+from claude_swap import usage_policy
 from claude_swap.printer import warning as print_warning
 
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
@@ -283,8 +284,6 @@ def account_headroom(usage: dict[str, Any] | None) -> float | None:
     or over a limit. Returns ``None`` when usage is unavailable or carries no
     window data, which callers treat as "unknown" (never auto-skipped).
     """
-    from claude_swap import usage_policy
-
     return usage_policy.headroom(usage)
 
 

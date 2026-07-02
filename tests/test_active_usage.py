@@ -753,7 +753,7 @@ class TestListAccountsUsage:
 
 
 class TestActiveAccountRefresh:
-    """`_fetch_active_usage`: refresh the active token only when no owner is running."""
+    """`fetch_active_usage`: refresh the active token only when no owner is running."""
 
     _EXPIRED = json.dumps(
         {
@@ -803,7 +803,7 @@ class TestActiveAccountRefresh:
             patch.object(switcher, "_write_account_credentials") as write_backup,
             patch("claude_swap.oauth.fetch_usage_for_account", side_effect=mock_fetch),
         ):
-            result = switcher._fetch_active_usage(
+            result = switcher._list_reporter().fetch_active_usage(
                 "1", "test@example.com", self._EXPIRED
             )
 
@@ -830,7 +830,7 @@ class TestActiveAccountRefresh:
                 "claude_swap.oauth.fetch_usage_for_account", return_value=None
             ) as mock_fetch,
         ):
-            result = switcher._fetch_active_usage(
+            result = switcher._list_reporter().fetch_active_usage(
                 "1", "test@example.com", self._EXPIRED
             )
 
@@ -855,7 +855,7 @@ class TestActiveAccountRefresh:
                 "claude_swap.oauth.fetch_usage_for_account", return_value=None
             ) as mock_fetch,
         ):
-            switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
+            switcher._list_reporter().fetch_active_usage("1", "test@example.com", self._EXPIRED)
 
         assert mock_fetch.call_args.kwargs.get("is_active") is True
         write_live.assert_not_called()
@@ -891,7 +891,7 @@ class TestActiveAccountRefresh:
             patch.object(switcher, "_write_account_credentials") as write_backup,
             patch("claude_swap.oauth.fetch_usage_for_account", side_effect=mock_fetch),
         ):
-            result = switcher._fetch_active_usage(
+            result = switcher._list_reporter().fetch_active_usage(
                 "1", "test@example.com", self._EXPIRED
             )
 
@@ -927,7 +927,7 @@ class TestActiveAccountRefresh:
             patch.object(switcher, "_write_account_credentials") as write_backup,
             patch("claude_swap.oauth.fetch_usage_for_account", side_effect=mock_fetch),
         ):
-            result = switcher._fetch_active_usage(
+            result = switcher._list_reporter().fetch_active_usage(
                 "1", "test@example.com", self._EXPIRED
             )
 
@@ -963,7 +963,7 @@ class TestActiveAccountRefresh:
             patch.object(switcher, "_write_account_credentials"),
             patch("claude_swap.oauth.fetch_usage_for_account", side_effect=mock_fetch),
         ):
-            result = switcher._fetch_active_usage(
+            result = switcher._list_reporter().fetch_active_usage(
                 "1", "test@example.com", self._EXPIRED
             )
 
@@ -1026,7 +1026,7 @@ class TestActiveAccountRefresh:
                 "claude_swap.oauth.fetch_usage_for_account", return_value=None
             ) as mock_fetch,
         ):
-            switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
+            switcher._list_reporter().fetch_active_usage("1", "test@example.com", self._EXPIRED)
 
         assert mock_fetch.call_args.kwargs.get("is_active") is True
         write_live.assert_not_called()
@@ -1059,7 +1059,7 @@ class TestActiveAccountRefresh:
             patch.object(switcher, "_write_account_credentials"),
             patch("claude_swap.oauth.fetch_usage_for_account", side_effect=mock_fetch),
         ):
-            switcher._fetch_active_usage("1", "test@example.com", self._EXPIRED)
+            switcher._list_reporter().fetch_active_usage("1", "test@example.com", self._EXPIRED)
 
         assert lock_free_during_fetch["ok"] is True
 
@@ -1071,7 +1071,7 @@ class TestActiveAccountRefresh:
 
         switcher = self._switcher(sample_sequence_data)
         with patch("claude_swap.oauth.fetch_usage_for_account") as mock_fetch:
-            result = switcher._fetch_active_usage("1", "test@example.com", "")
+            result = switcher._list_reporter().fetch_active_usage("1", "test@example.com", "")
         assert result == USAGE_NO_CREDENTIALS
         mock_fetch.assert_not_called()
 

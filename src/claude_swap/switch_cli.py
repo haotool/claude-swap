@@ -6,7 +6,7 @@ without duplicating switch logic.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from claude_swap.json_output import account_ref
 from claude_swap.models import CliSwitchIntent, SwitchPreconditionKind, SwitchPreconditions
@@ -15,17 +15,6 @@ from claude_swap.switcher import _ONLY_ONE_ACCOUNT_MSG
 
 if TYPE_CHECKING:
     from claude_swap.protocols import SwitchCliHost
-
-
-class _RotationParams(TypedDict):
-    intent: CliSwitchIntent
-    strategy_label: str
-    sequence: list[Any]
-    active_account: Any
-    current_num: str | None
-    current_ref: dict[str, Any] | None
-    json_output: bool
-    warnings: list[str]
 
 
 def run_switch_cli(
@@ -101,17 +90,6 @@ class SwitchCliDispatcher:
             account_ref(int(current_num), current_email) if current_num else None
         )
 
-        rotation_kwargs: _RotationParams = {
-            "intent": intent,
-            "strategy_label": strategy_label,
-            "sequence": sequence,
-            "active_account": active_account,
-            "current_num": current_num,
-            "current_ref": current_ref,
-            "json_output": json_output,
-            "warnings": warnings,
-        }
-
         if strategy == "best":
             handled, result = self._best(
                 intent=intent,
@@ -124,27 +102,16 @@ class SwitchCliDispatcher:
             if handled:
                 return result
 
-        if strategy == "next-available":
-            return self._next_available(
-                intent=rotation_kwargs["intent"],
-                strategy_label=rotation_kwargs["strategy_label"],
-                sequence=rotation_kwargs["sequence"],
-                active_account=rotation_kwargs["active_account"],
-                current_num=rotation_kwargs["current_num"],
-                current_ref=rotation_kwargs["current_ref"],
-                json_output=rotation_kwargs["json_output"],
-                warnings=rotation_kwargs["warnings"],
-            )
-
-        return self._rotation(
-            intent=rotation_kwargs["intent"],
-            strategy_label=rotation_kwargs["strategy_label"],
-            sequence=rotation_kwargs["sequence"],
-            active_account=rotation_kwargs["active_account"],
-            current_num=rotation_kwargs["current_num"],
-            current_ref=rotation_kwargs["current_ref"],
-            json_output=rotation_kwargs["json_output"],
-            warnings=rotation_kwargs["warnings"],
+        return self._rotation_target(
+            strategy=strategy if strategy == "next-available" else None,
+            intent=intent,
+            strategy_label=strategy_label,
+            sequence=sequence,
+            active_account=active_account,
+            current_num=current_num,
+            current_ref=current_ref,
+            json_output=json_output,
+            warnings=warnings,
         )
 
     def _preconditions(
@@ -373,51 +340,3 @@ class SwitchCliDispatcher:
             assert op is not None
             return s._switch_result_from_op(op, strategy_label, warnings)
         return None
-
-    def _next_available(
-        self,
-        *,
-        intent: CliSwitchIntent,
-        strategy_label: str,
-        sequence: list[Any],
-        active_account: Any,
-        current_num: str | None,
-        current_ref: dict[str, Any] | None,
-        json_output: bool,
-        warnings: list[str],
-    ) -> dict[str, Any] | None:
-        return self._rotation_target(
-            strategy="next-available",
-            intent=intent,
-            strategy_label=strategy_label,
-            sequence=sequence,
-            active_account=active_account,
-            current_num=current_num,
-            current_ref=current_ref,
-            json_output=json_output,
-            warnings=warnings,
-        )
-
-    def _rotation(
-        self,
-        *,
-        intent: CliSwitchIntent,
-        strategy_label: str,
-        sequence: list[Any],
-        active_account: Any,
-        current_num: str | None,
-        current_ref: dict[str, Any] | None,
-        json_output: bool,
-        warnings: list[str],
-    ) -> dict[str, Any] | None:
-        return self._rotation_target(
-            strategy=None,
-            intent=intent,
-            strategy_label=strategy_label,
-            sequence=sequence,
-            active_account=active_account,
-            current_num=current_num,
-            current_ref=current_ref,
-            json_output=json_output,
-            warnings=warnings,
-        )

@@ -363,7 +363,7 @@ class TestUsageDisplay:
     def test_collect_usage_short_circuits(self, temp_home: Path):
         s = _linux_switcher()
         info = [(2, "api-key-2@token.local", "", "", False, API_KEY)]
-        usages, notes = s._resolve_usages(info)
+        usages, notes = s._list_reporter().resolve_usages(info)
         assert usages == [USAGE_API_KEY]
         assert notes == [None]
 
@@ -377,7 +377,7 @@ class TestUsageDisplay:
 
 def test_fetch_account_usage_api_key_no_quota(temp_home: Path):
     s = _linux_switcher()
-    result = s._fetch_account_usage(
+    result = s._list_reporter().fetch_account_usage(
         (1, "api-key-1@token.local", "", "", False, API_KEY)
     )
     assert result == USAGE_API_KEY

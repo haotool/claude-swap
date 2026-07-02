@@ -29,7 +29,6 @@ from claude_swap.cache import (
     write_cache,
 )
 from claude_swap.json_output import (
-    UsageEntry,
     _KNOWN_USAGE_SENTINELS,
     _slot_for_identity,
     account_ref,
@@ -1461,10 +1460,10 @@ class ClaudeAccountSwitcher:
         print(f"{accent('Removed')} Account-{account_num} ({email})")
 
     def _list_reporter(self) -> ListReporter:
-        """Lazy singleton so per-run reporter state survives across facades.
+        """Lazy singleton so per-run reporter state survives across calls.
 
-        ``_usage_by_account`` builds accounts info through one facade call and
-        resolves usages through another; the reporter's
+        ``_usage_by_account`` builds accounts info through one reporter call
+        and resolves usages through another; the reporter's
         ``_active_keychain_unavailable`` flag set by the first must still be
         visible to the second, or a locked Keychain shows the active account
         as "no credentials" (the misread upstream PR#77 fixed). Reuse is
@@ -1476,28 +1475,6 @@ class ClaudeAccountSwitcher:
             from claude_swap.list_reporter import ListReporter
             self._reporter = ListReporter(self)
         return self._reporter
-
-    def _fetch_account_usage(
-        self, account_info: tuple[int, str, str, str, bool, str],
-    ) -> UsageEntry:
-        return self._list_reporter().fetch_account_usage(account_info)
-
-    def _resolve_usages(
-        self, accounts_info: list[tuple[int, str, str, str, bool, str]],
-    ) -> tuple[list[UsageEntry], list[oauth.UsageFetchError | None]]:
-        return self._list_reporter().resolve_usages(accounts_info)
-
-    def _build_accounts_info(
-        self,
-        data: dict[str, Any] | None = None,
-        active_num: str | None = None,
-    ) -> list[tuple[int, str, str, str, bool, str]]:
-        return self._list_reporter().build_accounts_info(data, active_num)
-
-    def _fetch_active_usage(
-        self, account_num: str, email: str, creds: str,
-    ) -> UsageEntry:
-        return self._list_reporter().fetch_active_usage(account_num, email, creds)
 
     def _resolve_active_usage_entry(
         self,
@@ -1517,8 +1494,9 @@ class ClaudeAccountSwitcher:
 
     def _usage_by_account(self) -> dict[str, dict[str, Any] | str | oauth.UsageFetchError | None]:
             """Map account number → usage entry (per-slot cache) for managed accounts."""
-            accounts_info = self._build_accounts_info()
-            usages, _ = self._resolve_usages(accounts_info)
+            reporter = self._list_reporter()
+            accounts_info = reporter.build_accounts_info()
+            usages, _ = reporter.resolve_usages(accounts_info)
             return {
                 str(info[0]): usage for info, usage in zip(accounts_info, usages)
             }
@@ -2002,7 +1980,9 @@ class ClaudeAccountSwitcher:
             creds = self._read_credentials() or ""
             if not creds or not oauth.extract_access_token(creds):
                 return None
-            fetched = self._fetch_active_usage("active", current_email, creds)
+            fetched = self._list_reporter().fetch_active_usage(
+                "active", current_email, creds,
+            )
             usage = fetched if isinstance(fetched, dict) else None
 
         if (
