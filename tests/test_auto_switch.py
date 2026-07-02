@@ -1322,6 +1322,40 @@ class TestMonitorPidLifecycle:
         ):
             assert monitor._pid_is_running(4242) is False
 
+    @pytest.mark.parametrize(
+        "cmdline",
+        [
+            # R2 minor: fuzzy substring matching mistook these recycled PIDs
+            # for the monitor holder and refused to start a real monitor.
+            "vim claude-swap.py",
+            "less notes-on-monitor.txt",
+            "docker run monitoring-stack",
+            "/usr/bin/python sleep 999",
+            "python -m http.server 8000",
+        ],
+    )
+    def test_pid_is_running_rejects_lookalike_cmdlines(self, cmdline: str):
+        with (
+            patch("claude_swap.monitor.os.kill"),
+            patch("claude_swap.monitor._pid_command", return_value=cmdline),
+        ):
+            assert monitor._pid_is_running(4242) is False
+
+    @pytest.mark.parametrize(
+        "cmdline",
+        [
+            "/usr/bin/python3.12 -m claude_swap --monitor",
+            "python -m claude_swap --monitor --service-monitor",
+            '"C:\\Program Files\\Python312\\pythonw.exe" -m claude_swap --monitor',
+        ],
+    )
+    def test_pid_is_running_accepts_module_entrypoints(self, cmdline: str):
+        with (
+            patch("claude_swap.monitor.os.kill"),
+            patch("claude_swap.monitor._pid_command", return_value=cmdline),
+        ):
+            assert monitor._pid_is_running(4242) is True
+
     def test_pid_is_running_windows_uses_tasklist_not_os_kill(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -1348,11 +1382,44 @@ class TestMonitorPidLifecycle:
         ):
             assert monitor._pid_is_running_windows(4242) is False
 
-    def test_pid_is_running_windows_accepts_python_host(self):
-        # A ``python.exe`` hosting the module can't be disproved by image name.
-        with patch(
-            "claude_swap.monitor._tasklist_image",
-            return_value=(True, "python.exe"),
+    def test_pid_is_running_windows_python_host_checked_by_cmdline(self):
+        # R2 minor: a python.exe image alone must not be treated as the
+        # holder — the argv decides.
+        with (
+            patch(
+                "claude_swap.monitor._tasklist_image",
+                return_value=(True, "python.exe"),
+            ),
+            patch(
+                "claude_swap.monitor._windows_cmdline",
+                return_value=(True, "python.exe -m claude_swap --monitor"),
+            ),
+        ):
+            assert monitor._pid_is_running_windows(4242) is True
+        with (
+            patch(
+                "claude_swap.monitor._tasklist_image",
+                return_value=(True, "python.exe"),
+            ),
+            patch(
+                "claude_swap.monitor._windows_cmdline",
+                return_value=(True, "python.exe -m http.server"),
+            ),
+        ):
+            assert monitor._pid_is_running_windows(4242) is False
+
+    def test_pid_is_running_windows_python_host_kept_when_cmdline_unavailable(self):
+        # Command line undeterminable: keep the conservative bias rather than
+        # allow a second monitor.
+        with (
+            patch(
+                "claude_swap.monitor._tasklist_image",
+                return_value=(True, "python.exe"),
+            ),
+            patch(
+                "claude_swap.monitor._windows_cmdline",
+                return_value=(False, None),
+            ),
         ):
             assert monitor._pid_is_running_windows(4242) is True
 

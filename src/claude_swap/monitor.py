@@ -812,6 +812,77 @@ def _tasklist_image(pid: int) -> tuple[bool, str | None]:
     return (True, image or None)
 
 
+def _looks_like_python(image: str) -> bool:
+    stem = image[:-4] if image.endswith(".exe") else image
+    return stem == "py" or stem.startswith("python")
+
+
+def _split_command_line(cmd: str) -> list[str]:
+    """Split a command line, honoring a quoted argv[0] (Windows style)."""
+    cmd = cmd.strip()
+    if cmd.startswith('"'):
+        end = cmd.find('"', 1)
+        if end > 0:
+            return [cmd[1:end], *cmd[end + 1:].split()]
+    return cmd.split()
+
+
+def _cmdline_is_monitor_holder(cmd: str) -> bool:
+    """Whether a command line belongs to a claude-swap entrypoint.
+
+    The PID file is only ever written by a monitor-start path
+    (``_acquire_monitor_pid``), so the holder's argv is one of: the console
+    scripts (``cswap --monitor`` / ``claude-swap --monitor``, or the TUI
+    in-process monitor whose argv is just ``cswap``), or a
+    ``python -m claude_swap`` module run (the service backends). Match the
+    executable basename and the ``-m`` module exactly — a substring match
+    anywhere in the command line would mistake a recycled PID running e.g.
+    ``vim claude-swap.py`` or ``less notes-on-monitor.txt`` for the holder
+    and refuse to start a monitor.
+    """
+    tokens = _split_command_line(cmd)
+    if not tokens:
+        return False
+    exe = tokens[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    stem = exe[:-4] if exe.endswith(".exe") else exe
+    if stem in ("cswap", "claude-swap"):
+        return True
+    if not _looks_like_python(exe):
+        return False
+    try:
+        module_flag = tokens.index("-m", 1)
+    except ValueError:
+        return False
+    return module_flag + 1 < len(tokens) and tokens[module_flag + 1] == "claude_swap"
+
+
+def _windows_cmdline(pid: int) -> tuple[bool, str | None]:
+    """Query a Windows process command line via CIM.
+
+    Returns ``(queried, cmdline)``: ``queried`` is ``False`` when PowerShell
+    is unavailable or errored (command line undeterminable), ``cmdline`` is
+    ``None`` when the query ran but returned nothing.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f'(Get-CimInstance Win32_Process -Filter "ProcessId={pid}").CommandLine',
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return (False, None)
+    if result.returncode != 0:
+        return (False, None)
+    cmd = result.stdout.strip()
+    return (True, cmd or None)
+
+
 def _pid_is_running_windows(pid: int) -> bool:
     queried, image = _tasklist_image(pid)
     if not queried:
@@ -821,12 +892,18 @@ def _pid_is_running_windows(pid: int) -> bool:
     if image is None:
         return False
     lowered = image.lower()
-    # A ``py``/``python`` host running the module can't be told apart from an
-    # unrelated interpreter by image name alone, so treat it as the holder.
-    return "monitor" in lowered or any(
-        token in lowered
-        for token in ("claude_swap", "claude-swap", "cswap", "python", "py.exe")
-    )
+    stem = lowered[:-4] if lowered.endswith(".exe") else lowered
+    if stem in ("cswap", "claude-swap"):
+        return True
+    if _looks_like_python(lowered):
+        # A ``py``/``python`` host running the module can't be told apart from
+        # an unrelated interpreter by image name alone: check its argv. If the
+        # command line is undeterminable, keep the conservative bias.
+        queried_cmd, cmd = _windows_cmdline(pid)
+        if not queried_cmd:
+            return True
+        return cmd is not None and _cmdline_is_monitor_holder(cmd)
+    return False
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -843,16 +920,7 @@ def _pid_is_running(pid: int) -> bool:
     cmd = _pid_command(pid)
     if cmd is None:
         return True
-    lowered = cmd.lower()
-    # The PID file is only ever written by a monitor-start path
-    # (``_acquire_monitor_pid``), so any live process whose command line belongs
-    # to claude-swap is the holder. Match every entrypoint: ``cswap --monitor`` /
-    # ``claude-swap --monitor`` (console scripts) and the TUI in-process monitor,
-    # whose argv is just ``cswap``. The token match still rejects a recycled PID
-    # running an unrelated command.
-    return "monitor" in lowered or any(
-        token in lowered for token in ("claude_swap", "claude-swap", "cswap")
-    )
+    return _cmdline_is_monitor_holder(cmd)
 
 
 def _read_running_pid(path: Path) -> int | None:
