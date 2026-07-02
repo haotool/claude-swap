@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from claude_swap.credential_refresh import CredentialRefresher
 from claude_swap.models import (
     AutoSwitchDecisionContext,
+    SwitchPlanResult,
     SwitchPreconditionKind,
     SwitchPreconditions,
 )
@@ -31,6 +32,9 @@ def _monitor_host(tmp_path: Path) -> SimpleNamespace:
             live_active_slot=None,
             sequence_active_slot=None,
             usage_by_slot={},
+        ),
+        plan_automated_switch=lambda decision: SwitchPlanResult(
+            outcome="already_optimal",
         ),
         switch=lambda *args, **kwargs: False,
         _live_default_mode_claude_pids=lambda: [],

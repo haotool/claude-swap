@@ -668,9 +668,9 @@ class TestMonitorPidFacade:
         screen.getch.side_effect = [ord("q")]
         with (
             patch(
-                "claude_swap.tui._acquire_monitor_pid", return_value=None
+                "claude_swap.tui.acquire_pid", return_value=None
             ) as mock_acquire,
-            patch("claude_swap.tui._release_monitor_pid") as mock_release,
+            patch("claude_swap.tui.release_pid") as mock_release,
             patch("claude_swap.tui.monitor_step") as mock_step,
             patch("claude_swap.tui.get_logger") as mock_logger,
             patch("claude_swap.tui.curses.curs_set"),
@@ -690,7 +690,7 @@ class TestMonitorPidFacade:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         with (
-            patch("claude_swap.tui._acquire_monitor_pid", return_value=9999),
+            patch("claude_swap.tui.acquire_pid", return_value=9999),
             patch("claude_swap.tui._show_message") as mock_message,
             patch("claude_swap.tui.monitor_step") as mock_step,
             patch("claude_swap.tui.curses.curs_set"),

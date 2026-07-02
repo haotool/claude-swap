@@ -94,7 +94,11 @@ class TestListAccountsUsage:
         switcher._write_account_credentials("1", "test@example.com", old_backup)
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=refreshed_live),
+            patch.object(
+                switcher,
+                "_read_active_credentials",
+                return_value=ActiveCredentials(refreshed_live, False),
+            ),
             patch("claude_swap.oauth.fetch_usage_for_account", return_value=None),
         ):
             switcher.list_accounts()
@@ -353,7 +357,11 @@ class TestListAccountsUsage:
             return None
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(
+                switcher,
+                "_read_active_credentials",
+                return_value=ActiveCredentials(active_creds, False),
+            ),
             patch.object(
                 switcher,
                 "_read_account_credentials",
@@ -599,7 +607,8 @@ class TestListAccountsUsage:
         )
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch.object(
                 switcher, "_read_account_credentials", return_value=backup_creds
             ),
@@ -660,7 +669,8 @@ class TestListAccountsUsage:
 
         with caplog.at_level(logging.INFO, logger="claude-swap"):
             with (
-                patch.object(switcher, "_read_credentials", return_value=active_creds),
+                patch.object(switcher, "_read_active_credentials",
+                             return_value=ActiveCredentials(active_creds, False)),
                 patch.object(
                     switcher, "_read_account_credentials", return_value=backup_creds
                 ),
@@ -714,7 +724,8 @@ class TestListAccountsUsage:
         )
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch.object(
                 switcher, "_read_account_credentials", return_value=backup_creds
             ),
@@ -1076,7 +1087,8 @@ class TestActiveAccountRefresh:
         backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=self._EXPIRED),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(self._EXPIRED, False)),
             patch.object(
                 switcher, "_read_account_credentials", return_value=backup_creds
             ),
@@ -1128,8 +1140,10 @@ class TestSchemaDriftWarning:
         with (
             patch.object(
                 s,
-                "_read_credentials",
-                return_value='{"claudeAiOauth":{"accessToken":"sk-abc"}}',
+                "_read_active_credentials",
+                return_value=ActiveCredentials(
+                    '{"claudeAiOauth":{"accessToken":"sk-abc"}}', False,
+                ),
             ),
             patch("claude_swap.oauth.extract_access_token", return_value="sk-abc"),
             patch(
@@ -1300,7 +1314,8 @@ class TestUsageCacheFreshness:
         live_usage = {"five_hour": {"pct": 96}, "seven_day": {"pct": 20}}
 
         with (
-            patch.object(s, "_read_credentials", return_value=creds),
+            patch.object(s, "_read_active_credentials",
+                         return_value=ActiveCredentials(creds, False)),
             patch("claude_swap.oauth.extract_access_token", return_value="tok"),
             patch(
                 "claude_swap.oauth.fetch_usage_for_account",
@@ -1344,7 +1359,8 @@ class TestUsageCacheFreshness:
         live_usage = {"five_hour": {"pct": 72}, "seven_day": {"pct": 87}}
 
         with (
-            patch.object(s, "_read_credentials", return_value=creds),
+            patch.object(s, "_read_active_credentials",
+                         return_value=ActiveCredentials(creds, False)),
             patch("claude_swap.oauth.extract_access_token", return_value="tok"),
             patch(
                 "claude_swap.oauth.fetch_usage_for_account",

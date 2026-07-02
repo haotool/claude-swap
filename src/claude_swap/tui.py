@@ -41,9 +41,6 @@ from claude_swap.monitor import (
 )
 from claude_swap.switcher import ClaudeAccountSwitcher, auto_switch_display
 
-_acquire_monitor_pid = acquire_pid
-_release_monitor_pid = release_pid
-
 
 # Minimum terminal size we render in. Below this, we bail to plain CLI advice.
 _MIN_ROWS = 12
@@ -485,7 +482,7 @@ def _run_auto_monitor(
     stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, threshold: int,
 ) -> None:
     """Foreground watcher: TUI adapter over the shared monitor engine."""
-    running_pid = _acquire_monitor_pid(switcher)
+    running_pid = acquire_pid(switcher)
     if running_pid is not None:
         _show_message(
             stdscr,
@@ -549,7 +546,7 @@ def _run_auto_monitor(
     finally:
         log.info("monitor stopped")
         stdscr.timeout(-1)
-        _release_monitor_pid(switcher)
+        release_pid(switcher)
 
 
 def _auto_perform_switch(

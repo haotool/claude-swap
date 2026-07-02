@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from claude_swap import service
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.service_backends import task_scheduler as ts_backend
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
 def _force_win32(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(service.sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "win32")
 
 
 def _stub_run(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
@@ -40,7 +41,7 @@ class TestResolvePythonExecutable:
         python_exe.write_text("", encoding="utf-8")
         pythonw_exe = python_dir / "pythonw.exe"
         pythonw_exe.write_text("", encoding="utf-8")
-        monkeypatch.setattr(service.sys, "executable", str(python_exe))
+        monkeypatch.setattr(sys, "executable", str(python_exe))
 
         assert ts_backend._resolve_python_executable() == str(pythonw_exe.resolve())
 
@@ -52,14 +53,14 @@ class TestResolvePythonExecutable:
         python_dir.mkdir(parents=True)
         python_exe = python_dir / "python.exe"
         python_exe.write_text("", encoding="utf-8")
-        monkeypatch.setattr(service.sys, "executable", str(python_exe))
+        monkeypatch.setattr(sys, "executable", str(python_exe))
 
         assert ts_backend._resolve_python_executable() == str(python_exe.resolve())
 
     def test_non_windows_uses_sys_executable(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(service.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         assert ts_backend._resolve_python_executable() == str(
-            Path(service.sys.executable).resolve()
+            Path(sys.executable).resolve()
         )
 
 
@@ -188,7 +189,7 @@ class TestInstall:
             completed.stderr = ""
             return completed
 
-        monkeypatch.setattr(service.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)
 
         switcher = ClaudeAccountSwitcher()
         rc = ts_backend.TaskSchedulerBackend().install(switcher)
@@ -222,7 +223,7 @@ class TestInstall:
         xml_path = _task_xml_path(switcher)
         xml_path.parent.mkdir(parents=True)
         xml_path.write_text("stale xml\n", encoding="utf-8")
-        monkeypatch.setattr(service.subprocess, "run", _stub_run())
+        monkeypatch.setattr(subprocess, "run", _stub_run())
 
         ts_backend.TaskSchedulerBackend().install(switcher)
         assert "<LogonTrigger>" in xml_path.read_text(encoding="utf-8")
@@ -243,12 +244,12 @@ class TestInstall:
             completed.stdout = ""
             return completed
 
-        monkeypatch.setattr(service.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeSwitchError, match="Register-ScheduledTask"):
             ts_backend.TaskSchedulerBackend().install(ClaudeAccountSwitcher())
 
     def test_non_windows_raises(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(service.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         with pytest.raises(ClaudeSwitchError, match="Task Scheduler"):
             ts_backend.TaskSchedulerBackend().install(ClaudeAccountSwitcher())
 
@@ -267,7 +268,7 @@ class TestUninstall:
         xml_path.write_text("<Task></Task>", encoding="utf-8")
         calls: list[list[str]] = []
         monkeypatch.setattr(
-            service.subprocess,
+            subprocess,
             "run",
             lambda argv, **kwargs: calls.append(list(argv)) or _stub_run()(),
         )
@@ -290,7 +291,7 @@ class TestUninstall:
     ):
         _force_win32(monkeypatch)
         monkeypatch.setattr(ts_backend, "_query_task_state", lambda: (False, ""))
-        monkeypatch.setattr(service.subprocess, "run", _stub_run())
+        monkeypatch.setattr(subprocess, "run", _stub_run())
 
         rc = ts_backend.TaskSchedulerBackend().uninstall(ClaudeAccountSwitcher())
 
@@ -359,7 +360,7 @@ class TestSelectBackendWindows:
         from claude_swap.service_backends import select_backend
         from claude_swap.service_backends.task_scheduler import TaskSchedulerBackend
 
-        monkeypatch.setattr(service.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         backend = select_backend()
         assert isinstance(backend, TaskSchedulerBackend)
         assert backend.platform_label == "task_scheduler"

@@ -64,10 +64,8 @@ def _run(
     *,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    from claude_swap import service
-
     try:
-        proc: subprocess.CompletedProcess[str] = service.subprocess.run(
+        proc: subprocess.CompletedProcess[str] = subprocess.run(
             argv,
             capture_output=True,
             text=True,

@@ -170,10 +170,7 @@ def _stay_put_kind(
     decision: AutoSwitchDecisionContext,
 ) -> Literal["already_optimal", "no_trusted_signal"]:
     """Map a no-op automated switch to an honest monitor step kind."""
-    plan_fn = getattr(switcher, "plan_automated_switch", None)
-    if plan_fn is None:
-        return "already_optimal"
-    if plan_fn(decision).outcome == "no_trusted_signal":
+    if switcher.plan_automated_switch(decision).outcome == "no_trusted_signal":
         return "no_trusted_signal"
     return "already_optimal"
 

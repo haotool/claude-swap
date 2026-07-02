@@ -58,11 +58,9 @@ def _launchd_service_target() -> str:
 
 def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Invoke launchctl; surface failures as ``ClaudeSwitchError``."""
-    from claude_swap import service
-
     try:
-        proc: subprocess.CompletedProcess[str] = service.subprocess.run(
-            [service._LAUNCHCTL, *args],
+        proc: subprocess.CompletedProcess[str] = subprocess.run(
+            [_LAUNCHCTL, *args],
             capture_output=True,
             text=True,
             timeout=service_spec.SUBPROCESS_TIMEOUT,
@@ -82,10 +80,8 @@ def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[st
 
 def _installed_version() -> str | None:
     """Return the cswap version recorded in the installed plist, or ``None``."""
-    from claude_swap import service
-
     try:
-        with service._plist_path().open("rb") as fh:
+        with _plist_path().open("rb") as fh:
             data = plistlib.load(fh)
     except (OSError, plistlib.InvalidFileException):
         return None
@@ -106,9 +102,7 @@ class LaunchdBackend:
         return "macOS LaunchAgent (launchd)"
 
     def install(self, switcher: ServiceHost) -> int:
-        from claude_swap import service
-
-        plist_path = service._plist_path()
+        plist_path = _plist_path()
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         log_dir = service_spec.log_dir(switcher)
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -148,10 +142,8 @@ class LaunchdBackend:
         return 0
 
     def uninstall(self, switcher: ServiceHost) -> int:
-        from claude_swap import service
-
         _launchctl("bootout", _launchd_service_target(), check=False)
-        plist_path = service._plist_path()
+        plist_path = _plist_path()
         existed = plist_path.exists()
         plist_path.unlink(missing_ok=True)
         service_spec.print_uninstall_result(
@@ -162,9 +154,7 @@ class LaunchdBackend:
         return 0
 
     def state(self) -> ServiceState:
-        from claude_swap import service
-
-        if not service._plist_path().exists():
+        if not _plist_path().exists():
             return "not installed"
         proc = _launchctl("print", _launchd_service_target(), check=False)
         if proc.returncode != 0:

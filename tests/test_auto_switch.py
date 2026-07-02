@@ -403,8 +403,8 @@ class TestRunAutoMonitor:
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=10.0),
             patch("claude_swap.tui._auto_perform_switch") as mock_switch,
-            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
-            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.acquire_pid", return_value=None),
+            patch("claude_swap.tui.release_pid"),
             patch("claude_swap.tui.curses.curs_set"),
         ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
@@ -424,8 +424,8 @@ class TestRunAutoMonitor:
             patch(
                 "claude_swap.tui._auto_perform_switch", return_value=True
             ) as mock_switch,
-            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
-            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.acquire_pid", return_value=None),
+            patch("claude_swap.tui.release_pid"),
             patch("claude_swap.tui.curses.curs_set"),
         ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
@@ -480,8 +480,8 @@ class TestRunAutoMonitor:
                     user_message="Monitoring active account.",
                 ),
             ) as mock_step,
-            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
-            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.acquire_pid", return_value=None),
+            patch("claude_swap.tui.release_pid"),
             patch("claude_swap.tui.curses.curs_set"),
         ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
@@ -512,8 +512,8 @@ class TestRunAutoMonitor:
                 "claude_swap.tui.monitor_step",
                 return_value=polled,
             ) as mock_step,
-            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
-            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.acquire_pid", return_value=None),
+            patch("claude_swap.tui.release_pid"),
             patch("claude_swap.tui.curses.curs_set"),
         ):
             tui._run_auto_monitor(screen, switcher, threshold=95)
@@ -526,7 +526,7 @@ class TestRunAutoMonitor:
         screen.getch.return_value = ord("q")
 
         with (
-            patch("claude_swap.tui._acquire_monitor_pid", return_value=12345),
+            patch("claude_swap.tui.acquire_pid", return_value=12345),
             patch("claude_swap.tui._show_message") as mock_message,
             patch("claude_swap.tui.monitor_step") as mock_step,
             patch("claude_swap.tui.curses.curs_set"),
@@ -559,8 +559,8 @@ class TestRunAutoMonitor:
                     user_message="Monitoring active account.",
                 ),
             ),
-            patch("claude_swap.tui._acquire_monitor_pid", return_value=None),
-            patch("claude_swap.tui._release_monitor_pid"),
+            patch("claude_swap.tui.acquire_pid", return_value=None),
+            patch("claude_swap.tui.release_pid"),
             patch("claude_swap.tui.curses.curs_set"),
         ):
             tui._run_auto_monitor(screen, switcher, threshold=95)

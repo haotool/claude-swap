@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 from claude_swap.models import (
     AutoSwitchDecisionContext,
     SwitchIntent,
+    SwitchPlanResult,
     SwitchPreconditions,
 )
 from claude_swap.credentials import ActiveCredentials
@@ -41,6 +42,10 @@ class MonitorHost(Protocol):
         threshold: int,
         active_usage_pct: float | None,
     ) -> AutoSwitchDecisionContext: ...
+    def plan_automated_switch(
+        self,
+        decision: AutoSwitchDecisionContext,
+    ) -> SwitchPlanResult: ...
     def switch(
         self,
         intent: SwitchIntent | None = None,

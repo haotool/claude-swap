@@ -26,6 +26,7 @@ from claude_swap.json_output import (
     usage_fields,
     usage_to_json,
 )
+from claude_swap.credentials import ActiveCredentials
 from claude_swap.models import Platform
 from claude_swap.switcher import ClaudeAccountSwitcher
 
@@ -140,7 +141,8 @@ class TestListJson:
         switcher._write_json(switcher.sequence_file, sample_sequence_data)
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch.object(
                 switcher, "_read_account_credentials", return_value=backup_creds
             ),
@@ -171,7 +173,8 @@ class TestListJson:
         # Account 1 active with creds but the fetch fails (None → unavailable);
         # account 2 has no backup creds (→ no_credentials).
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch.object(switcher, "_read_account_credentials", return_value=""),
             patch("claude_swap.oauth.fetch_usage_for_account", return_value=None),
         ):
@@ -235,7 +238,8 @@ class TestStatusJson:
         switcher._write_json(switcher.sequence_file, sample_sequence_data)
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch("claude_swap.oauth.fetch_usage_for_account", return_value=usage),
         ):
             payload = switcher.status(json_output=True)

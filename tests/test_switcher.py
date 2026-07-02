@@ -24,6 +24,7 @@ from claude_swap.models import Platform
 if TYPE_CHECKING:
     from claude_swap.models import BackgroundAutoSwitchIntent
 from claude_swap.paths import get_backup_root
+from claude_swap.credentials import ActiveCredentials
 from claude_swap.sequence_store import AccountRecord
 from claude_swap.switcher import ClaudeAccountSwitcher, SETUP_TOKEN_SCOPES
 
@@ -608,7 +609,8 @@ class TestStatusCache:
         write_cache(switcher.backup_dir / "cache" / "usage.json", cached_usage)
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch("claude_swap.oauth.fetch_usage_for_account") as mock_fetch,
         ):
             switcher.status()
@@ -641,7 +643,8 @@ class TestStatusCache:
         }
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch(
                 "claude_swap.list_reporter.ListReporter._active_cc_running",
                 return_value=True,
@@ -683,7 +686,8 @@ class TestStatusCache:
         }
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch(
                 "claude_swap.list_reporter.ListReporter._active_cc_running",
                 return_value=True,
@@ -726,7 +730,8 @@ class TestStatusCache:
         usage_result = {"five_hour": {"pct": 10, "clock": "Jan 1 03:00", "countdown": "0m"}}
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch(
                 "claude_swap.oauth.fetch_usage_for_account", return_value=usage_result
             ),
@@ -767,7 +772,8 @@ class TestStatusCache:
         )
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch("claude_swap.oauth.fetch_usage_for_account", return_value=None),
         ):
             switcher.status()
@@ -809,7 +815,8 @@ class TestStatusCache:
         )
 
         with (
-            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(switcher, "_read_active_credentials",
+                         return_value=ActiveCredentials(active_creds, False)),
             patch(
                 "claude_swap.oauth.fetch_usage_for_account",
                 return_value=oauth.UsageFetchError(

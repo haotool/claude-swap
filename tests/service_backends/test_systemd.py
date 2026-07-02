@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from claude_swap import service
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.service_backends import systemd as systemd_backend
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
 def _force_linux(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(service.sys, "platform", "linux")
+    monkeypatch.setattr(sys, "platform", "linux")
 
 
 def _stub_run(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
@@ -36,7 +36,7 @@ class TestIsWsl:
     ):
         from claude_swap import service_spec
 
-        monkeypatch.setattr(service.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         version = tmp_path / "version"
         version.write_text("#1 SMP Microsoft\n")
         osrelease = tmp_path / "osrelease"
@@ -55,7 +55,7 @@ class TestIsWsl:
     ):
         from claude_swap import service_spec
 
-        monkeypatch.setattr(service.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
         version = tmp_path / "version"
         version.write_text("#1 SMP Debian\n")
@@ -73,7 +73,7 @@ class TestIsWsl:
     def test_false_on_darwin(self, monkeypatch: pytest.MonkeyPatch):
         from claude_swap import service_spec
 
-        monkeypatch.setattr(service.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         assert service_spec.is_wsl() is False
 
 
@@ -162,7 +162,7 @@ class TestInstall:
             completed.stderr = ""
             return completed
 
-        monkeypatch.setattr(service.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)
         monkeypatch.setattr(systemd_backend.service_spec, "is_wsl", lambda: False)
 
         switcher = ClaudeAccountSwitcher()
@@ -200,7 +200,7 @@ class TestInstall:
         unit_path.parent.mkdir(parents=True)
         unit_path.write_text("stale unit\n")
         monkeypatch.setattr(systemd_backend, "_unit_path", lambda: unit_path)
-        monkeypatch.setattr(service.subprocess, "run", _stub_run())
+        monkeypatch.setattr(subprocess, "run", _stub_run())
 
         systemd_backend.SystemdBackend().install(ClaudeAccountSwitcher())
         assert "Restart=on-failure" in unit_path.read_text(encoding="utf-8")
@@ -220,7 +220,7 @@ class TestInstall:
         monkeypatch.setattr(
             systemd_backend, "_unit_path", lambda: _unit_path(config_home)
         )
-        monkeypatch.setattr(service.subprocess, "run", _stub_run())
+        monkeypatch.setattr(subprocess, "run", _stub_run())
         monkeypatch.setattr(systemd_backend.service_spec, "is_wsl", lambda: True)
 
         systemd_backend.SystemdBackend().install(ClaudeAccountSwitcher())
@@ -272,7 +272,7 @@ class TestInstall:
                 completed.stderr = ""
             return completed
 
-        monkeypatch.setattr(service.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)
 
         rc = systemd_backend.SystemdBackend().install(ClaudeAccountSwitcher())
         assert rc == 0
@@ -309,7 +309,7 @@ class TestInstall:
             completed.stdout = ""
             return completed
 
-        monkeypatch.setattr(service.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeSwitchError, match="enable"):
             systemd_backend.SystemdBackend().install(ClaudeAccountSwitcher())
 
@@ -329,7 +329,7 @@ class TestUninstall:
         monkeypatch.setattr(systemd_backend, "_unit_path", lambda: unit_path)
         calls: list[list[str]] = []
         monkeypatch.setattr(
-            service.subprocess,
+            subprocess,
             "run",
             lambda argv, **kwargs: calls.append(list(argv)) or _stub_run()(),
         )
@@ -358,7 +358,7 @@ class TestUninstall:
         config_home = temp_home / ".config"
         unit_path = _unit_path(config_home)
         monkeypatch.setattr(systemd_backend, "_unit_path", lambda: unit_path)
-        monkeypatch.setattr(service.subprocess, "run", _stub_run(returncode=1))
+        monkeypatch.setattr(subprocess, "run", _stub_run(returncode=1))
 
         rc = systemd_backend.SystemdBackend().uninstall(ClaudeAccountSwitcher())
 
@@ -400,7 +400,7 @@ class TestState:
             completed.stderr = ""
             return completed
 
-        monkeypatch.setattr(service.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)
         assert systemd_backend.SystemdBackend().state() == expected
 
     def test_not_installed_without_unit_file(
@@ -446,7 +446,7 @@ class TestSelectBackendLinux:
         from claude_swap.service_backends import select_backend
         from claude_swap.service_backends.systemd import SystemdBackend
 
-        monkeypatch.setattr(service.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
         backend = select_backend()
         assert isinstance(backend, SystemdBackend)
@@ -461,7 +461,7 @@ class TestRequireSystemd:
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
         # `systemctl --user is-system-running` -> "offline": manager unreachable.
         monkeypatch.setattr(
-            service.subprocess,
+            subprocess,
             "run",
             _stub_run(returncode=1, stdout="offline"),
         )
@@ -473,7 +473,7 @@ class TestRequireSystemd:
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
         # "degraded" still means the user manager is up — must not raise.
         monkeypatch.setattr(
-            service.subprocess,
+            subprocess,
             "run",
             _stub_run(returncode=1, stdout="degraded"),
         )
@@ -483,6 +483,6 @@ class TestRequireSystemd:
         _force_linux(monkeypatch)
         monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
         monkeypatch.setattr(
-            service.subprocess, "run", _stub_run(returncode=0, stdout="")
+            subprocess, "run", _stub_run(returncode=0, stdout="")
         )
         systemd_backend._require_systemd()

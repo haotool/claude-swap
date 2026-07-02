@@ -12,40 +12,10 @@ so monitor-loop changes never require edits here.
 
 from __future__ import annotations
 
-import subprocess
-import sys
-
-from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.models import Platform
 from claude_swap.service_backends import select_backend
-from claude_swap.service_backends import launchd as _launchd
-from claude_swap.service_spec import SERVICE_LABEL, VERSION_ENV_KEY
 from claude_swap.protocols import ServiceHost
-
-# Re-exported for tests and launchd runtime hooks (monkeypatch targets).
-_LAUNCHCTL = _launchd._LAUNCHCTL
-_build_plist = _launchd._build_plist
-_plist_path = _launchd._plist_path
-
-# Backward-compatible aliases for tests and callers.
-_VERSION_ENV_KEY = VERSION_ENV_KEY
-
-__all__ = [
-    "SERVICE_LABEL",
-    "_LAUNCHCTL",
-    "_VERSION_ENV_KEY",
-    "_build_plist",
-    "_plist_path",
-    "__version__",
-    "install",
-    "logs",
-    "service_state",
-    "status",
-    "subprocess",
-    "sys",
-    "uninstall",
-]
 
 
 def _require_supported_platform() -> None:

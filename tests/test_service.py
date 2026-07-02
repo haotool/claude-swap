@@ -9,20 +9,22 @@ routing case in ``tests/test_cli.py``.
 from __future__ import annotations
 
 import plistlib
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from claude_swap import cli, service
+from claude_swap import __version__, cli, service, service_spec
 from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.service_backends import launchd
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
 def _force_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pretend we're on macOS regardless of the host platform."""
-    monkeypatch.setattr(service.sys, "platform", "darwin")
+    monkeypatch.setattr(sys, "platform", "darwin")
 
 
 def _stub_launchctl(
@@ -45,8 +47,8 @@ def _stub_launchctl(
 class TestBuildPlist:
     def test_core_fields(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        plist = service._build_plist(switcher)
-        assert plist["Label"] == service.SERVICE_LABEL
+        plist = launchd._build_plist(switcher)
+        assert plist["Label"] == service_spec.SERVICE_LABEL
         assert plist["RunAtLoad"] is True
         # Dict-form KeepAlive is load-bearing: a bare ``True`` would resurrect
         # the agent after ``launchctl bootout``, defeating uninstall.
@@ -57,7 +59,7 @@ class TestBuildPlist:
 
     def test_program_arguments_invoke_monitor(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        plist = service._build_plist(switcher)
+        plist = launchd._build_plist(switcher)
         argv = plist["ProgramArguments"]
         assert argv[0] == sys.executable
         assert "--monitor" in argv
@@ -66,7 +68,7 @@ class TestBuildPlist:
 
     def test_log_paths_under_backup_dir(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
-        plist = service._build_plist(switcher)
+        plist = launchd._build_plist(switcher)
         log_dir = switcher.backup_dir / "logs"
         assert plist["StandardOutPath"] == str(log_dir / "monitor.out")
         assert plist["StandardErrorPath"] == str(log_dir / "monitor.err")
@@ -76,7 +78,7 @@ class TestBuildPlist:
     ):
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/cswap-cfg")
         switcher = ClaudeAccountSwitcher()
-        plist = service._build_plist(switcher)
+        plist = launchd._build_plist(switcher)
         env = plist["EnvironmentVariables"]
         # HOME is always set in test runs; CLAUDE_CONFIG_DIR was set above.
         assert env.get("CLAUDE_CONFIG_DIR") == "/tmp/cswap-cfg"
@@ -99,11 +101,11 @@ class TestInstall:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         launchctl = _stub_launchctl()
-        monkeypatch.setattr(service.subprocess, "run", launchctl)
+        monkeypatch.setattr(subprocess, "run", launchctl)
 
         switcher = ClaudeAccountSwitcher()
         rc = service.install(switcher)
@@ -113,7 +115,7 @@ class TestInstall:
         # Round-trip through plistlib — proves we wrote valid XML plist bytes.
         with plist_path.open("rb") as fh:
             loaded = plistlib.load(fh)
-        assert loaded["Label"] == service.SERVICE_LABEL
+        assert loaded["Label"] == service_spec.SERVICE_LABEL
         assert loaded["ProgramArguments"][-1] == "--service-monitor"
         assert "--monitor" in loaded["ProgramArguments"]
         # The launchd log dir was created.
@@ -124,23 +126,23 @@ class TestInstall:
         assert len(calls) == 2
         bootout_args = calls[0].args[0]
         bootstrap_args = calls[1].args[0]
-        assert bootout_args[0] == service._LAUNCHCTL
+        assert bootout_args[0] == launchd._LAUNCHCTL
         assert bootout_args[1] == "bootout"
         assert bootstrap_args[1] == "bootstrap"
         assert str(plist_path) in bootstrap_args
 
         out = capsys.readouterr().out
         assert "Service installed" in out
-        assert service.SERVICE_LABEL in out
+        assert service_spec.SERVICE_LABEL in out
 
     def test_bootstrap_failure_raises_claude_switch_error(
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
 
         # First call (bootout, check=False) succeeds; second (bootstrap, check=True) fails.
         def fake_run(argv, **kwargs):
@@ -154,7 +156,7 @@ class TestInstall:
             completed.stdout = ""
             return completed
 
-        monkeypatch.setattr(service.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeSwitchError, match="bootstrap"):
             service.install(ClaudeAccountSwitcher())
 
@@ -168,13 +170,13 @@ class TestUninstall:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         launchctl = _stub_launchctl()
-        monkeypatch.setattr(service.subprocess, "run", launchctl)
+        monkeypatch.setattr(subprocess, "run", launchctl)
 
         rc = service.uninstall(ClaudeAccountSwitcher())
 
@@ -194,12 +196,12 @@ class TestUninstall:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         # ``bootout`` returns non-zero when the service is not loaded; uninstall
         # must tolerate that (check=False) so the user-visible call stays clean.
-        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(returncode=3))
+        monkeypatch.setattr(subprocess, "run", _stub_launchctl(returncode=3))
 
         rc = service.uninstall(ClaudeAccountSwitcher())
 
@@ -219,9 +221,9 @@ class TestStatus:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         assert service.service_state() == "not installed"
 
     def test_service_state_installed_but_not_loaded(
@@ -229,12 +231,12 @@ class TestStatus:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
-        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(returncode=113))
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(subprocess, "run", _stub_launchctl(returncode=113))
         assert service.service_state() == "installed but not loaded"
 
     def test_service_state_loaded(
@@ -242,13 +244,13 @@ class TestStatus:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         monkeypatch.setattr(
-            service.subprocess, "run", _stub_launchctl(stdout="state = running")
+            subprocess, "run", _stub_launchctl(stdout="state = running")
         )
         assert service.service_state() == "loaded"
 
@@ -260,14 +262,14 @@ class TestStatus:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         # ``subprocess.run`` must not be invoked when the plist is missing.
         sentinel = MagicMock(
             side_effect=AssertionError("launchctl should not be called")
         )
-        monkeypatch.setattr(service.subprocess, "run", sentinel)
+        monkeypatch.setattr(subprocess, "run", sentinel)
 
         rc = service.status(ClaudeAccountSwitcher())
 
@@ -283,12 +285,12 @@ class TestStatus:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
-        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(returncode=113))
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(subprocess, "run", _stub_launchctl(returncode=113))
 
         rc = service.status(ClaudeAccountSwitcher())
 
@@ -304,11 +306,11 @@ class TestStatus:
     ):
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
         plist_path.parent.mkdir(parents=True)
         plist_path.write_bytes(b"<plist/>")
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         stdout = (
             "com.claude-swap.monitor = {\n"
             "    state = running\n"
@@ -317,7 +319,7 @@ class TestStatus:
             "    program = /usr/bin/python3\n"
             "}\n"
         )
-        monkeypatch.setattr(service.subprocess, "run", _stub_launchctl(stdout=stdout))
+        monkeypatch.setattr(subprocess, "run", _stub_launchctl(stdout=stdout))
 
         rc = service.status(ClaudeAccountSwitcher())
 
@@ -339,16 +341,16 @@ class TestStatus:
         """status() warns when the plist records an older cswap version."""
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
         plist_path.parent.mkdir(parents=True)
         # Write a plist whose installed version differs from the current one.
-        plist_data = {"EnvironmentVariables": {service._VERSION_ENV_KEY: "0.0.1"}}
+        plist_data = {"EnvironmentVariables": {service_spec.VERSION_ENV_KEY: "0.0.1"}}
         with plist_path.open("wb") as fh:
             plistlib.dump(plist_data, fh)
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         monkeypatch.setattr(
-            service.subprocess,
+            subprocess,
             "run",
             _stub_launchctl(returncode=0, stdout="state = running\n"),
         )
@@ -369,17 +371,17 @@ class TestStatus:
         """No warning when installed version == current version."""
         _force_darwin(monkeypatch)
         plist_path = (
-            temp_home / "Library" / "LaunchAgents" / f"{service.SERVICE_LABEL}.plist"
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
         plist_path.parent.mkdir(parents=True)
         plist_data = {
-            "EnvironmentVariables": {service._VERSION_ENV_KEY: service.__version__}
+            "EnvironmentVariables": {service_spec.VERSION_ENV_KEY: __version__}
         }
         with plist_path.open("wb") as fh:
             plistlib.dump(plist_data, fh)
-        monkeypatch.setattr(service, "_plist_path", lambda: plist_path)
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
         monkeypatch.setattr(
-            service.subprocess,
+            subprocess,
             "run",
             _stub_launchctl(returncode=0, stdout="state = running\n"),
         )
@@ -448,7 +450,7 @@ class TestPlatformGuard:
     def test_unsupported_platform_raises_claude_switch_error(
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch, action: str
     ):
-        monkeypatch.setattr(service.sys, "platform", "freebsd9")
+        monkeypatch.setattr(sys, "platform", "freebsd9")
         fn = getattr(service, action)
         with pytest.raises(ClaudeSwitchError, match="not supported"):
             fn(ClaudeAccountSwitcher())
@@ -508,7 +510,7 @@ class TestCliRouting:
         # End-to-end through ``main()`` → ``_service_command`` → ``service.status``.
         # On an unsupported host the guard fires and the top-level handler renders
         # a clean stderr line + exit 1, with no traceback.
-        monkeypatch.setattr(service.sys, "platform", "freebsd9")
+        monkeypatch.setattr(sys, "platform", "freebsd9")
         monkeypatch.setattr(sys, "argv", ["cswap", "service", "status"])
         with pytest.raises(SystemExit) as excinfo:
             cli.main()
@@ -579,13 +581,13 @@ class TestServiceSpec:
     def test_is_wsl_false_on_darwin(self, monkeypatch: pytest.MonkeyPatch):
         from claude_swap import service_spec
 
-        monkeypatch.setattr(service.sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "platform", "darwin")
         assert service_spec.is_wsl() is False
 
-    def test_service_label_matches_legacy_export(self):
-        from claude_swap import service_spec
-
-        assert service_spec.SERVICE_LABEL == service.SERVICE_LABEL
+    def test_default_plist_path_derives_from_service_label(self, temp_home: Path):
+        path = launchd._plist_path()
+        assert path.name == f"{service_spec.SERVICE_LABEL}.plist"
+        assert path.parent == Path.home() / "Library" / "LaunchAgents"
 
 
 # --------------------------------------------------------------------------- #
@@ -607,7 +609,7 @@ class TestSelectBackend:
         from claude_swap.service_backends import select_backend
         from claude_swap.service_backends.systemd import SystemdBackend
 
-        monkeypatch.setattr(service.sys, "platform", "linux")
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
         backend = select_backend()
         assert isinstance(backend, SystemdBackend)
@@ -619,7 +621,7 @@ class TestSelectBackend:
         from claude_swap.service_backends import select_backend
         from claude_swap.service_backends.task_scheduler import TaskSchedulerBackend
 
-        monkeypatch.setattr(service.sys, "platform", "win32")
+        monkeypatch.setattr(sys, "platform", "win32")
         backend = select_backend()
         assert isinstance(backend, TaskSchedulerBackend)
         assert backend.platform_label == "task_scheduler"
@@ -627,7 +629,7 @@ class TestSelectBackend:
     def test_unsupported_backend_raises_error(self, monkeypatch: pytest.MonkeyPatch):
         from claude_swap.service_backends import UnsupportedBackend, select_backend
 
-        monkeypatch.setattr(service.sys, "platform", "freebsd9")
+        monkeypatch.setattr(sys, "platform", "freebsd9")
         backend = select_backend()
         assert isinstance(backend, UnsupportedBackend)
         with pytest.raises(ClaudeSwitchError, match="not supported"):

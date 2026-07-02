@@ -292,8 +292,6 @@ class ClaudeAccountSwitcher:
 
     def _read_active_credentials(self) -> ActiveCredentials:
         """Read active credentials with Keychain availability classification."""
-        if "_read_credentials" in self.__dict__:
-            return ActiveCredentials(self._read_credentials(), False)
         return self._store._read_active_credentials()
 
     def _write_credentials(self, credentials: str, *, verify: bool = False) -> None:
