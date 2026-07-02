@@ -191,9 +191,7 @@ class TestCrossKindCollision:
     def test_oauth_rejected_when_email_is_api_key(self, temp_home: Path):
         s = _linux_switcher()
         s.add_account_from_token(API_KEY, email="dup@example.com")
-        with pytest.raises(
-            ValidationError, match="already exists as an API-key account"
-        ):
+        with pytest.raises(ValidationError, match="already exists as an API-key account"):
             s.add_account_from_token("sk-ant-oat01-abc", email="dup@example.com")
 
 
@@ -240,9 +238,7 @@ class TestWriteCredentialsLinux:
 
 
 class TestWriteCredentialsMacOS:
-    def test_activate_key_uses_keychain_not_config(
-        self, temp_home, block_real_keychain
-    ):
+    def test_activate_key_uses_keychain_not_config(self, temp_home, block_real_keychain):
         store = block_real_keychain
         s = _macos_switcher()
         acct = macos_keychain.keychain_account_name()
@@ -269,9 +265,7 @@ class TestWriteCredentialsMacOS:
         cfg = _read_global_config()
         assert API_KEY[-20:] in cfg["customApiKeyResponses"]["approved"]
 
-    def test_read_credentials_from_managed_keychain(
-        self, temp_home, block_real_keychain
-    ):
+    def test_read_credentials_from_managed_keychain(self, temp_home, block_real_keychain):
         store = block_real_keychain
         s = _macos_switcher()
         acct = macos_keychain.keychain_account_name()
@@ -552,9 +546,7 @@ class TestExportImport:
             dst = _linux_switcher()
             import_accounts(dst, str(out))
             assert dst._account_kind("1") == "api_key"
-            assert (
-                dst._read_account_credentials("1", "api-key-1@token.local") == API_KEY
-            )
+            assert dst._read_account_credentials("1", "api-key-1@token.local") == API_KEY
 
 
 def test_transfer_round_trips_api_key(temp_home: Path):

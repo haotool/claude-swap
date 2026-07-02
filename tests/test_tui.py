@@ -135,8 +135,7 @@ class TestSelectFrom:
         screen = stub_screen()
         screen.getch.side_effect = [tui.curses.KEY_UP, 10]
         result = tui._select_from(
-            screen,
-            "t",
+            screen, "t",
             items=[("a", "1"), ("b", "2"), ("c", "3")],
         )
         assert result == "3"  # wrapped to last
@@ -146,8 +145,7 @@ class TestSelectFrom:
         screen.getch.side_effect = [tui.curses.KEY_DOWN, 10]
         # second item has value=None — selecting it should return None
         result = tui._select_from(
-            screen,
-            "t",
+            screen, "t",
             items=[("real", "x"), ("-- Cancel --", None)],
         )
         assert result is None
@@ -203,13 +201,11 @@ class TestDoAdd:
         screen = stub_screen()
         # First menu: Enter on "From current Claude Code login" (idx 0)
         screen.getch.side_effect = [10]
-        with (
-            patch.object(switcher, "add_account") as mock_add,
-            patch("claude_swap.tui.curses.def_prog_mode"),
-            patch("claude_swap.tui.curses.endwin"),
-            patch("claude_swap.tui.curses.reset_prog_mode"),
-            patch("builtins.input", return_value=""),
-        ):
+        with patch.object(switcher, "add_account") as mock_add, \
+             patch("claude_swap.tui.curses.def_prog_mode"), \
+             patch("claude_swap.tui.curses.endwin"), \
+             patch("claude_swap.tui.curses.reset_prog_mode"), \
+             patch("builtins.input", return_value=""):
             tui._do_add(screen, switcher, has_token_flow=False)
         mock_add.assert_called_once_with()
 
@@ -241,13 +237,11 @@ class TestDoAdd:
         keys += [ord(c) for c in "tok"] + [10]  # token + Enter
         screen.getch.side_effect = keys
 
-        with (
-            patch("claude_swap.tui.curses.def_prog_mode"),
-            patch("claude_swap.tui.curses.endwin"),
-            patch("claude_swap.tui.curses.reset_prog_mode"),
-            patch("claude_swap.tui.curses.curs_set"),
-            patch("builtins.input", return_value=""),
-        ):
+        with patch("claude_swap.tui.curses.def_prog_mode"), \
+             patch("claude_swap.tui.curses.endwin"), \
+             patch("claude_swap.tui.curses.reset_prog_mode"), \
+             patch("claude_swap.tui.curses.curs_set"), \
+             patch("builtins.input", return_value=""):
             tui._do_add(screen, switcher, has_token_flow=True)
 
         switcher.add_account_from_token.assert_called_once_with(
@@ -274,10 +268,8 @@ class TestDoRemove:
         keys += [ord("n"), 10]  # confirm: "n"
         screen.getch.side_effect = keys
 
-        with (
-            patch.object(switcher, "remove_account") as mock_rm,
-            patch("claude_swap.tui.curses.curs_set"),
-        ):
+        with patch.object(switcher, "remove_account") as mock_rm, \
+             patch("claude_swap.tui.curses.curs_set"):
             tui._do_remove(screen, switcher)
 
         mock_rm.assert_not_called()
@@ -289,10 +281,8 @@ class TestDoRemove:
         screen = stub_screen()
         screen.getch.side_effect = [10, ord("y"), 10, ord("q")]
 
-        with (
-            patch.object(switcher, "remove_account") as mock_rm,
-            patch("claude_swap.tui.curses.curs_set"),
-        ):
+        with patch.object(switcher, "remove_account") as mock_rm, \
+             patch("claude_swap.tui.curses.curs_set"):
             tui._do_remove(screen, switcher)
 
         mock_rm.assert_called_once_with("3", assume_yes=True)
@@ -398,9 +388,7 @@ class TestCliIntegration:
             env.pop(_var, None)
         result = subprocess.run(
             [_sys.executable, "-m", "claude_swap", "--help"],
-            capture_output=True,
-            text=True,
-            env=env,
+            capture_output=True, text=True, env=env,
         )
         assert result.returncode == 0
         assert "--tui" in result.stdout
@@ -409,13 +397,11 @@ class TestCliIntegration:
         import sys as _sys
         from claude_swap import cli
 
-        with (
-            patch.object(_sys, "argv", ["claude-swap", "--tui"]),
-            patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls,
-            patch("claude_swap.tui.run", return_value=0) as mock_run,
-            patch("os.geteuid", return_value=1000),
-            patch("claude_swap.update_check.check_for_update", return_value=None),
-        ):
+        with patch.object(_sys, "argv", ["claude-swap", "--tui"]), \
+             patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch("claude_swap.tui.run", return_value=0) as mock_run, \
+             patch("os.geteuid", return_value=1000), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
             with pytest.raises(SystemExit) as exc:
                 cli.main()
             assert exc.value.code == 0
@@ -516,11 +502,8 @@ class TestPager:
     def test_scroll_down_then_quit_no_error(self):
         screen = stub_screen(rows=8, cols=40)
         screen.getch.side_effect = [
-            tui.curses.KEY_DOWN,
-            tui.curses.KEY_NPAGE,
-            tui.curses.KEY_END,
-            tui.curses.KEY_HOME,
-            ord("q"),
+            tui.curses.KEY_DOWN, tui.curses.KEY_NPAGE,
+            tui.curses.KEY_END, tui.curses.KEY_HOME, ord("q"),
         ]
         tui._pager(screen, "T", [f"row{i}" for i in range(100)])
 
@@ -585,7 +568,6 @@ class TestRunInline:
 
         def fn():
             from claude_swap import printer
-
             print(printer.accent("hello"))
             print("plain")
 
@@ -640,10 +622,8 @@ class TestWatch:
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         screen.getch.side_effect = [ord("q")]
-        with (
-            patch.object(switcher, "list_accounts") as mock_list,
-            patch("claude_swap.tui.time.monotonic", return_value=100.0),
-        ):
+        with patch.object(switcher, "list_accounts") as mock_list, \
+             patch("claude_swap.tui.time.monotonic", return_value=100.0):
             tui._watch_loop(screen, switcher, interval=5)
         mock_list.assert_called()
         screen.timeout.assert_any_call(250)
@@ -656,23 +636,19 @@ class TestWatch:
         # First loop refreshes (monotonic 100), then '+' (interval→6),
         # then 'q'. monotonic stays 100 so no second refresh.
         screen.getch.side_effect = [ord("+"), ord("q")]
-        with (
-            patch.object(switcher, "list_accounts") as mock_list,
-            patch("claude_swap.tui.time.monotonic", return_value=100.0),
-        ):
+        with patch.object(switcher, "list_accounts") as mock_list, \
+             patch("claude_swap.tui.time.monotonic", return_value=100.0):
             tui._watch_loop(screen, switcher, interval=5)
         assert mock_list.call_count == 1
 
 
 class TestInitColors:
     def test_initializes_pairs_when_color_supported(self):
-        with (
-            patch("claude_swap.tui.curses.has_colors", return_value=True),
-            patch("claude_swap.tui.curses.start_color"),
-            patch("claude_swap.tui.curses.use_default_colors"),
-            patch("claude_swap.tui.curses.init_pair") as mock_pair,
-            patch("claude_swap.tui.curses.COLORS", 256, create=True),
-        ):
+        with patch("claude_swap.tui.curses.has_colors", return_value=True), \
+             patch("claude_swap.tui.curses.start_color"), \
+             patch("claude_swap.tui.curses.use_default_colors"), \
+             patch("claude_swap.tui.curses.init_pair") as mock_pair, \
+             patch("claude_swap.tui.curses.COLORS", 256, create=True):
             tui._colors_initialized = False
             tui._init_colors()
         assert mock_pair.call_count == 4

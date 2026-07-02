@@ -69,7 +69,6 @@ class TestFormatReset:
 
     def test_same_day_shows_time_only(self):
         from datetime import timedelta
-
         fixed_now = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
         future = fixed_now + timedelta(hours=2, minutes=15)
         with patch("claude_swap.oauth.datetime") as mock_dt:
@@ -81,7 +80,6 @@ class TestFormatReset:
 
     def test_different_day_shows_date(self):
         from datetime import timedelta
-
         fixed_now = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
         future = fixed_now + timedelta(days=2)
         with patch("claude_swap.oauth.datetime") as mock_dt:
@@ -89,13 +87,11 @@ class TestFormatReset:
             mock_dt.now.return_value = fixed_now
             countdown, clock = oauth.format_reset(future.isoformat())
         import calendar
-
         months = list(calendar.month_abbr)[1:]
         assert any(m in clock for m in months)
 
     def test_minutes_only_when_under_one_hour(self):
         from datetime import timedelta
-
         fixed_now = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
         future = fixed_now + timedelta(minutes=45)
         with patch("claude_swap.oauth.datetime") as mock_dt:
@@ -159,7 +155,6 @@ class TestFetchUsage:
 
     def test_success(self):
         from datetime import timedelta
-
         fixed_now = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
         future = fixed_now + timedelta(hours=1)
         response_data = {
@@ -171,12 +166,8 @@ class TestFetchUsage:
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        with (
-            patch(
-                "claude_swap.oauth.urllib.request.urlopen", return_value=mock_response
-            ),
-            patch("claude_swap.oauth.datetime") as mock_dt,
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", return_value=mock_response), \
+             patch("claude_swap.oauth.datetime") as mock_dt:
             mock_dt.fromisoformat = datetime.fromisoformat
             mock_dt.now.return_value = fixed_now
             result = oauth.fetch_usage("sk-test-token")
@@ -188,15 +179,12 @@ class TestFetchUsage:
         assert result["five_hour"]["countdown"] == "1h 0m"
 
     def test_network_error(self):
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=Exception("timeout")
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=Exception("timeout")):
             result = oauth.fetch_usage("sk-test-token")
         assert result is None
 
     def test_http_error_logs_in_debug_mode(self, capsys):
         import logging
-
         logger = logging.getLogger("claude-swap")
         logger.setLevel(logging.DEBUG)
         handler = logging.StreamHandler()
@@ -210,9 +198,7 @@ class TestFetchUsage:
                 fp=None,
             )
 
-            with patch(
-                "claude_swap.oauth.urllib.request.urlopen", side_effect=http_error
-            ):
+            with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=http_error):
                 result = oauth.fetch_usage("sk-test-token")
 
             assert result is None
@@ -229,16 +215,13 @@ class TestFetchUsage:
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", return_value=mock_response
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", return_value=mock_response):
             result = oauth.fetch_usage("sk-test-token")
         assert result is None
 
     def test_null_resets_at(self):
         """When resets_at is null, still return pct without clock/countdown."""
         from datetime import timedelta
-
         fixed_now = datetime(2026, 3, 23, 12, 0, 0, tzinfo=timezone.utc)
         future = fixed_now + timedelta(hours=22)
         response_data = {
@@ -250,12 +233,8 @@ class TestFetchUsage:
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        with (
-            patch(
-                "claude_swap.oauth.urllib.request.urlopen", return_value=mock_response
-            ),
-            patch("claude_swap.oauth.datetime") as mock_dt,
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", return_value=mock_response), \
+             patch("claude_swap.oauth.datetime") as mock_dt:
             mock_dt.fromisoformat = datetime.fromisoformat
             mock_dt.now.return_value = fixed_now
             result = oauth.fetch_usage("sk-test-token")
@@ -274,26 +253,22 @@ class TestFetchUsage:
         mock_response.read.return_value = json.dumps(response_data).encode()
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", return_value=mock_response
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", return_value=mock_response):
             return oauth.fetch_usage("sk-test-token")
 
     def test_extra_usage_complete(self):
         """All extra_usage fields populated — spend, five_hour, and seven_day all present."""
-        result = self._fetch_with_response(
-            {
-                "five_hour": {"utilization": 22.0, "resets_at": None},
-                "seven_day": {"utilization": 61.0, "resets_at": None},
-                "extra_usage": {
-                    "is_enabled": True,
-                    "used_credits": 72900,
-                    "monthly_limit": 500000,
-                    "utilization": 14.58,
-                    "currency": "USD",
-                },
-            }
-        )
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": 22.0, "resets_at": None},
+            "seven_day": {"utilization": 61.0, "resets_at": None},
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": 72900,
+                "monthly_limit": 500000,
+                "utilization": 14.58,
+                "currency": "USD",
+            },
+        })
         assert result is not None
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
@@ -304,19 +279,17 @@ class TestFetchUsage:
 
     def test_extra_usage_unlimited_keeps_other_rows(self):
         """Unlimited (monthly_limit=None) drops the spend entry without losing five_hour/seven_day."""
-        result = self._fetch_with_response(
-            {
-                "five_hour": {"utilization": 22.0, "resets_at": None},
-                "seven_day": {"utilization": 61.0, "resets_at": None},
-                "extra_usage": {
-                    "is_enabled": True,
-                    "used_credits": 72900,
-                    "monthly_limit": None,
-                    "utilization": None,
-                    "currency": "USD",
-                },
-            }
-        )
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": 22.0, "resets_at": None},
+            "seven_day": {"utilization": 61.0, "resets_at": None},
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": 72900,
+                "monthly_limit": None,
+                "utilization": None,
+                "currency": "USD",
+            },
+        })
         assert result is not None
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
@@ -324,18 +297,16 @@ class TestFetchUsage:
 
     def test_extra_usage_partial_keeps_other_rows(self):
         """A null in used_credits leaves the rest of the response untouched."""
-        result = self._fetch_with_response(
-            {
-                "five_hour": {"utilization": 22.0, "resets_at": None},
-                "seven_day": {"utilization": 61.0, "resets_at": None},
-                "extra_usage": {
-                    "is_enabled": True,
-                    "used_credits": None,
-                    "monthly_limit": 500000,
-                    "utilization": 14.58,
-                },
-            }
-        )
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": 22.0, "resets_at": None},
+            "seven_day": {"utilization": 61.0, "resets_at": None},
+            "extra_usage": {
+                "is_enabled": True,
+                "used_credits": None,
+                "monthly_limit": 500000,
+                "utilization": 14.58,
+            },
+        })
         assert result is not None
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
@@ -343,18 +314,16 @@ class TestFetchUsage:
 
     def test_extra_usage_disabled_keeps_other_rows(self):
         """is_enabled=False suppresses spend even with valid numeric fields."""
-        result = self._fetch_with_response(
-            {
-                "five_hour": {"utilization": 22.0, "resets_at": None},
-                "seven_day": {"utilization": 61.0, "resets_at": None},
-                "extra_usage": {
-                    "is_enabled": False,
-                    "used_credits": 72900,
-                    "monthly_limit": 500000,
-                    "utilization": 14.58,
-                },
-            }
-        )
+        result = self._fetch_with_response({
+            "five_hour": {"utilization": 22.0, "resets_at": None},
+            "seven_day": {"utilization": 61.0, "resets_at": None},
+            "extra_usage": {
+                "is_enabled": False,
+                "used_credits": 72900,
+                "monthly_limit": 500000,
+                "utilization": 14.58,
+            },
+        })
         assert result is not None
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
@@ -412,27 +381,23 @@ class TestRefreshOAuthCredentials:
     def _make_credentials(scopes=None):
         if scopes is None:
             scopes = ["user:profile", "user:inference", "user:sessions:claude_code"]
-        return json.dumps(
-            {
-                "claudeAiOauth": {
-                    "accessToken": "old-access",
-                    "refreshToken": "old-refresh",
-                    "expiresAt": 0,
-                    "scopes": scopes,
-                }
+        return json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "old-access",
+                "refreshToken": "old-refresh",
+                "expiresAt": 0,
+                "scopes": scopes,
             }
-        )
+        })
 
     def test_refresh_sends_correct_body(self):
         seen_body = {}
         mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps(
-            {
-                "access_token": "new-access",
-                "refresh_token": "new-refresh",
-                "expires_in": 3600,
-            }
-        ).encode()
+        mock_response.read.return_value = json.dumps({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        }).encode()
         mock_response.__enter__ = lambda s: s
         mock_response.__exit__ = MagicMock(return_value=False)
 
@@ -440,9 +405,7 @@ class TestRefreshOAuthCredentials:
             seen_body.update(json.loads(req.data.decode()))
             return mock_response
 
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
             refreshed = oauth.refresh_oauth_credentials(self._make_credentials())
 
         assert refreshed is not None
@@ -457,18 +420,14 @@ class TestBuildTokenStatus:
 
     def test_builds_fresh_token_status(self):
         fixed_now = datetime(2026, 4, 2, 18, 0, 0, tzinfo=timezone.utc)
-        expires_at = int(
-            datetime(2026, 4, 2, 19, 30, 0, tzinfo=timezone.utc).timestamp() * 1000
-        )
-        credentials = json.dumps(
-            {
-                "claudeAiOauth": {
-                    "accessToken": "old-access",
-                    "refreshToken": "old-refresh",
-                    "expiresAt": expires_at,
-                }
+        expires_at = int(datetime(2026, 4, 2, 19, 30, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        credentials = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "old-access",
+                "refreshToken": "old-refresh",
+                "expiresAt": expires_at,
             }
-        )
+        })
 
         with patch("claude_swap.oauth.datetime") as mock_dt:
             mock_dt.fromisoformat = datetime.fromisoformat
@@ -481,14 +440,12 @@ class TestBuildTokenStatus:
         assert "in 1h 30m" in status
 
     def test_builds_unknown_expiry_status(self):
-        credentials = json.dumps(
-            {
-                "claudeAiOauth": {
-                    "accessToken": "old-access",
-                    "refreshToken": "old-refresh",
-                }
+        credentials = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "old-access",
+                "refreshToken": "old-refresh",
             }
-        )
+        })
 
         status = oauth.build_token_status(credentials)
 
@@ -499,54 +456,40 @@ class TestFetchUsageForAccount:
     """Test refresh-aware usage fetches for managed accounts."""
 
     @staticmethod
-    def _make_credentials(
-        access="old-access",
-        refresh="old-refresh",
-        expires_at=None,
-        org_uuid="org-1",
-        scopes=None,
-    ):
+    def _make_credentials(access="old-access", refresh="old-refresh",
+                          expires_at=None, org_uuid="org-1", scopes=None):
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         if scopes is None:
             scopes = ["user:profile", "user:inference", "user:sessions:claude_code"]
-        return json.dumps(
-            {
-                "claudeAiOauth": {
-                    "accessToken": access,
-                    "refreshToken": refresh,
-                    "expiresAt": expires_at
-                    if expires_at is not None
-                    else now_ms + 3_600_000,
-                    "scopes": scopes,
-                    "subscriptionType": "pro",
-                    "rateLimitTier": "default_claude_ai",
-                },
-                "organizationUuid": org_uuid,
-            }
-        )
+        return json.dumps({
+            "claudeAiOauth": {
+                "accessToken": access,
+                "refreshToken": refresh,
+                "expiresAt": expires_at if expires_at is not None else now_ms + 3_600_000,
+                "scopes": scopes,
+                "subscriptionType": "pro",
+                "rateLimitTier": "default_claude_ai",
+            },
+            "organizationUuid": org_uuid,
+        })
 
     @staticmethod
-    def _make_token_response(
-        access="new-access", refresh="new-refresh", expires_in=3600
-    ):
-        return json.dumps(
-            {
-                "access_token": access,
-                "refresh_token": refresh,
-                "expires_in": expires_in,
-                "scope": "user:profile user:inference user:sessions:claude_code",
-            }
-        ).encode()
+    def _make_token_response(access="new-access", refresh="new-refresh",
+                             expires_in=3600):
+        return json.dumps({
+            "access_token": access,
+            "refresh_token": refresh,
+            "expires_in": expires_in,
+            "scope": "user:profile user:inference user:sessions:claude_code",
+        }).encode()
 
     @staticmethod
     def _make_usage_response(h5_pct=12.0, d7_pct=34.0):
         resp = MagicMock()
-        resp.read.return_value = json.dumps(
-            {
-                "five_hour": {"utilization": h5_pct, "resets_at": None},
-                "seven_day": {"utilization": d7_pct, "resets_at": None},
-            }
-        ).encode()
+        resp.read.return_value = json.dumps({
+            "five_hour": {"utilization": h5_pct, "resets_at": None},
+            "seven_day": {"utilization": d7_pct, "resets_at": None},
+        }).encode()
         resp.__enter__ = lambda s: s
         resp.__exit__ = MagicMock(return_value=False)
         return resp
@@ -571,13 +514,9 @@ class TestFetchUsageForAccount:
                 return usage_resp
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
             result = oauth.fetch_usage_for_account(
-                "1",
-                "test@example.com",
-                credentials,
+                "1", "test@example.com", credentials,
                 is_active=False,
                 persist_credentials=persist_mock,
             )
@@ -613,23 +552,15 @@ class TestFetchUsageForAccount:
                 if usage_calls == 1:
                     assert req.get_header("Authorization") == "Bearer old-access"
                     raise urllib.error.HTTPError(
-                        req.full_url,
-                        401,
-                        "Unauthorized",
-                        hdrs=None,
-                        fp=None,
+                        req.full_url, 401, "Unauthorized", hdrs=None, fp=None,
                     )
                 assert req.get_header("Authorization") == "Bearer new-access"
                 return usage_resp
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
             result = oauth.fetch_usage_for_account(
-                "2",
-                "test@example.com",
-                credentials,
+                "2", "test@example.com", credentials,
                 is_active=False,
                 persist_credentials=persist_mock,
             )
@@ -653,14 +584,10 @@ class TestFetchUsageForAccount:
                 return usage_resp
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
-        with (
-            patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen),
-            patch("claude_swap.oauth.refresh_oauth_credentials") as refresh_mock,
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen), \
+             patch("claude_swap.oauth.refresh_oauth_credentials") as refresh_mock:
             result = oauth.fetch_usage_for_account(
-                "1",
-                "test@example.com",
-                credentials,
+                "1", "test@example.com", credentials,
                 is_active=False,
             )
 
@@ -676,29 +603,17 @@ class TestFetchUsageForAccount:
         def mock_urlopen(req, timeout=0):
             if "oauth/token" in req.full_url:
                 raise urllib.error.HTTPError(
-                    req.full_url,
-                    400,
-                    "Bad Request",
-                    hdrs=None,
-                    fp=None,
+                    req.full_url, 400, "Bad Request", hdrs=None, fp=None,
                 )
             if "oauth/usage" in req.full_url:
                 raise urllib.error.HTTPError(
-                    req.full_url,
-                    401,
-                    "Unauthorized",
-                    hdrs=None,
-                    fp=None,
+                    req.full_url, 401, "Unauthorized", hdrs=None, fp=None,
                 )
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
             result = oauth.fetch_usage_for_account(
-                "1",
-                "test@example.com",
-                credentials,
+                "1", "test@example.com", credentials,
                 is_active=False,
             )
 
@@ -733,13 +648,9 @@ class TestFetchUsageForAccount:
                 return usage_resp
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
             result = oauth.fetch_usage_for_account(
-                "1",
-                "test@example.com",
-                credentials,
+                "1", "test@example.com", credentials,
                 is_active=False,
                 persist_credentials=persist_mock,
             )
@@ -764,24 +675,18 @@ class TestFetchUsageForAccount:
             nonlocal refresh_calls
             if "oauth/token" in req.full_url:
                 refresh_calls += 1
-                raise AssertionError("Active account must not trigger a refresh POST")
+                raise AssertionError(
+                    "Active account must not trigger a refresh POST"
+                )
             if "oauth/usage" in req.full_url:
                 raise urllib.error.HTTPError(
-                    req.full_url,
-                    401,
-                    "Unauthorized",
-                    hdrs=None,
-                    fp=None,
+                    req.full_url, 401, "Unauthorized", hdrs=None, fp=None,
                 )
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
             result = oauth.fetch_usage_for_account(
-                "1",
-                "test@example.com",
-                credentials,
+                "1", "test@example.com", credentials,
                 is_active=True,
                 persist_credentials=persist_mock,
             )
@@ -802,22 +707,14 @@ class TestFetchUsageForAccount:
                 )
             if "oauth/usage" in req.full_url:
                 raise urllib.error.HTTPError(
-                    req.full_url,
-                    401,
-                    "Unauthorized",
-                    hdrs=None,
-                    fp=None,
+                    req.full_url, 401, "Unauthorized", hdrs=None, fp=None,
                 )
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
         persist_mock = MagicMock()
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen
-        ):
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
             result = oauth.fetch_usage_for_account(
-                "1",
-                "test@example.com",
-                credentials,
+                "1", "test@example.com", credentials,
                 is_active=True,
                 persist_credentials=persist_mock,
             )
@@ -879,8 +776,7 @@ class TestFetchUsageForAccount:
             oauth._persist(boom, "1", "test@example.com", "{}")
 
         warning_records = [
-            r
-            for r in caplog.records
+            r for r in caplog.records
             if r.levelno == logging.WARNING and r.name == "claude-swap"
         ]
         assert len(warning_records) == 1

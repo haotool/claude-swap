@@ -42,7 +42,9 @@ class TestGetClaudeConfigHome:
     def test_default_is_dot_claude_in_home(self, isolated_home: Path):
         assert get_claude_config_home() == isolated_home / ".claude"
 
-    def test_respects_env_var(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_respects_env_var(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         custom = tmp_path / "custom-claude"
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
         assert get_claude_config_home() == custom

@@ -30,14 +30,10 @@ def _make_pypi_response(version: str) -> MagicMock:
 def _write_cache(path, version, timestamp=None):
     """Write a cache file in the shared cache format."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "timestamp": timestamp if timestamp is not None else time.time(),
-                "data": version,
-            }
-        )
-    )
+    path.write_text(json.dumps({
+        "timestamp": timestamp if timestamp is not None else time.time(),
+        "data": version,
+    }))
 
 
 @pytest.fixture(autouse=True)
@@ -48,9 +44,7 @@ def _default_current_version(monkeypatch):
 class TestCheckForUpdate:
     @patch("claude_swap.update_check.urllib.request.urlopen")
     def test_newer_version_available(self, mock_urlopen, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            "claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json"
-        )
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
         mock_urlopen.return_value = _make_pypi_response("0.4.0")
 
         result = check_for_update("0.3.2")
@@ -90,22 +84,15 @@ class TestCheckForUpdate:
 
     @patch("claude_swap.update_check.urllib.request.urlopen")
     def test_already_on_latest(self, mock_urlopen, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            "claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json"
-        )
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
         mock_urlopen.return_value = _make_pypi_response("0.3.2")
 
         result = check_for_update("0.3.2")
 
         assert result is None
 
-    @patch(
-        "claude_swap.update_check.urllib.request.urlopen",
-        side_effect=OSError("network error"),
-    )
-    def test_network_error_returns_none_and_caches(
-        self, mock_urlopen, tmp_path, monkeypatch
-    ):
+    @patch("claude_swap.update_check.urllib.request.urlopen", side_effect=OSError("network error"))
+    def test_network_error_returns_none_and_caches(self, mock_urlopen, tmp_path, monkeypatch):
         cache_path = tmp_path / "cache.json"
         monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", cache_path)
 
@@ -198,8 +185,7 @@ class TestDetectInstallMethod:
         custom_root = tmp_path / "uv-tools"
         # Prefix lives somewhere else entirely — env var alone must not trigger.
         monkeypatch.setattr(
-            "claude_swap.update_check.sys.prefix",
-            str(tmp_path / "some-project" / ".venv"),
+            "claude_swap.update_check.sys.prefix", str(tmp_path / "some-project" / ".venv")
         )
         monkeypatch.setenv("UV_TOOL_DIR", str(custom_root))
         monkeypatch.delenv("PIPX_HOME", raising=False)
@@ -228,12 +214,8 @@ class TestCheckForUpdateMessage:
         self, mock_urlopen, tmp_path, monkeypatch
     ):
         # uv/pipx on macOS/Linux: cswap --upgrade actually upgrades, so advertise it.
-        monkeypatch.setattr(
-            "claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json"
-        )
-        monkeypatch.setattr(
-            "claude_swap.update_check._detect_install_method", lambda: "uv"
-        )
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        monkeypatch.setattr("claude_swap.update_check._detect_install_method", lambda: "uv")
         mock_urlopen.return_value = _make_pypi_response("0.4.0")
 
         result = check_for_update("0.3.2")
@@ -248,12 +230,8 @@ class TestCheckForUpdateMessage:
         self, mock_urlopen, tmp_path, monkeypatch
     ):
         # Windows: cswap --upgrade only prints, so point at the real command.
-        monkeypatch.setattr(
-            "claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json"
-        )
-        monkeypatch.setattr(
-            "claude_swap.update_check._detect_install_method", lambda: "pipx"
-        )
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        monkeypatch.setattr("claude_swap.update_check._detect_install_method", lambda: "pipx")
         mock_urlopen.return_value = _make_pypi_response("0.4.0")
 
         result = check_for_update("0.3.2")
@@ -267,12 +245,8 @@ class TestCheckForUpdateMessage:
         self, mock_urlopen, tmp_path, monkeypatch
     ):
         # Unknown install method: cswap --upgrade can only show instructions.
-        monkeypatch.setattr(
-            "claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json"
-        )
-        monkeypatch.setattr(
-            "claude_swap.update_check._detect_install_method", lambda: None
-        )
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        monkeypatch.setattr("claude_swap.update_check._detect_install_method", lambda: None)
         mock_urlopen.return_value = _make_pypi_response("0.4.0")
 
         result = check_for_update("0.3.2")
@@ -338,7 +312,9 @@ class TestRunSelfUpgrade:
         assert "pipx upgrade claude-swap" in err
         assert "pip install --upgrade claude-swap" in err
 
-    @patch("claude_swap.update_check.subprocess.run", side_effect=FileNotFoundError)
+    @patch(
+        "claude_swap.update_check.subprocess.run", side_effect=FileNotFoundError
+    )
     @patch("claude_swap.update_check._detect_install_method", return_value="uv")
     def test_filenotfound_returns_1(self, mock_detect, mock_run, capsys):
         assert run_self_upgrade() == 1
