@@ -116,6 +116,17 @@ def _build_task_xml(switcher: ServiceHost) -> str:
 
     triggers = ET.SubElement(root, f"{{{_TASK_NS}}}Triggers")
     logon = ET.SubElement(triggers, f"{{{_TASK_NS}}}LogonTrigger")
+    # Task Scheduler has no supervisor semantics for exit codes: once the
+    # process launched successfully, any exit status (including the monitor's
+    # retryable 75) counts as success and RestartOnFailure never fires — it
+    # only covers actions that failed to start at all. The standard watchdog
+    # pattern is a repeating trigger: re-fire every five minutes with no end,
+    # and let MultipleInstancesPolicy=IgnoreNew drop the re-fire while a
+    # monitor instance is still alive. Net effect: a dead monitor is back
+    # within five minutes; a healthy one is never disturbed.
+    repetition = ET.SubElement(logon, f"{{{_TASK_NS}}}Repetition")
+    ET.SubElement(repetition, f"{{{_TASK_NS}}}Interval").text = "PT5M"
+    ET.SubElement(repetition, f"{{{_TASK_NS}}}StopAtDurationEnd").text = "false"
     ET.SubElement(logon, f"{{{_TASK_NS}}}Enabled").text = "true"
 
     principals = ET.SubElement(root, f"{{{_TASK_NS}}}Principals")
@@ -141,6 +152,9 @@ def _build_task_xml(switcher: ServiceHost) -> str:
     ET.SubElement(settings, f"{{{_TASK_NS}}}ExecutionTimeLimit").text = "PT0S"
     ET.SubElement(settings, f"{{{_TASK_NS}}}DisallowStartIfOnBatteries").text = "false"
     ET.SubElement(settings, f"{{{_TASK_NS}}}StopIfGoingOnBatteries").text = "false"
+    # RestartOnFailure only covers launch failures (bad credentials, ACLs);
+    # it does NOT react to exit codes, so it is not the exit-75 retry path —
+    # the repeating logon trigger above is. Kept for the launch-failure case.
     restart = ET.SubElement(settings, f"{{{_TASK_NS}}}RestartOnFailure")
     ET.SubElement(restart, f"{{{_TASK_NS}}}Interval").text = "PT1M"
     ET.SubElement(restart, f"{{{_TASK_NS}}}Count").text = "3"

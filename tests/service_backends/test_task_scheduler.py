@@ -88,6 +88,19 @@ class TestBuildTaskXml:
         assert "<Command>C:\\venv\\Scripts\\pythonw.exe</Command>" in xml
         assert "<Arguments>-m claude_swap --monitor</Arguments>" in xml
 
+    def test_logon_trigger_repeats_as_watchdog(self, temp_home: Path):
+        # Task Scheduler's RestartOnFailure ignores exit codes (it only fires
+        # when the action fails to launch), so exit 75 alone would never be
+        # retried. The repeating trigger re-launches the task periodically and
+        # MultipleInstancesPolicy=IgnoreNew de-duplicates while it is alive.
+        switcher = ClaudeAccountSwitcher()
+        xml = ts_backend._build_task_xml(switcher)
+        assert "<Repetition>" in xml
+        assert "<Interval>PT5M</Interval>" in xml
+        assert "<StopAtDurationEnd>false</StopAtDurationEnd>" in xml
+        # The repetition must live inside the trigger, not a Settings block.
+        assert xml.index("<Repetition>") < xml.index("</LogonTrigger>")
+
     def test_long_running_monitor_settings(self, temp_home: Path):
         # Schema defaults would kill the resident monitor: ExecutionTimeLimit
         # defaults to PT72H, and both battery settings default to true.
