@@ -20,7 +20,6 @@ from claude_swap.models import (
     SwitchPreconditions,
 )
 from claude_swap.credentials import ActiveCredentials
-from claude_swap.oauth import UsageFetchError
 
 ServiceState = Literal["not installed", "installed but not loaded", "loaded"]
 
@@ -180,12 +179,16 @@ class SwitchCliHost(Protocol):
         to_ref: dict[str, Any] | None = None,
         warnings: list[str] | None = None,
     ) -> dict[str, Any]: ...
-    def add_account(self, slot: int | None = None) -> None: ...
-    def _get_sequence_data(self) -> dict[str, Any] | None: ...
+    def _switch_unmanaged_notice(self, current_email: str) -> None: ...
     def _select_best_switchable(
         self, current_num: str | None,
     ) -> tuple[str | None, str]: ...
-    def _usage_by_account(
+    def _switch_manual_rotation_target(
         self,
-    ) -> dict[str, dict[str, Any] | str | UsageFetchError | None]: ...
-    def _account_is_switchable(self, account_num: str) -> bool: ...
+        sequence: list[Any],
+        anchor: str | int | None,
+        *,
+        quiet: bool,
+        skip_exhausted: bool = False,
+        warnings: list[str] | None = None,
+    ) -> tuple[str | None, bool]: ...

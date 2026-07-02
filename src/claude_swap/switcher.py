@@ -38,6 +38,7 @@ from claude_swap.json_output import (
 )
 from claude_swap.usage_policy import (
     binding_pct as max_usage_pct,
+    headroom,
     pick_best_from_snapshots,
     plan_automated_switch,
 )
@@ -103,6 +104,12 @@ KEYRING_SERVICE = "claude-code"
 # Setup-tokens are inference-only server-side; wider scopes trigger 403s
 # on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
 SETUP_TOKEN_SCOPES = ("user:inference",)
+
+# Shared by the interactive switch() path and the JSON/strategy CLI path so the
+# single-account no-op reads the same everywhere.
+_ONLY_ONE_ACCOUNT_MSG = (
+    "Only one account is managed. Add more accounts to switch between."
+)
 
 # Auto-switch (Beta) threshold default lives in ``sequence_store`` (SSOT) and is
 # re-exported above so ``from claude_swap.switcher import
@@ -1712,39 +1719,71 @@ class ClaudeAccountSwitcher:
         # here rather than silently falling through to "stay put".
         assert_never(plan.outcome)
 
+    def _switch_unmanaged_notice(self, current_email: str) -> None:
+        """Adopt the unmanaged active login and ask the user to re-run the switch."""
+        print(f"{accent('Notice:')} Active account '{current_email}' was not managed.")
+        self.add_account()
+        data = self._get_sequence_data() or {}
+        account_num = data.get("activeAccountNumber")
+        print(f"It has been automatically added as Account-{account_num}.")
+        print(dimmed("Please run the switch command again to switch to the next account."))
+
     def _switch_manual_rotation_target(
         self,
-        sequence: list[int],
-        active_account: str | int | None,
+        sequence: list[Any],
+        anchor: str | int | None,
         *,
         quiet: bool,
-    ) -> str | None:
-        """Return the next switchable slot in rotation order."""
+        skip_exhausted: bool = False,
+        warnings: list[str] | None = None,
+    ) -> tuple[str | None, bool]:
+        """Return the next switchable slot in rotation order.
+
+        The one sequence walk both switch entry points share: start after
+        *anchor*, skip slots without stored credentials/config, and — with
+        *skip_exhausted* — also skip slots at their 5h/7d limit. Skip notices
+        go to *warnings* when given (the JSON path), else the logger when
+        *quiet*, else stdout. Returns ``(target, hit_limit)`` where
+        *hit_limit* records whether any candidate was passed over at its
+        limit, so callers can tell "everything is rate-limited" apart from
+        "nothing is switchable".
+        """
         current_index = 0
-        if active_account is not None:
+        if anchor is not None:
             try:
-                current_index = sequence.index(int(active_account))
+                current_index = sequence.index(int(anchor))
             except (ValueError, TypeError):
                 current_index = 0
 
+        usage = self._usage_by_account() if skip_exhausted else {}
+
+        def skip_notice(candidate: str, short: str, long: str) -> None:
+            if warnings is not None:
+                warnings.append(f"Skipped Account-{candidate} ({short})")
+            elif quiet:
+                self._logger.info("Skipping Account-%s (%s)", candidate, long)
+            else:
+                print(f"{accent('Skipping')} Account-{candidate} ({long})")
+
+        hit_limit = False
         for offset in range(1, len(sequence)):
             candidate = str(sequence[(current_index + offset) % len(sequence)])
-            if self._account_is_switchable(candidate):
-                return candidate
-            if quiet:
-                self._logger.info(
-                    "Skipping Account-%s (no stored credentials/config, "
-                    "re-add with cswap --add-account --slot %s)",
+            if not self._account_is_switchable(candidate):
+                skip_notice(
                     candidate,
-                    candidate,
+                    "no stored credentials/config",
+                    f"no stored credentials/config, re-add with "
+                    f"cswap --add-account --slot {candidate}",
                 )
-            else:
-                print(
-                    f"{accent('Skipping')} Account-{candidate} "
-                    f"(no stored credentials/config, re-add with "
-                    f"cswap --add-account --slot {candidate})"
-                )
-        return None
+                continue
+            if skip_exhausted:
+                room = headroom(usage.get(candidate))
+                if room is not None and room <= 0:
+                    hit_limit = True
+                    skip_notice(candidate, "at 5h/7d limit", "at 5h/7d limit")
+                    continue
+            return candidate, hit_limit
+        return None, hit_limit
 
     def switch_to(
             self, identifier: str, json_output: bool = False
@@ -2102,22 +2141,16 @@ class ClaudeAccountSwitcher:
 
         # Check if current account is managed
         if preconditions.kind == SwitchPreconditionKind.UNMANAGED:
-            print(f"{accent('Notice:')} Active account '{current_email}' was not managed.")
-            self.add_account()
-            data = self._get_sequence_data() or {}
-            account_num = data.get("activeAccountNumber")
-            print(f"It has been automatically added as Account-{account_num}.")
-            print(dimmed("Please run the switch command again to switch to the next account."))
+            self._switch_unmanaged_notice(current_email)
             return False
 
         data = preconditions.data or {}
         sequence = preconditions.sequence or []
 
         if preconditions.kind == SwitchPreconditionKind.SINGLE_ACCOUNT:
-            msg = "Only one account is managed. Add more accounts to switch between."
             if quiet:
-                raise SwitchError(msg)
-            print(dimmed(msg))
+                raise SwitchError(_ONLY_ONE_ACCOUNT_MSG)
+            print(dimmed(_ONLY_ONE_ACCOUNT_MSG))
             return False
 
         active_account = (
@@ -2133,7 +2166,7 @@ class ClaudeAccountSwitcher:
             if next_account is None:
                 return False
         else:
-            next_account = self._switch_manual_rotation_target(
+            next_account, _ = self._switch_manual_rotation_target(
                 sequence, active_account, quiet=quiet,
             )
 

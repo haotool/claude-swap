@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
-from claude_swap import oauth
 from claude_swap.json_output import account_ref
 from claude_swap.models import CliSwitchIntent, SwitchPreconditionKind, SwitchPreconditions
 from claude_swap.printer import accent, dimmed, warning
+from claude_swap.switcher import _ONLY_ONE_ACCOUNT_MSG
 
 if TYPE_CHECKING:
     from claude_swap.protocols import SwitchCliHost
@@ -190,13 +190,7 @@ class SwitchCliDispatcher:
                     to_ref=ref,
                     message="Active account is not managed; run cswap --add-account",
                 )
-            print(f"{accent('Notice:')} Active account '{current_email}' was not managed.")
-            s.add_account()
-            data = s._get_sequence_data()
-            assert data is not None
-            account_num = data.get("activeAccountNumber")
-            print(f"It has been automatically added as Account-{account_num}.")
-            print(dimmed("Please run the switch command again to switch to the next account."))
+            s._switch_unmanaged_notice(current_email)
             return True, None
 
         if preconditions.kind == SwitchPreconditionKind.SINGLE_ACCOUNT:
@@ -208,9 +202,9 @@ class SwitchCliDispatcher:
                     strategy=strategy_label,
                     reason="only-one-account",
                     to_ref=account_ref(int(num), current_email) if num else None,
-                    message="Only one account is managed. Add more accounts to switch between.",
+                    message=_ONLY_ONE_ACCOUNT_MSG,
                 )
-            print(dimmed("Only one account is managed. Add more accounts to switch between."))
+            print(dimmed(_ONLY_ONE_ACCOUNT_MSG))
             return True, None
 
         return False, None
@@ -335,49 +329,15 @@ class SwitchCliDispatcher:
         """Find the next rotation target and perform the switch."""
         s = self._switcher
         anchor = current_num if strategy == "next-available" else active_account
-        try:
-            current_index = sequence.index(int(cast(Any, anchor)))
-        except (TypeError, ValueError):
-            try:
-                current_index = sequence.index(active_account)
-            except (TypeError, ValueError):
-                current_index = 0
+        next_account, hit_limit = s._switch_manual_rotation_target(
+            sequence,
+            cast("str | int | None", anchor),
+            quiet=False,
+            skip_exhausted=strategy == "next-available",
+            warnings=warnings if json_output else None,
+        )
 
-        usage = s._usage_by_account() if strategy == "next-available" else {}
-
-        next_account: str | None = None
-        skipped_exhausted: list[str] = []
-        for offset in range(1, len(sequence)):
-            candidate = str(sequence[(current_index + offset) % len(sequence)])
-            if not s._account_is_switchable(candidate):
-                if json_output:
-                    warnings.append(
-                        f"Skipped Account-{candidate} (no stored credentials/config)"
-                    )
-                else:
-                    print(
-                        f"{accent('Skipping')} Account-{candidate} "
-                        f"(no stored credentials/config, re-add with "
-                        f"cswap --add-account --slot {candidate})"
-                    )
-                continue
-            if strategy == "next-available":
-                headroom = oauth.account_headroom(
-                    cast("dict[str, Any] | None", usage.get(candidate)),
-                )
-                if headroom is not None and headroom <= 0:
-                    skipped_exhausted.append(candidate)
-                    if json_output:
-                        warnings.append(
-                            f"Skipped Account-{candidate} (at 5h/7d limit)"
-                        )
-                    else:
-                        print(f"{accent('Skipping')} Account-{candidate} (at 5h/7d limit)")
-                    continue
-            next_account = candidate
-            break
-
-        if next_account is None and skipped_exhausted:
+        if next_account is None and hit_limit:
             if json_output:
                 return s._switch_noop(
                     strategy=strategy_label, reason="candidates-exhausted",
