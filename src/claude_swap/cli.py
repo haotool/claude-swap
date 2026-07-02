@@ -47,6 +47,7 @@ Examples:
   cswap run 2
   cswap run user@example.com
   cswap run 2 --no-share
+  cswap run 2 --share-history
   cswap run 2 -- --resume
         """,
     )
@@ -62,6 +63,18 @@ Examples:
             "Don't share settings/keybindings/CLAUDE.md/skills/commands/agents "
             "from ~/.claude into the session profile (and remove previously "
             "shared items)"
+        ),
+    )
+    parser.add_argument(
+        "--share-history",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Share conversation history (projects/ and history.jsonl) from "
+            "~/.claude into the session profile, so every account sees one "
+            "unified history. History the profile already accumulated is "
+            "merged into ~/.claude first. --no-share-history restores "
+            "per-account history (the default). Not supported on Windows."
         ),
     )
     parser.add_argument(
@@ -81,7 +94,12 @@ Examples:
 
         from claude_swap.session import SessionManager
 
-        SessionManager(switcher).run(args.account, tail, share=not args.no_share)
+        SessionManager(switcher).run(
+            args.account,
+            tail,
+            share=not args.no_share,
+            share_history=args.share_history,
+        )
     except ClaudeSwitchError as e:
         error(f"Error: {e}")
         sys.exit(1)
