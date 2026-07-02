@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from claude_swap import oauth
-from claude_swap.json_output import USAGE_API_KEY
+from claude_swap.credentials import ActiveCredentials
+from claude_swap.json_output import USAGE_API_KEY, USAGE_KEYCHAIN_UNAVAILABLE
 from claude_swap.models import Platform
 from claude_swap.switcher import ClaudeAccountSwitcher
 
@@ -1490,6 +1491,51 @@ class TestUsageCacheFreshness:
             s._refresh_switchable_usage_cache()
 
         assert s._trusted_usage_snapshots() == {}
+
+
+class TestListReporterKeychainFlag:
+    """The keychain-unavailable flag must survive across facade calls (PR#77).
+
+    ``_usage_by_account`` builds accounts info through one facade call and
+    resolves usages through another; both must observe the same reporter
+    state, or a locked Keychain shows the active account as "no credentials".
+    """
+
+    def test_usage_by_account_reports_keychain_unavailable(self, temp_home: Path):
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        data = {
+            "accounts": {
+                "1": {"email": "a1@example.com"},
+                "2": {"email": "a2@example.com"},
+            },
+            "sequence": [1, 2],
+            "activeAccountNumber": 1,
+        }
+        s._write_json(s.sequence_file, data)
+        (temp_home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "oauthAccount": {
+                        "emailAddress": "a1@example.com",
+                        "accountUuid": "u1",
+                    }
+                }
+            )
+        )
+
+        with patch.object(
+            s,
+            "_read_active_credentials",
+            return_value=ActiveCredentials(None, True),
+        ):
+            usage = s._usage_by_account()
+
+        assert usage["1"] == USAGE_KEYCHAIN_UNAVAILABLE
+
+    def test_list_reporter_instance_is_reused(self, temp_home: Path):
+        s = ClaudeAccountSwitcher()
+        assert s._list_reporter() is s._list_reporter()
 
 
 class TestRefreshGateResolvedSlots:

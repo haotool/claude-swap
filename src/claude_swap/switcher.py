@@ -166,6 +166,8 @@ class ClaudeAccountSwitcher:
         # Credential storage layer. Reads platform / credentials_dir / _logger off
         # this switcher at call time via the _StoreHost Protocol.
         self._store = CredentialStore(self)
+        # List/status renderer, created lazily by _list_reporter().
+        self._reporter: ListReporter | None = None
         # OAuth credential-freshness: verify/refresh/sync of backup tokens.
         self._refresher = CredentialRefresher(self)
         # Typed owner of sequence.json. Lock-agnostic: this switcher wraps
@@ -1454,8 +1456,21 @@ class ClaudeAccountSwitcher:
         print(f"{accent('Removed')} Account-{account_num} ({email})")
 
     def _list_reporter(self) -> ListReporter:
-        from claude_swap.list_reporter import ListReporter
-        return ListReporter(self)
+        """Lazy singleton so per-run reporter state survives across facades.
+
+        ``_usage_by_account`` builds accounts info through one facade call and
+        resolves usages through another; the reporter's
+        ``_active_keychain_unavailable`` flag set by the first must still be
+        visible to the second, or a locked Keychain shows the active account
+        as "no credentials" (the misread upstream PR#77 fixed). Reuse is
+        thread-safe because the flag is only written by the main thread in
+        ``build_accounts_info``, before ``resolve_usages`` starts its thread
+        pool — keep that ordering invariant.
+        """
+        if self._reporter is None:
+            from claude_swap.list_reporter import ListReporter
+            self._reporter = ListReporter(self)
+        return self._reporter
 
     def _fetch_account_usage(
         self, account_info: tuple[int, str, str, str, bool, str],
