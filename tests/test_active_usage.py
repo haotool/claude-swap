@@ -1336,7 +1336,46 @@ class TestUsageCacheFreshness:
         stale = dict(fresh)
         stale["1"] = {**fresh["1"], "_cached_at": now - 9999}
         assert s._usage_cache_fresh(stale, {"1", "2"}) is False
-        assert s._usage_cache_fresh(fresh, {"1"}) is False
+        # A missing row still distrusts the cache...
+        assert s._usage_cache_fresh({"1": fresh["1"]}, {"1", "2"}) is False
+
+    def test_usage_cache_fresh_ignores_orphan_rows(self, temp_home: Path):
+        """R2 minor: a leftover row of a removed slot must not permanently
+        defeat the TTL cache for the accounts that remain."""
+        from claude_swap.usage_cache import _usage_to_cache
+
+        s = ClaudeAccountSwitcher()
+        cached = {
+            "1": _usage_to_cache({"five_hour": {"pct": 10}}),
+            "2": _usage_to_cache({"five_hour": {"pct": 20}}),  # removed slot
+        }
+        assert s._usage_cache_fresh(cached, {"1"}) is True
+
+    def test_merge_usage_cache_reclaims_removed_slot_rows(self, temp_home: Path):
+        """R2 minor: the merge point sweeps rows of unmanaged slots so
+        usage.json cannot grow monotonically after account removals."""
+        from claude_swap.cache import read_cache_data
+
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        s._write_json(
+            s.sequence_file,
+            {
+                "accounts": {"1": {"email": "a1@example.com"}},
+                "sequence": [1],
+                "activeAccountNumber": 1,
+            },
+        )
+        s._merge_usage_cache(
+            {
+                "1": {"five_hour": {"pct": 10}},
+                "2": {"five_hour": {"pct": 20}},  # in-flight fetch, kept
+            }
+        )
+        s._merge_usage_cache({"1": {"five_hour": {"pct": 11}}})
+
+        merged = read_cache_data(s.usage_cache_path, default={})
+        assert set(merged) == {"1"}
 
     def test_legacy_entry_without_cached_at_is_untrusted(
         self,

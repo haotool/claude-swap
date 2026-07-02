@@ -470,8 +470,14 @@ class ClaudeAccountSwitcher:
         cached: dict[str, Any],
         account_keys: set[str],
     ) -> bool:
-        """True when every account row is within the shared per-slot TTL."""
-        if not isinstance(cached, dict) or set(cached.keys()) != account_keys:
+        """True when every account row is within the shared per-slot TTL.
+
+        Subset check on purpose: rows of since-removed slots may linger in the
+        cache until the next merge sweeps them (``_merge_usage_cache``), and an
+        orphan row must not mark the whole cache stale — that would defeat the
+        TTL for every remaining slot on every list/status until the sweep.
+        """
+        if not isinstance(cached, dict) or not account_keys <= set(cached):
             return False
         now = time.time()
         for key in account_keys:
@@ -521,13 +527,27 @@ class ClaudeAccountSwitcher:
         return snapshots
 
     def _merge_usage_cache(self, updates: dict[str, object]) -> None:
-        """Merge per-slot fetch results into usage.json under the file lock."""
+        """Merge per-slot fetch results into usage.json under the file lock.
+
+        Also reclaims rows of slots that are no longer managed:
+        ``remove_account`` never rewrites the cache, so orphaned rows would
+        otherwise accumulate forever (the file only ever grows) and shadow a
+        re-added slot number with another account's stale usage.
+        """
         if not updates:
             return
         with FileLock(self.lock_file):
             existing = read_cache_data(self.usage_cache_path, default={})
             if not isinstance(existing, dict):
                 existing = {}
+            data = self._get_sequence_data()
+            if data is not None:
+                managed = {str(num) for num in data.get("accounts", {})}
+                existing = {
+                    key: row
+                    for key, row in existing.items()
+                    if key in managed or key in updates
+                }
             for key, current in updates.items():
                 _persist_usage_cache_entry(
                     existing, key, current, existing.get(key),
