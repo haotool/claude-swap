@@ -10,7 +10,7 @@ This repo is a **fork of [realiti4/claude-swap](https://github.com/realiti4/clau
 
 ## Versioning and PyPI
 
-This fork uses a **PEP 440 local version** in `pyproject.toml` (e.g. `0.15.0b2+haotool.1`). The `+haotool.*` suffix is the local version label defined by [PEP 440](https://peps.python.org/pep-0440/#local-version-identifiers).
+This fork uses a **PEP 440 local version** in `pyproject.toml` (e.g. `0.15.1+haotool.1`). The `+haotool.*` suffix is the local version label defined by [PEP 440](https://peps.python.org/pep-0440/#local-version-identifiers).
 
 - **Single source of truth:** `[project].version` in `pyproject.toml` only. Do not duplicate the version string elsewhere.
 - **Not on PyPI:** local versions are rejected by PyPI upload tooling; install this fork from git or an editable/source install (see README).
@@ -88,7 +88,7 @@ This fork does not reformat files that also exist upstream (no `ruff format` gat
 uv run mypy
 ```
 
-Configuration lives in `pyproject.toml` under `[tool.mypy]`. A baseline `ignore_errors` override covers modules with legacy typing debt; tighten overrides as files are cleaned up ([mypy: existing code](https://mypy.readthedocs.io/en/stable/existing_code.html)).
+Configuration lives in `pyproject.toml` under `[tool.mypy]`. The whole package is checked in strict mode — new code must pass `mypy --strict` with no per-module carve-outs.
 
 ## Pull request contract
 

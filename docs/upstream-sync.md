@@ -4,7 +4,7 @@ Short reference for regenerating `publish/clean` from [realiti4/claude-swap](htt
 
 ## When to run
 
-After merging upstream changes or when preparing a clean publish branch from integration work (e.g. `improve/p1-clean-code-convergence`).
+After merging upstream changes or when preparing a clean publish branch from integration work (e.g. `converge/095-final`).
 
 ## Steps
 
@@ -14,7 +14,7 @@ git fetch upstream
 # (kept in the maintainer's working repo — NOT shipped in this tree): back up
 # the branch, replay the fork's logical commit groups on top of upstream/main,
 # verify each commit is green and the final tree matches the backup, then
-# force-with-lease push. defaults: SOURCE=improve/p1-clean-code-convergence  TARGET=publish/clean
+# force-with-lease push. SOURCE=<integration branch, e.g. converge/095-final>  TARGET=publish/clean
 ```
 
 Review the log:

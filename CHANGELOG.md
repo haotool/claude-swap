@@ -2,7 +2,7 @@
 
 All notable user-facing changes to claude-swap are documented here.
 
-Release version is defined in `pyproject.toml` (currently `0.15.0b2+haotool.1`).
+Release version is defined in `pyproject.toml` (currently `0.15.1+haotool.1`).
 
 ## [Unreleased]
 
