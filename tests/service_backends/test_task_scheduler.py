@@ -462,11 +462,6 @@ class TestRunGuards:
         with pytest.raises(ClaudeSwitchError, match="timed out"):
             ts_backend._powershell("Get-ScheduledTask")
 
-    def test_describe_and_label(self):
-        backend = ts_backend.TaskSchedulerBackend()
-        assert backend.platform_label == "task_scheduler"
-        assert "Task Scheduler" in backend.describe()
-
 
 class TestInstalledVersion:
     def test_reads_version_from_registration_info(
@@ -510,4 +505,3 @@ class TestSelectBackendWindows:
         monkeypatch.setattr(sys, "platform", "win32")
         backend = select_backend()
         assert isinstance(backend, TaskSchedulerBackend)
-        assert backend.platform_label == "task_scheduler"

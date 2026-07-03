@@ -94,13 +94,6 @@ def _installed_version() -> str | None:
 class LaunchdBackend:
     """macOS LaunchAgent supervisor implementing ``ServiceBackend``."""
 
-    @property
-    def platform_label(self) -> str:
-        return "launchd"
-
-    def describe(self) -> str:
-        return "macOS LaunchAgent (launchd)"
-
     def install(self, switcher: ServiceHost) -> int:
         plist_path = _plist_path()
         plist_path.parent.mkdir(parents=True, exist_ok=True)

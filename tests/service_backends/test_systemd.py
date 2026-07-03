@@ -450,7 +450,6 @@ class TestSelectBackendLinux:
         monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
         backend = select_backend()
         assert isinstance(backend, SystemdBackend)
-        assert backend.platform_label == "systemd"
 
 
 class TestStatus:
@@ -646,11 +645,6 @@ class TestLogs:
 
 
 class TestHelpers:
-    def test_describe_and_label(self):
-        backend = systemd_backend.SystemdBackend()
-        assert backend.platform_label == "systemd"
-        assert "systemd" in backend.describe()
-
     def test_run_timeout_raises_actionable_error(
         self, monkeypatch: pytest.MonkeyPatch
     ):

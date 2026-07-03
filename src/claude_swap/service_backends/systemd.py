@@ -139,36 +139,12 @@ def _unescape_env_value(value: str) -> str:
     return "".join(out)
 
 
-def _run(
-    argv: list[str],
-    *,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    try:
-        proc: subprocess.CompletedProcess[str] = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=service_spec.SUBPROCESS_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        raise ClaudeSwitchError(
-            f"{' '.join(argv)} timed out after {service_spec.SUBPROCESS_TIMEOUT}s"
-        )
-    if check and proc.returncode != 0:
-        raise ClaudeSwitchError(
-            f"{' '.join(argv)} failed (rc={proc.returncode}): "
-            f"{proc.stderr.strip()}"
-        )
-    return proc
-
-
 def _systemctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return _run([_SYSTEMCTL, "--user", *args], check=check)
+    return service_spec.run_service_command([_SYSTEMCTL, "--user", *args], check=check)
 
 
 def _loginctl(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
-    return _run([_LOGinctl, *args], check=check)
+    return service_spec.run_service_command([_LOGinctl, *args], check=check)
 
 
 def _installed_version() -> str | None:
@@ -224,13 +200,6 @@ def _print_wsl_guidance() -> None:
 
 class SystemdBackend:
     """Linux/WSL systemd --user supervisor implementing ``ServiceBackend``."""
-
-    @property
-    def platform_label(self) -> str:
-        return "systemd"
-
-    def describe(self) -> str:
-        return "Linux/WSL systemd user unit"
 
     def install(self, switcher: ServiceHost) -> int:
         _require_systemd()
@@ -324,7 +293,7 @@ class SystemdBackend:
         if proc.returncode != 0 and "could not be found" in proc.stderr.lower():
             print(f"  {dimmed('(unit not loaded yet)')}")
             return 0
-        journal = _run(
+        journal = service_spec.run_service_command(
             [
                 "journalctl",
                 "--user",

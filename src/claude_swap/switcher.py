@@ -673,12 +673,6 @@ class ClaudeAccountSwitcher:
         decision: AutoSwitchDecisionContext,
     ) -> SwitchPlanResult:
         """Return the automated target-planning outcome for a poll-cycle decision."""
-        return self._plan_automated_switch(decision)
-
-    def _plan_automated_switch(
-        self,
-        decision: AutoSwitchDecisionContext,
-    ) -> SwitchPlanResult:
         return plan_automated_switch(
             decision,
             lambda threshold, snapshots, exclude: self._pick_best_from_snapshots(
@@ -1690,7 +1684,7 @@ class ClaudeAccountSwitcher:
         quiet: bool,
     ) -> str | None:
         """Return the automated target slot, or ``None`` when staying put."""
-        plan = self._plan_automated_switch(decision)
+        plan = self.plan_automated_switch(decision)
         if plan.outcome == "chosen":
             self._logger.info(
                 "switch: %s (active=%s threshold=%s)",

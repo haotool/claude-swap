@@ -819,7 +819,7 @@ class TestPickBestSwitchTarget:
             encoding="utf-8",
         )
         decision = s.build_auto_switch_decision(95, 99.0)
-        plan = s._plan_automated_switch(decision)
+        plan = s.plan_automated_switch(decision)
         assert plan.outcome == "no_trusted_signal"
 
     def test_automated_plan_uses_live_active_slot(self, temp_home: Path):
@@ -845,7 +845,7 @@ class TestPickBestSwitchTarget:
         ):
             decision = s.build_auto_switch_decision(95, 96.0)
             assert decision.live_active_slot == "3"
-            plan = s._plan_automated_switch(decision)
+            plan = s.plan_automated_switch(decision)
         assert plan.outcome == "chosen"
         assert plan.target == "2"
 
@@ -892,7 +892,7 @@ class TestPickBestSwitchTarget:
             ),
         ):
             decision = s.build_auto_switch_decision(95, 100.0)
-            plan = s._plan_automated_switch(decision)
+            plan = s.plan_automated_switch(decision)
         assert plan.outcome == "already_optimal", (
             "must not oscillate when target resets < 300s sooner"
         )
@@ -935,7 +935,7 @@ class TestPickBestSwitchTarget:
             ),
         ):
             decision = s.build_auto_switch_decision(95, 100.0)
-            plan = s._plan_automated_switch(decision)
+            plan = s.plan_automated_switch(decision)
         assert plan.outcome == "chosen"
         assert plan.target == "2"
 

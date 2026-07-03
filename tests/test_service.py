@@ -461,8 +461,6 @@ class TestPlatformGuard:
         from claude_swap.service_backends import UnsupportedBackend
 
         backend = UnsupportedBackend()
-        assert backend.platform_label == "unsupported"
-        assert "unsupported" in backend.describe()
         switcher = ClaudeAccountSwitcher()
         for call in (
             lambda: backend.install(switcher),
@@ -476,11 +474,6 @@ class TestPlatformGuard:
 
 
 class TestLaunchdBackendEdges:
-    def test_describe_and_label(self):
-        backend = launchd.LaunchdBackend()
-        assert backend.platform_label == "launchd"
-        assert "launchd" in backend.describe()
-
     def test_launchctl_timeout_raises_actionable_error(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -679,7 +672,6 @@ class TestSelectBackend:
         _force_darwin(monkeypatch)
         backend = select_backend()
         assert isinstance(backend, LaunchdBackend)
-        assert backend.platform_label == "launchd"
 
     def test_linux_selects_systemd_backend(self, monkeypatch: pytest.MonkeyPatch):
         from claude_swap.service_backends import select_backend
@@ -689,7 +681,6 @@ class TestSelectBackend:
         monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
         backend = select_backend()
         assert isinstance(backend, SystemdBackend)
-        assert backend.platform_label == "systemd"
 
     def test_windows_selects_task_scheduler_backend(
         self, monkeypatch: pytest.MonkeyPatch
@@ -700,7 +691,6 @@ class TestSelectBackend:
         monkeypatch.setattr(sys, "platform", "win32")
         backend = select_backend()
         assert isinstance(backend, TaskSchedulerBackend)
-        assert backend.platform_label == "task_scheduler"
 
     def test_unsupported_backend_raises_error(self, monkeypatch: pytest.MonkeyPatch):
         from claude_swap.service_backends import UnsupportedBackend, select_backend

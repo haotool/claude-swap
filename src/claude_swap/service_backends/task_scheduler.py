@@ -59,32 +59,8 @@ def _require_windows() -> None:
         )
 
 
-def _run(
-    argv: list[str],
-    *,
-    check: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    try:
-        proc: subprocess.CompletedProcess[str] = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=service_spec.SUBPROCESS_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        raise ClaudeSwitchError(
-            f"{' '.join(argv)} timed out after {service_spec.SUBPROCESS_TIMEOUT}s"
-        )
-    if check and proc.returncode != 0:
-        raise ClaudeSwitchError(
-            f"{' '.join(argv)} failed (rc={proc.returncode}): "
-            f"{proc.stderr.strip() or proc.stdout.strip()}"
-        )
-    return proc
-
-
 def _powershell(script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return _run(
+    return service_spec.run_service_command(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
         check=check,
     )
@@ -233,13 +209,6 @@ def _query_task_state() -> tuple[bool, str]:
 
 class TaskSchedulerBackend:
     """Windows Task Scheduler supervisor implementing ``ServiceBackend``."""
-
-    @property
-    def platform_label(self) -> str:
-        return "task_scheduler"
-
-    def describe(self) -> str:
-        return "Windows Task Scheduler (per-user AtLogOn)"
 
     def install(self, switcher: ServiceHost) -> int:
         _require_windows()

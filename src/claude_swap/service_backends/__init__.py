@@ -16,13 +16,6 @@ _UNSUPPORTED_MSG = (
 class UnsupportedBackend:
     """Placeholder backend for platforms without a supervisor implementation."""
 
-    @property
-    def platform_label(self) -> str:
-        return "unsupported"
-
-    def describe(self) -> str:
-        return "unsupported on this platform"
-
     def _require_supported(self) -> None:
         raise ClaudeSwitchError(_UNSUPPORTED_MSG)
 

@@ -780,13 +780,12 @@ class TestMonitorEngine:
         def perform(decision: AutoSwitchDecisionContext) -> bool:
             return switcher.switch(BackgroundAutoSwitchIntent(decision=decision))
 
-        # Count at the private chokepoint: switch() plans through
-        # _plan_automated_switch directly, the monitor through the public
-        # plan_automated_switch which delegates to it.
+        # Count at the single chokepoint: both switch() and the monitor plan
+        # through plan_automated_switch.
         with (
             patch.object(
                 switcher,
-                "_plan_automated_switch",
+                "plan_automated_switch",
                 return_value=SwitchPlanResult(outcome="already_optimal"),
             ) as plan,
             patch.object(

@@ -1690,7 +1690,7 @@ class TestUsageCacheFreshness:
             patch.object(s, "_refresh_switchable_usage_cache") as mock_refresh,
         ):
             decision = s.build_auto_switch_decision(95, 96.0)
-            plan = s._plan_automated_switch(decision)
+            plan = s.plan_automated_switch(decision)
 
         mock_refresh.assert_called_once()
         assert plan.outcome == "chosen"

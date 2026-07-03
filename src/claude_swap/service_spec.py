@@ -8,10 +8,12 @@ messaging helpers. Platform-specific plist/unit/task wiring lives in backends.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 from claude_swap import __version__
+from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.models import is_wsl as is_wsl  # SSOT in models; re-export for backends
 from claude_swap.printer import accent, bolded, dimmed, muted, warning
 from claude_swap.protocols import ServiceHost
@@ -37,6 +39,36 @@ SERVICE_ID = "cswap-monitor"
 # ``sys.executable`` and launchd supplies a safe default PATH, so snapshotting
 # the install-time shell PATH only risks persisting a poisoned entry.
 _FORWARDED_ENV_KEYS = ("HOME", "USER", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME")
+
+
+def run_service_command(
+    argv: list[str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run a service-manager command bounded by ``SUBPROCESS_TIMEOUT``.
+
+    Timeouts and (with ``check``) non-zero exits surface as
+    ``ClaudeSwitchError``. The failure detail prefers stderr but falls back to
+    stdout because some managers (PowerShell cmdlets) report errors there.
+    """
+    try:
+        proc: subprocess.CompletedProcess[str] = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise ClaudeSwitchError(
+            f"{' '.join(argv)} timed out after {SUBPROCESS_TIMEOUT}s"
+        )
+    if check and proc.returncode != 0:
+        raise ClaudeSwitchError(
+            f"{' '.join(argv)} failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    return proc
 
 
 def log_dir(switcher: ServiceHost) -> Path:
