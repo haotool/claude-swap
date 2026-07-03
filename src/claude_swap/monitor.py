@@ -1,13 +1,16 @@
 """Auto-switch monitor for claude-swap.
 
 Owns the adaptive polling loop that watches the active account's usage and
-triggers background switches when a configured threshold is crossed. Split out
-so ``monitor_step`` serves the foreground ``--monitor`` command, the TUI, and
-the launchd service from one decision engine.
+triggers background switches when the configured threshold is crossed. Split
+out so ``monitor_step`` serves the foreground ``--monitor`` command, the TUI,
+and the background service from one decision engine: one poll cycle in, one
+render-neutral ``MonitorStepResult`` out — the engine never sleeps and never
+prints; adapters own the loop, the sleep, and the rendering.
 
 Depends on ``MonitorHost`` for reads and planning but never owns credential
-storage or switch orchestration — callers supply ``perform_switch`` to wire the
-actual ``switch(BackgroundAutoSwitchIntent(...))`` call.
+storage or switch orchestration — callers supply ``perform_switch`` to wire
+the actual ``switch(BackgroundAutoSwitchIntent(...))`` call. A PID file under
+``backup_dir`` keeps the monitor single-instance across CLI, TUI, and service.
 """
 
 from __future__ import annotations
@@ -30,6 +33,10 @@ from claude_swap.protocols import MonitorHost
 from claude_swap.service_spec import SERVICE_MONITOR_ENV_KEY
 
 PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
+
+# EX_TEMPFAIL: a supervised monitor that finds another instance's live PID
+# file exits with this so its supervisor retries instead of recording a
+# clean exit.
 MONITOR_ALREADY_RUNNING_RETRY_EXIT = 75
 
 MonitorStepKind = Literal[
@@ -59,8 +66,12 @@ MONITOR_FAILURE_BACKOFF_BASE = MONITOR_POLL_SECONDS_MIN
 # monitor into a pathologically long sleep.
 MONITOR_RETRY_AFTER_CAP = 300
 
-# Idle heartbeat and sleep/wake baseline reset.
+# After an hour of continuous idle (no live Claude Code sessions) log one
+# warning per hour — prolonged silence can also mean the session-detection
+# signal broke under a claude-code update.
 MONITOR_IDLE_HEARTBEAT_SECONDS = 3600
+# A wall-clock jump past this multiple of the poll ceiling means the machine
+# slept; velocity baselines from before the sleep are reset.
 MONITOR_WAKE_GAP_MULTIPLIER = 4
 
 

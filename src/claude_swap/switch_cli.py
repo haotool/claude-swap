@@ -1,7 +1,11 @@
-"""CLI-strategy switch dispatch for ``ClaudeAccountSwitcher``.
+"""CLI dispatch for ``cswap --switch`` and its strategy flags.
 
-Adapts ``--switch`` / ``--json`` entry points to the switcher's domain methods
-without duplicating switch logic.
+The adapter between the CLI surface (``--switch``, ``--strategy``,
+``--json``) and the switcher's domain methods, reached through the narrow
+``SwitchCliHost`` view. No switch logic lives here — precondition
+classification, target selection, and the switch transaction stay in
+``switcher``; this module owns each outcome's presentation: an interactive
+print, or a structured no-op/result payload when ``--json`` is on.
 """
 
 from __future__ import annotations

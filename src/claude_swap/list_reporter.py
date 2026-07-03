@@ -1,7 +1,14 @@
-"""Read-only account LIST/STATUS reporting for ``ClaudeAccountSwitcher``.
+"""Account list/status reporting for claude-swap.
 
-Renders managed-account rows, usage, health, and running-instance blocks without
-touching switch-transaction state.
+Renders the ``--list`` / ``--status`` views behind the narrow ``ListHost``
+view — it never imports ``switcher``. "Read-only" means switch state:
+listing never changes which account is active, but it is where opportunistic
+credential maintenance happens (live-rotation sync-back, inactive-token
+refresh, parked-rotation recovery), because a usage fetch can consume a
+single-use refresh token (claude-code#24317). Usage resolution is cache-first
+through the shared per-slot cache (``usage_cache``): a fully fresh cache
+renders without any network; otherwise slots are fetched in parallel and
+merged back, so the monitor plans from the same view this list rendered.
 """
 
 from __future__ import annotations
@@ -753,6 +760,8 @@ class ListReporter:
             self._logger.debug(
                 "Failed to detect running Claude instances", exc_info=True,
             )
+            # Fail closed: an undetectable owner means the live store may be
+            # in use — never consume its single-use refresh token on a guess.
             return True
 
     def _log_usage_fetch_error(

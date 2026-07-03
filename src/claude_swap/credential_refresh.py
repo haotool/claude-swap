@@ -31,6 +31,9 @@ from claude_swap.locking import FileLock
 from claude_swap.models import get_timestamp
 from claude_swap.protocols import RefreshHost
 
+# Bounded retry for backup write verification; enough attempts to tell a
+# write that never takes from a live credential Claude Code keeps rotating
+# under us (see ``write_verified_live`` for the two drift modes).
 _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS = 3
 _BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS = 0.5
 
@@ -294,7 +297,12 @@ class CredentialRefresher:
         email: str,
         credentials: str,
     ) -> None:
-        """Best-effort sync for live credentials Claude Code may have refreshed."""
+        """Best-effort sync for live credentials Claude Code may have refreshed.
+
+        Runs under the file lock and skips when the backup already holds a
+        token at least as new; never raises — a failed sync logs a warning
+        and leaves the backup untouched.
+        """
         oauth_data = oauth.extract_oauth_data(credentials)
         if (
             not oauth_data

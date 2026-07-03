@@ -1,4 +1,11 @@
-"""Platform-native service supervisor backends."""
+"""Platform-native service supervisor backends.
+
+One ``ServiceBackend`` implementation per platform — launchd (macOS),
+systemd --user (Linux/WSL), Task Scheduler (Windows) — selected by
+``select_backend()`` and imported lazily so only the chosen platform's
+module ever loads. Platforms without an implementation get
+``UnsupportedBackend``, which raises the same guidance on every call.
+"""
 
 from __future__ import annotations
 

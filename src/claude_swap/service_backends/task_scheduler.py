@@ -1,4 +1,13 @@
-"""Windows Task Scheduler backend for the auto-switch monitor."""
+"""Windows Task Scheduler backend for the auto-switch monitor.
+
+The odd one out among the backends: Task Scheduler has no real supervisor
+semantics, so the task XML approximates them — the monitor's exit-75 retry
+rides a repeating logon trigger plus ``MultipleInstancesPolicy=IgnoreNew``,
+and the version stamp lives in ``RegistrationInfo/Version`` because the
+schema has no per-task environment variables. ``pythonw.exe`` keeps the
+hidden task from flashing a console window; the persisted XML under the
+log dir doubles as the version-drift record.
+"""
 
 from __future__ import annotations
 

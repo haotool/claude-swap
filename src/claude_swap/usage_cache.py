@@ -15,6 +15,8 @@ from typing import Any
 
 from claude_swap import oauth
 
+# Per-slot freshness window (seconds): how long a stamped usage row counts
+# as trusted for display reuse and switch planning.
 _USAGE_CACHE_TTL = 15
 
 
@@ -58,6 +60,13 @@ def _merge_usage_with_previous(
     current: object,
     previous: object,
 ) -> tuple[object, oauth.UsageFetchError | None]:
+    """Prefer a prior real usage row over a failed fetch.
+
+    Returns ``(display, note)``: when the fetch produced ``None`` or an error
+    but the cache holds a usage dict (however stale — no TTL check here),
+    keep showing it and surface the error as ``note``; stale numbers with a
+    caveat beat a bare "unavailable". Otherwise the fetch result stands.
+    """
     previous = _usage_from_cache(previous)
     if (current is None or isinstance(current, oauth.UsageFetchError)) and _is_usage_dict(previous):
         return previous, current if isinstance(current, oauth.UsageFetchError) else None

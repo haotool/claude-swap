@@ -1,4 +1,13 @@
-"""macOS launchd backend for the auto-switch monitor."""
+"""macOS launchd backend for the auto-switch monitor.
+
+Manages a per-user LaunchAgent (``~/Library/LaunchAgents``) through
+``launchctl`` in the ``gui/<uid>`` domain. Install is an idempotent
+replace — rewrite the plist, boot the old instance out, bootstrap again —
+so re-running ``cswap service install`` is also the upgrade path after a
+cswap update. The plist is written 0o600 through an ``O_EXCL | O_NOFOLLOW``
+temp file so a pre-planted file or symlink at the predictable temp path
+cannot redirect the write.
+"""
 
 from __future__ import annotations
 

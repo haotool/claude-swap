@@ -1,4 +1,13 @@
-"""Linux/WSL systemd --user backend for the auto-switch monitor."""
+"""Linux/WSL systemd --user backend for the auto-switch monitor.
+
+Manages a per-user unit under ``$XDG_CONFIG_HOME/systemd/user`` through
+``systemctl --user``. Preflight is deliberately strict because the failure
+modes are confusing at a distance: PID 1 must be systemd (WSL2 needs it
+enabled in ``/etc/wsl.conf``) and the per-user manager must be reachable in
+this session. Install also enables linger so the monitor survives logout,
+and on WSL prints the Task Scheduler keepalive guidance (see
+``_WSL_KEEPALIVE_EXEC``).
+"""
 
 from __future__ import annotations
 

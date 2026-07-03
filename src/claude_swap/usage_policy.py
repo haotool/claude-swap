@@ -1,4 +1,12 @@
-"""Single source of truth for usage window parsing and slot ranking."""
+"""Usage-window parsing and switch-target ranking for claude-swap.
+
+Single source of truth for every "which account should we be on?" decision —
+the manual ``--strategy best`` switch and the automated planner behind the
+monitor both route through here, so the two ranking modes (stay-biased
+``headroom_best``, always-ranking ``cooldown_aware``) differ on purpose
+rather than by accident. No I/O of its own and no ``switcher`` import;
+callers inject the sequence data and switchability checks they own.
+"""
 
 from __future__ import annotations
 
@@ -10,12 +18,21 @@ from typing import Any, Literal
 
 from claude_swap.models import AutoSwitchDecisionContext, SwitchPlanResult
 
+# Score buckets for cooldown-aware ranking. The numeric order is the
+# preference order — scores are compared as plain tuples, so unsaturated
+# slots always beat saturated ones, and slots with no usable usage sort last.
 SLOT_SCORE_BUCKET_UNSATURATED = 0
 SLOT_SCORE_BUCKET_SATURATED = 1
 SLOT_SCORE_BUCKET_UNKNOWN = 2
 
+# When every candidate is saturated, switching accounts only pays off if the
+# target's window resets meaningfully sooner than the active one — inside
+# this margin the planner stays put rather than churn credentials for a few
+# minutes of head start.
 SATURATED_SWITCH_MARGIN_S = 300
 
+# The two windows that actually gate requests. ``spend`` (pay-as-you-go
+# extra-usage credits) is a separate axis and deliberately ignored here.
 _RATE_LIMIT_KEYS = ("five_hour", "seven_day")
 
 
@@ -34,13 +51,21 @@ def usage_pcts(usage: object) -> list[float]:
 
 
 def binding_pct(usage: object) -> float | None:
-    """Highest 5h/7d utilization percentage, or None when unavailable."""
+    """Utilization of the binding window — the higher of 5h/7d — or ``None``.
+
+    Whichever window is closer to its limit gates the next request, so it is
+    the only percentage worth comparing across slots.
+    """
     pcts = usage_pcts(usage)
     return max(pcts) if pcts else None
 
 
 def headroom(usage: object) -> float | None:
-    """Remaining percentage before the binding rate-limit window hits 100%."""
+    """Remaining percentage before the binding rate-limit window hits 100%.
+
+    ``<= 0`` means the account is at or over a limit; ``None`` means usage
+    is unavailable — unknown, not zero.
+    """
     bp = binding_pct(usage)
     if bp is None:
         return None
@@ -48,7 +73,14 @@ def headroom(usage: object) -> float | None:
 
 
 def cooldown_score(usage: object, threshold: int) -> tuple[int, float]:
-    """Score a slot for cooldown-aware switch target selection."""
+    """Score a slot for cooldown-aware target selection; lower sorts better.
+
+    Returns a ``(bucket, tiebreak)`` tuple. Unsaturated slots (binding pct
+    below ``threshold``) rank first, tie-broken by that pct; saturated slots
+    rank by the soonest reset timestamp among their saturated windows, with
+    unparseable or missing resets pushed to ``inf`` — a slot we know nothing
+    about must never look more attractive than one with a known reset.
+    """
     if not isinstance(usage, dict):
         return (SLOT_SCORE_BUCKET_UNKNOWN, math.inf)
 
@@ -101,7 +133,15 @@ def rank_slots(
     candidates: list[str] | None = None,
     is_switchable: Callable[[str], bool] | None = None,
 ) -> RankSlotsResult:
-    """Pick a switch target from per-slot usage, by the given ranking mode."""
+    """Pick a switch target from per-slot usage, by the given ranking mode.
+
+    ``headroom_best`` compares ``candidates`` against ``current`` and only
+    names a target it can prove strictly better — the ``note`` explains a
+    ``None`` target (see ``_select_best_switchable`` in ``switcher`` for the
+    full vocabulary). ``cooldown_aware`` ranks ``candidates`` (minus
+    ``exclude`` and anything not ``is_switchable``) by ``cooldown_score``
+    and returns ``None`` only when nothing has usable usage.
+    """
     if mode == "headroom_best":
         return _rank_headroom_best(
             usages,
@@ -184,7 +224,13 @@ def pick_best_from_snapshots(
     *,
     exclude: str | None = None,
 ) -> str | None:
-    """Score switchable slots from trusted usage snapshots only."""
+    """Cooldown-aware pick over trusted usage snapshots.
+
+    ``snapshots`` must contain only trusted (within-TTL) rows — slots absent
+    from it score as unknown and are never chosen on stale data. Returns the
+    winning slot number, or ``None`` when the sequence is empty or no
+    candidate has usable usage.
+    """
     data = get_sequence_data() or {}
     sequence = data.get("sequence", [])
     if not sequence:
@@ -205,7 +251,16 @@ def plan_automated_switch(
     decision: AutoSwitchDecisionContext,
     pick_best: Callable[[int, dict[str, object], str | None], str | None],
 ) -> SwitchPlanResult:
-    """Choose an automated switch target from a trusted decision snapshot."""
+    """Choose an automated switch target from a trusted decision snapshot.
+
+    Plans purely from the ``decision`` context rather than re-reading the
+    cache, so a concurrent cache write cannot change the plan mid-cycle.
+    Three outcomes: ``no_trusted_signal`` when no candidate has trusted
+    usage — the automated paths must refuse to move blind; ``already_optimal``
+    when the best pick *is* the active slot, or when both are saturated and
+    the pick resets at most ``SATURATED_SWITCH_MARGIN_S`` sooner (not worth
+    the churn); ``chosen`` otherwise, with the target slot.
+    """
     active = decision.live_active_slot or decision.sequence_active_slot
     best = pick_best(decision.threshold, decision.usage_by_slot, None)
 
