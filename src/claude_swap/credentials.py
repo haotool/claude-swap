@@ -114,6 +114,18 @@ def approved_form(api_key: str) -> str:
     return api_key.strip()[-20:]
 
 
+def pending_rotation_path(
+    credentials_dir: Path, account_num: str, email: str
+) -> Path:
+    """Slot-tagged parking file for a rotated-but-unpersisted OAuth credential.
+
+    Named alongside the slot's backup ``.enc`` so both share the backup
+    directory's lifecycle; the park/recover machinery lives in
+    ``credential_refresh``.
+    """
+    return credentials_dir / f".creds-{account_num}-{email}.pending.json"
+
+
 class _StoreHost(Protocol):
     """The live configuration view ``CredentialStore`` reads from its owner.
 
@@ -796,5 +808,15 @@ class CredentialStore:
                     enc_file.unlink()
             except Exception as e:
                 self._host._logger.warning(f"Failed to delete credentials file: {e}")
+            # A parked rotation holds a working credential — it must not
+            # outlive the slot it belongs to.
+            try:
+                pending_rotation_path(
+                    self._host.credentials_dir, num, email
+                ).unlink(missing_ok=True)
+            except Exception as e:
+                self._host._logger.warning(
+                    f"Failed to delete pending rotation file: {e}"
+                )
             if self._host.platform == Platform.MACOS:
                 self._delete_backup_keychain_quiet(num, email)

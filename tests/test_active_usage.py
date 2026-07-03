@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from claude_swap import oauth
-from claude_swap.credentials import ActiveCredentials
+from claude_swap.credentials import ActiveCredentials, pending_rotation_path
 from claude_swap.json_output import USAGE_API_KEY, USAGE_KEYCHAIN_UNAVAILABLE
 from claude_swap.list_reporter import ListReporter
 from claude_swap.locking import FileLock
@@ -833,7 +833,7 @@ class TestRotatedTokenPersistContention:
         stored = switcher._read_account_credentials("2", "account2@example.com")
         assert json.loads(stored)["claudeAiOauth"]["refreshToken"] == "rt-rotated"
 
-    def test_persist_timeout_logs_error_with_recovery_hint(
+    def test_persist_timeout_parks_the_rotation_instead_of_dropping_it(
         self,
         temp_home: Path,
         mock_claude_config: Path,
@@ -842,11 +842,54 @@ class TestRotatedTokenPersistContention:
         capsys,
         monkeypatch,
     ):
-        """A wedged lock holder must surface an error-level record naming the
-        slot and the re-add recovery, not a silent warning-level drop."""
+        """A wedged lock holder must not cost the rotation: it is parked on
+        disk for the next locked pass, and no failure is reported."""
         switcher, expired = self._seed(temp_home, sample_sequence_data)
         monkeypatch.setattr(
             "claude_swap.list_reporter._ROTATED_PERSIST_LOCK_TIMEOUT", 0.2
+        )
+        blocker = FileLock(switcher.lock_file)
+        assert blocker.acquire()
+        try:
+            with caplog.at_level(logging.WARNING, logger="claude-swap"):
+                self._fetch_inactive_row(switcher, expired)
+        finally:
+            blocker.release()
+
+        pending = pending_rotation_path(
+            switcher.credentials_dir, "2", "account2@example.com"
+        )
+        assert pending.exists()
+        payload = json.loads(pending.read_text())
+        assert payload["credentials"] == self._ROTATED
+        assert payload["replaces"] == ["rt-old"]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "Parked rotated OAuth token for account 2" in r.getMessage()
+            for r in warnings
+        ), [r.getMessage() for r in warnings]
+        # Nothing was lost, so oauth's persist wrapper prints no failure.
+        assert "failed to save refreshed token" not in capsys.readouterr().out
+
+    def test_persist_timeout_with_failed_park_logs_error_with_recovery_hint(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        caplog,
+        capsys,
+        monkeypatch,
+    ):
+        """Only when parking itself fails is the token truly lost — that must
+        surface as an error-level record naming the slot and the re-add
+        recovery, plus the user-facing warning."""
+        switcher, expired = self._seed(temp_home, sample_sequence_data)
+        monkeypatch.setattr(
+            "claude_swap.list_reporter._ROTATED_PERSIST_LOCK_TIMEOUT", 0.2
+        )
+        monkeypatch.setattr(
+            "claude_swap.list_reporter.park_rotated_credential",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
         )
         blocker = FileLock(switcher.lock_file)
         assert blocker.acquire()

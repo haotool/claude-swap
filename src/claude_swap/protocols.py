@@ -64,6 +64,7 @@ class RefreshHost(Protocol):
     """Switch surface ``CredentialRefresher`` uses for OAuth read/write paths."""
 
     lock_file: Path
+    credentials_dir: Path
     _logger: logging.Logger
 
     def _read_credentials(self) -> str | None: ...
@@ -112,6 +113,7 @@ class ListHost(Protocol):
 
     sequence_file: Path
     lock_file: Path
+    credentials_dir: Path
     _logger: logging.Logger
 
     @property

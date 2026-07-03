@@ -13,19 +13,161 @@ for credential primitives (``_read_credentials``, ``_read_account_credentials``,
 
 from __future__ import annotations
 
+import json
+import os
+import sys
+import tempfile
 import time
+from pathlib import Path
 
 from claude_swap import oauth
+from claude_swap.credentials import pending_rotation_path
 from claude_swap.exceptions import (
     CredentialReadError,
     CredentialWriteError,
     SwitchError,
 )
 from claude_swap.locking import FileLock
+from claude_swap.models import get_timestamp
 from claude_swap.protocols import RefreshHost
 
 _BACKUP_CREDENTIAL_VERIFY_ATTEMPTS = 3
 _BACKUP_CREDENTIAL_VERIFY_DELAY_SECONDS = 0.5
+
+# How long an opportunistic pending-rotation recovery may wait for the file
+# lock. Recovery is retried by every later locked pass over the slot, so a
+# short bounded wait beats stalling a whole `--list` behind a busy lock.
+_PENDING_RECOVERY_LOCK_TIMEOUT = 5.0
+
+
+def park_rotated_credential(
+    credentials_dir: Path,
+    account_num: str,
+    email: str,
+    credentials: str,
+    replaces: list[str],
+) -> Path:
+    """Atomically park a rotated credential that could not be persisted.
+
+    Anthropic refresh tokens are single-use (claude-code#24317): once a
+    network refresh has rotated one, dropping the result forfeits the slot's
+    only working credential. When the persist cannot take the file lock, the
+    rotation is written here instead and applied by the next locked pass over
+    the slot (``recover_pending_rotation``).
+
+    ``replaces`` records the refresh tokens this rotation superseded so
+    recovery can tell a still-relevant rotation from one that a later
+    re-login or import made moot. The file is owner-only from creation
+    (mkstemp) — it holds a working OAuth credential.
+    """
+    credentials_dir.mkdir(parents=True, exist_ok=True)
+    path = pending_rotation_path(credentials_dir, account_num, email)
+    payload = json.dumps(
+        {
+            "account": account_num,
+            "email": email,
+            "credentials": credentials,
+            "replaces": replaces,
+            "parkedAt": get_timestamp(),
+        },
+        indent=2,
+    )
+    fd, tmp = tempfile.mkstemp(
+        dir=str(credentials_dir), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp, path)
+        if sys.platform != "win32":
+            os.chmod(path, 0o600)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def recover_pending_rotation(
+    host: RefreshHost,
+    account_num: str,
+    email: str,
+    *,
+    assume_locked: bool = False,
+) -> str | None:
+    """Apply a parked rotation to the slot's backup, if one is waiting.
+
+    Returns the recovered credential string when the pending rotation was
+    applied, ``None`` when there was nothing to do (no pending file, the lock
+    was busy, or the rotation was made moot by a newer login). The pending
+    file is consumed on apply and discarded when moot, so a stale park can
+    never shadow a re-login.
+
+    Callers already holding ``FileLock(host.lock_file)`` must pass
+    ``assume_locked=True`` (``FileLock`` is not re-entrant).
+    """
+    path = pending_rotation_path(host.credentials_dir, account_num, email)
+    if not path.exists():
+        return None
+    if assume_locked:
+        return _recover_pending_rotation_body(host, account_num, email, path)
+    lock = FileLock(host.lock_file)
+    if not lock.acquire(timeout=_PENDING_RECOVERY_LOCK_TIMEOUT):
+        # The park file is durable; the next locked pass retries.
+        return None
+    try:
+        return _recover_pending_rotation_body(host, account_num, email, path)
+    finally:
+        lock.release()
+
+
+def _recover_pending_rotation_body(
+    host: RefreshHost, account_num: str, email: str, path: Path
+) -> str | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        credentials = payload["credentials"]
+        replaces = payload.get("replaces") or []
+        if not isinstance(credentials, str) or not isinstance(replaces, list):
+            raise ValueError("malformed pending rotation payload")
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        host._logger.warning(
+            "Discarding unreadable pending credential rotation for account %s (%s).",
+            account_num, email, exc_info=True,
+        )
+        path.unlink(missing_ok=True)
+        return None
+
+    pending_oauth = oauth.extract_oauth_data(credentials)
+    if not pending_oauth or not pending_oauth.get("refreshToken"):
+        path.unlink(missing_ok=True)
+        return None
+
+    stored = host._read_account_credentials(account_num, email)
+    stored_oauth = oauth.extract_oauth_data(stored) if stored else None
+    stored_refresh = stored_oauth.get("refreshToken") if stored_oauth else None
+    if stored_refresh not in replaces:
+        # The stored credential is not the one this rotation superseded: the
+        # slot was re-logged, re-imported, emptied, or changed kind after the
+        # park — the rotation is moot, keep what is on disk.
+        host._logger.info(
+            "Discarding parked credential rotation for account %s (%s): "
+            "slot credentials changed since it was parked.",
+            account_num, email,
+        )
+        path.unlink(missing_ok=True)
+        return None
+
+    host._write_account_credentials(account_num, email, credentials)
+    path.unlink(missing_ok=True)
+    host._logger.warning(
+        "Recovered a parked credential rotation for account %s (%s): a "
+        "previous refresh could not persist it while the store was locked.",
+        account_num, email,
+    )
+    return credentials
 
 
 class CredentialRefresher:
@@ -226,6 +368,15 @@ class CredentialRefresher:
         Only called from ``_perform_switch`` while ``FileLock`` is already
         held; network refresh here stays under that caller lock (switcher track).
         """
+        # A parked rotation (persist lost the lock race) holds the slot's only
+        # working credential; the stored one is already consumed. Apply it
+        # before deciding whether a refresh is needed.
+        recovered = recover_pending_rotation(
+            self._sw, account_num, email, assume_locked=True,
+        )
+        if recovered is not None:
+            credentials = recovered
+
         oauth_data = oauth.extract_oauth_data(credentials)
         if not oauth_data or not oauth_data.get("accessToken"):
             return credentials

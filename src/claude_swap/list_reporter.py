@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from claude_swap import oauth
 from claude_swap.cache import read_cache_data, read_cache_with_timestamp
+from claude_swap.credential_refresh import (
+    park_rotated_credential,
+    recover_pending_rotation,
+)
 from claude_swap.credentials import looks_like_api_key
 from claude_swap.json_output import (
     USAGE_API_KEY,
@@ -52,11 +56,12 @@ if TYPE_CHECKING:
 
 # How long a persist of a just-rotated OAuth credential may wait for the file
 # lock. Anthropic refresh tokens are single-use (claude-code#24317): by the
-# time the persist callback runs, the old token is already consumed, so giving
-# up loses the only working credential for the slot. The default 10s FileLock
-# timeout loses that race against a switch holding the lock through its
-# in-lock network refresh (~10s) plus write verification; 30s outlasts any
-# legitimate transaction while still bounding a wedged holder.
+# time the persist callback runs, the old token is already consumed. The
+# default 10s FileLock timeout loses that race against a switch holding the
+# lock through its in-lock network refresh (~10s) plus write verification;
+# 30s outlasts any legitimate transaction while still bounding a wedged
+# holder — past it the rotation is parked on disk for the next locked pass
+# (park_rotated_credential) instead of being dropped.
 _ROTATED_PERSIST_LOCK_TIMEOUT = 30.0
 
 
@@ -326,6 +331,12 @@ class ListReporter:
                 self._active_degraded = active.degraded
             else:
                 creds = self._host._read_account_credentials(str(num), email)
+                # A parked rotation (persist lost the lock race) supersedes
+                # the stored credential — the stored refresh token is already
+                # consumed. No-op unless the slot has a pending file.
+                recovered = recover_pending_rotation(self._host, str(num), email)
+                if recovered is not None:
+                    creds = recovered
 
             accounts_info.append((num, email, org_name, org_uuid, is_active, creds))
         return accounts_info
@@ -391,21 +402,40 @@ class ListReporter:
         own_lineage = {original_oauth.get("refreshToken")} if original_oauth else set()
 
         def persist(acct_num: str, acct_email: str, new_creds: str) -> None:
+            new_oauth = oauth.extract_oauth_data(new_creds)
+            new_refresh = new_oauth.get("refreshToken") if new_oauth else None
             lock = FileLock(self.lock_file)
             if not lock.acquire(timeout=_ROTATED_PERSIST_LOCK_TIMEOUT):
-                self._logger.error(
-                    "Could not persist rotated OAuth token for account %s (%s): "
-                    "file lock still held after %.0fs. The previous refresh token "
-                    "is already consumed; if the next refresh fails with "
-                    "invalid_grant, re-add with `cswap --add-account --slot %s`.",
-                    acct_num, acct_email, _ROTATED_PERSIST_LOCK_TIMEOUT, acct_num,
+                # A wedged holder must not cost the rotation: park it on disk
+                # for the next locked pass over this slot to apply.
+                try:
+                    park_rotated_credential(
+                        self._host.credentials_dir, acct_num, acct_email,
+                        new_creds,
+                        replaces=[t for t in own_lineage if isinstance(t, str)],
+                    )
+                except Exception:
+                    self._logger.error(
+                        "Could not persist rotated OAuth token for account %s (%s): "
+                        "file lock still held after %.0fs and parking the rotation "
+                        "failed. The previous refresh token is already consumed; "
+                        "if the next refresh fails with invalid_grant, re-add "
+                        "with `cswap --add-account --slot %s`.",
+                        acct_num, acct_email, _ROTATED_PERSIST_LOCK_TIMEOUT,
+                        acct_num,
+                    )
+                    raise LockError(
+                        f"persist of rotated token for account {acct_num} timed out"
+                    )
+                own_lineage.add(new_refresh)
+                self._logger.warning(
+                    "Parked rotated OAuth token for account %s (%s): file lock "
+                    "still held after %.0fs. It will be applied automatically "
+                    "by the next list/switch that touches the slot.",
+                    acct_num, acct_email, _ROTATED_PERSIST_LOCK_TIMEOUT,
                 )
-                raise LockError(
-                    f"persist of rotated token for account {acct_num} timed out"
-                )
+                return
             try:
-                new_oauth = oauth.extract_oauth_data(new_creds)
-                new_refresh = new_oauth.get("refreshToken") if new_oauth else None
                 stored = self._host._read_account_credentials(acct_num, acct_email)
                 stored_oauth = oauth.extract_oauth_data(stored) if stored else None
                 stored_refresh = (
