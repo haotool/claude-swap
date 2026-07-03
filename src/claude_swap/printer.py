@@ -175,11 +175,7 @@ def abbreviate_path(path: str) -> str:
 
 
 def format_age(started_at_ms: int) -> str:
-    """Format a millisecond epoch timestamp as a human-readable age.
-
-    Retained for parity with upstream's printer surface; the fork's current
-    callers were refactored away but the helper stays to minimise divergence.
-    """
+    """Format a millisecond epoch timestamp as a human-readable age."""
     elapsed = int(time.time()) - (started_at_ms // 1000)
     if elapsed < 60:
         return "just now"

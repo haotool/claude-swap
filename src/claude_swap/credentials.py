@@ -364,6 +364,7 @@ class CredentialStore:
         cred_dir = get_claude_config_home()
         cred_dir.mkdir(parents=True, exist_ok=True)
         cred_file = cred_dir / ".credentials.json"
+        import tempfile
         fd, tmp_path = tempfile.mkstemp(dir=str(cred_dir), suffix=".tmp")
         try:
             os.write(fd, credentials.encode("utf-8"))
@@ -684,6 +685,7 @@ class CredentialStore:
         self._host.credentials_dir.mkdir(parents=True, exist_ok=True)
         enc_file = self._backup_enc_path(account_num, email)
         encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+        import tempfile
         fd, tmp_path = tempfile.mkstemp(dir=str(self._host.credentials_dir), suffix=".tmp")
         try:
             os.write(fd, encoded.encode("utf-8"))
