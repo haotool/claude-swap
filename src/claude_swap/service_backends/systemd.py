@@ -205,7 +205,7 @@ def _print_wsl_guidance() -> None:
         f"  {dimmed('The command must leave a resident process behind (sleep infinity never exits) — WSL shuts the distro down when idle and systemd services do not keep it alive, stopping the monitor.')}"
     )
     print(
-        f"  {dimmed('WSL ~/.claude and Windows %USERPROFILE%\\\\.claude are separate; install cswap in the same environment as Claude Code.')}"
+        f"  {dimmed('WSL ~/.claude and Windows %USERPROFILE%\\.claude are separate; install cswap in the same environment as Claude Code.')}"
     )
 
 

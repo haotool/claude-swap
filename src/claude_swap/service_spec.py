@@ -71,6 +71,27 @@ def run_service_command(
     return proc
 
 
+# Resolve Windows system binaries under %SystemRoot% rather than trusting
+# PATH (parity with launchd.py's absolute launchctl). The bare-name fallback
+# only serves environments without SystemRoot (non-Windows callers in tests).
+
+
+def powershell_exe() -> str:
+    """Absolute Windows PowerShell path, else the bare name."""
+    root = os.environ.get("SystemRoot")
+    if not root:
+        return "powershell"
+    return rf"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def tasklist_exe() -> str:
+    """Absolute Windows tasklist path, else the bare name."""
+    root = os.environ.get("SystemRoot")
+    if not root:
+        return "tasklist"
+    return rf"{root}\System32\tasklist.exe"
+
+
 def log_dir(switcher: ServiceHost) -> Path:
     """Absolute directory for the supervised monitor's stdout/stderr logs."""
     return switcher.backup_dir / "logs"

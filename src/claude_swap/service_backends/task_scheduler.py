@@ -71,7 +71,13 @@ def _require_windows() -> None:
 
 def _powershell(script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
     return service_spec.run_service_command(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        [
+            service_spec.powershell_exe(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ],
         check=check,
     )
 
@@ -98,6 +104,15 @@ def _build_task_xml(switcher: ServiceHost) -> str:
     # SCHED_E_UNEXPECTEDNODE. RegistrationInfo/Version is a schema-valid slot.
     ET.SubElement(reg_info, f"{{{_TASK_NS}}}Version").text = __version__
 
+    # DOMAIN\user rather than the bare username: bare names may not resolve
+    # for AzureAD/domain accounts, and the same identity scopes the logon
+    # trigger below. USERDOMAIN is the machine name on workgroup setups, so
+    # the composed form is valid everywhere it exists.
+    user = os.environ.get("USERNAME") or getpass.getuser()
+    domain = os.environ.get("USERDOMAIN")
+    if domain:
+        user = f"{domain}\\{user}"
+
     triggers = ET.SubElement(root, f"{{{_TASK_NS}}}Triggers")
     logon = ET.SubElement(triggers, f"{{{_TASK_NS}}}LogonTrigger")
     # Task Scheduler has no supervisor semantics for exit codes: once the
@@ -112,6 +127,10 @@ def _build_task_xml(switcher: ServiceHost) -> str:
     ET.SubElement(repetition, f"{{{_TASK_NS}}}Interval").text = "PT5M"
     ET.SubElement(repetition, f"{{{_TASK_NS}}}StopAtDurationEnd").text = "false"
     ET.SubElement(logon, f"{{{_TASK_NS}}}Enabled").text = "true"
+    # Scope the trigger to the installing user: on a multi-user machine any
+    # logon would otherwise fire the task, which then fails under the other
+    # user's InteractiveToken and litters the task history with noise.
+    ET.SubElement(logon, f"{{{_TASK_NS}}}UserId").text = user
     # The logon trigger's repetition only arms on an actual logon;
     # Start-ScheduledTask (the install-time kick) arms no trigger at all, so
     # in the install session a dead monitor would stay dead until the next
@@ -134,7 +153,6 @@ def _build_task_xml(switcher: ServiceHost) -> str:
         f"{{{_TASK_NS}}}Principal",
         {"id": "Author"},
     )
-    user = os.environ.get("USERNAME") or getpass.getuser()
     ET.SubElement(principal, f"{{{_TASK_NS}}}UserId").text = user
     ET.SubElement(principal, f"{{{_TASK_NS}}}LogonType").text = "InteractiveToken"
     ET.SubElement(principal, f"{{{_TASK_NS}}}RunLevel").text = "LeastPrivilege"
@@ -224,7 +242,12 @@ def _start_task() -> None:
 
 
 def _query_task_state() -> tuple[bool, str]:
-    """Return ``(exists, state)`` where *state* is the Task Scheduler state string."""
+    """Return ``(exists, state)`` where *state* is the Task Scheduler state string.
+
+    Exit 2 is the script's own not-found signal; any other non-zero exit
+    means the query itself failed and proves nothing, so it must not be
+    reported as an existing (loaded) task.
+    """
     name = _task_name_literal()
     script = (
         f"$t = Get-ScheduledTask -TaskName '{name}' -ErrorAction SilentlyContinue; "
@@ -232,7 +255,7 @@ def _query_task_state() -> tuple[bool, str]:
         f"$t.State"
     )
     proc = _powershell(script, check=False)
-    if proc.returncode == 2:
+    if proc.returncode != 0:
         return False, ""
     state = proc.stdout.strip()
     return True, state

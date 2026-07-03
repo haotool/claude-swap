@@ -237,7 +237,10 @@ class TestInstall:
         assert "/usr/bin/true" not in out
         assert "dbus-launch" not in out
         assert "idle" in out.lower()
-        assert ".claude" in out
+        # The Windows path must render with a single backslash; the doubled
+        # form was an escaping bug in the printed guidance.
+        assert "%USERPROFILE%\\.claude" in out
+        assert "%USERPROFILE%\\\\.claude" not in out
 
     def test_wsl_keepalive_command_matches_readme(self):
         # The README documents the same Task Scheduler command; keep the two

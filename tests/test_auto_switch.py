@@ -1463,6 +1463,28 @@ class TestMonitorPidLifecycle:
         ):
             assert monitor._windows_cmdline(4242) == (False, None)
 
+    def test_windows_pid_probes_use_system_root_binaries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Bare tasklist/powershell names resolve through PATH, which a
+        # user-writable PATH entry can hijack — resolve under %SystemRoot%
+        # like launchd resolves launchctl absolutely.
+        monkeypatch.setenv("SystemRoot", r"C:\Windows")
+        argvs: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            argvs.append(list(argv))
+            return MagicMock(returncode=0, stdout="")
+
+        with patch("claude_swap.monitor.subprocess.run", side_effect=fake_run):
+            monitor._tasklist_image(4242)
+            monitor._windows_cmdline(4242)
+
+        assert argvs[0][0] == r"C:\Windows\System32\tasklist.exe"
+        assert argvs[1][0] == (
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        )
+
     @pytest.mark.parametrize(
         "probe",
         [monitor._tasklist_image, monitor._windows_cmdline],

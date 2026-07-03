@@ -30,7 +30,11 @@ from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.models import AutoSwitchDecisionContext, BackgroundAutoSwitchIntent
 from claude_swap.printer import accent, bolded, dimmed, muted
 from claude_swap.protocols import MonitorHost
-from claude_swap.service_spec import SERVICE_MONITOR_ENV_KEY
+from claude_swap.service_spec import (
+    SERVICE_MONITOR_ENV_KEY,
+    powershell_exe,
+    tasklist_exe,
+)
 
 PerformSwitch = Callable[[AutoSwitchDecisionContext], bool]
 
@@ -818,7 +822,7 @@ def _tasklist_image(pid: int) -> tuple[bool, str | None]:
     """
     try:
         result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            [tasklist_exe(), "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
             check=False,
@@ -890,7 +894,7 @@ def _windows_cmdline(pid: int) -> tuple[bool, str | None]:
     try:
         result = subprocess.run(
             [
-                "powershell",
+                powershell_exe(),
                 "-NoProfile",
                 "-Command",
                 f'(Get-CimInstance Win32_Process -Filter "ProcessId={pid}").CommandLine',

@@ -30,6 +30,11 @@ def _task_xml_path(switcher: ClaudeAccountSwitcher) -> Path:
     return switcher.backup_dir / "logs" / f"{ts_backend.service_spec.SERVICE_ID}.xml"
 
 
+# The backend resolves powershell under %SystemRoot% when that env var exists
+# (real Windows, including CI); POSIX test hosts get the bare name back.
+_POWERSHELL = ts_backend.service_spec.powershell_exe()
+
+
 class TestResolvePythonExecutable:
     def test_prefers_pythonw_when_present(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -188,6 +193,29 @@ class TestBuildTaskXml:
         xml = ts_backend._build_task_xml(switcher)
         assert f"<Version>{__version__}</Version>" in xml
 
+    def test_user_id_composes_domain_and_scopes_logon_trigger(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Bare usernames may not resolve for AzureAD/domain accounts, and an
+        # unscoped LogonTrigger fires on every user's logon (failing under
+        # their InteractiveToken); both slots must carry DOMAIN\user.
+        monkeypatch.setenv("USERDOMAIN", "CONTOSO")
+        monkeypatch.setenv("USERNAME", "dev")
+        switcher = ClaudeAccountSwitcher()
+        xml = ts_backend._build_task_xml(switcher)
+        assert xml.count("<UserId>CONTOSO\\dev</UserId>") == 2
+        logon = xml[xml.index("<LogonTrigger>") : xml.index("</LogonTrigger>")]
+        assert "<UserId>CONTOSO\\dev</UserId>" in logon
+
+    def test_user_id_falls_back_to_bare_username_without_domain(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("USERDOMAIN", raising=False)
+        monkeypatch.setenv("USERNAME", "dev")
+        switcher = ClaudeAccountSwitcher()
+        xml = ts_backend._build_task_xml(switcher)
+        assert "<UserId>dev</UserId>" in xml
+
 
 class TestInstall:
     def test_registers_task_with_powershell(
@@ -220,7 +248,7 @@ class TestInstall:
         assert "--monitor" in text
         assert (switcher.backup_dir / "logs").is_dir()
 
-        ps_calls = [c for c in calls if c and c[0] == "powershell"]
+        ps_calls = [c for c in calls if c and c[0] == _POWERSHELL]
         assert len(ps_calls) >= 2
         scripts = " ".join(c[-1] for c in ps_calls)
         assert "Unregister-ScheduledTask" in scripts
@@ -250,7 +278,7 @@ class TestInstall:
 
         ts_backend.TaskSchedulerBackend().install(ClaudeAccountSwitcher())
 
-        scripts = [c[-1] for c in calls if c and c[0] == "powershell"]
+        scripts = [c[-1] for c in calls if c and c[0] == _POWERSHELL]
         unregister_script = next(
             s for s in scripts if "Unregister-ScheduledTask" in s
         )
@@ -356,7 +384,7 @@ class TestUninstall:
 
         assert rc == 0
         assert not xml_path.exists()
-        scripts = " ".join(c[-1] for c in calls if c[0] == "powershell")
+        scripts = " ".join(c[-1] for c in calls if c[0] == _POWERSHELL)
         assert "Unregister-ScheduledTask" in scripts
         assert ts_backend.service_spec.SERVICE_ID in scripts
         assert "Service removed" in capsys.readouterr().out
@@ -378,7 +406,7 @@ class TestUninstall:
 
         ts_backend.TaskSchedulerBackend().uninstall(ClaudeAccountSwitcher())
 
-        scripts = [c[-1] for c in calls if c and c[0] == "powershell"]
+        scripts = [c[-1] for c in calls if c and c[0] == _POWERSHELL]
         unregister_script = next(
             s for s in scripts if "Unregister-ScheduledTask" in s
         )
@@ -440,6 +468,16 @@ class TestQueryTaskState:
     ):
         monkeypatch.setattr(subprocess, "run", _stub_run(stdout="Ready\r\n"))
         assert ts_backend._query_task_state() == (True, "Ready")
+
+    def test_query_failure_is_not_reported_as_loaded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # rc=1 means PowerShell itself failed; it used to come back as
+        # (True, "") and state() then reported the task loaded.
+        monkeypatch.setattr(
+            subprocess, "run", _stub_run(returncode=1, stderr="boom")
+        )
+        assert ts_backend._query_task_state() == (False, "")
 
 
 class TestStatus:
@@ -565,6 +603,43 @@ class TestRunGuards:
         )
         with pytest.raises(ClaudeSwitchError, match="timed out"):
             ts_backend._powershell("Get-ScheduledTask")
+
+
+class TestSystemBinaryResolution:
+    def test_powershell_resolved_under_system_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A bare "powershell" resolves through PATH, which a user-writable
+        # PATH entry can hijack — same defense as launchd's absolute
+        # launchctl.
+        monkeypatch.setenv("SystemRoot", r"C:\Windows")
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = list(argv)
+            return _stub_run()()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        ts_backend._powershell("Get-ScheduledTask", check=False)
+
+        assert captured["argv"][0] == (
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        )
+
+    def test_powershell_falls_back_to_bare_name_without_system_root(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.delenv("SystemRoot", raising=False)
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = list(argv)
+            return _stub_run()()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        ts_backend._powershell("Get-ScheduledTask", check=False)
+
+        assert captured["argv"][0] == "powershell"
 
 
 class TestInstalledVersion:
