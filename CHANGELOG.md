@@ -25,7 +25,7 @@ Release version is defined in `pyproject.toml` (currently `0.15.1+haotool.1`).
   again, CONTRIBUTING's mypy notes match the strict config, and the
   upstream-sync doc points at the `converge/*` branch flow.
 - **Test hardening:** the `--import` rollback failure matrix and the service
-  backends' status/logs/error surfaces are now covered (transfer 84% → 95%;
+  backends' status/logs/error surfaces are now covered (transfer 82% → 95%;
   launchd/systemd/task_scheduler 98–100% line coverage).
 
 ## [0.15.1+haotool.1] — 2026-07-03
