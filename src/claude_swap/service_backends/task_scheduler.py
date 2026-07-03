@@ -173,7 +173,13 @@ def _installed_version(switcher: ServiceHost) -> str | None:
 
 def _unregister_task(*, check: bool = False) -> subprocess.CompletedProcess[str]:
     name = _task_name_literal()
+    # Unregister-ScheduledTask does not stop a running instance (deleting a
+    # task never interrupts its process). Without the Stop, uninstall leaves
+    # the old monitor alive until logoff and reinstall orphans it, so every
+    # new task launch exits 75 — parity with launchd bootout / systemd
+    # disable --now, which both kill the process.
     script = (
+        f"Stop-ScheduledTask -TaskName '{name}' -ErrorAction SilentlyContinue; "
         f"Unregister-ScheduledTask -TaskName '{name}' -Confirm:$false "
         f"-ErrorAction SilentlyContinue"
     )

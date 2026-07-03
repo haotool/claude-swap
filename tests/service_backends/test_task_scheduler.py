@@ -215,6 +215,32 @@ class TestInstall:
         assert "Service installed" in out
         assert "Task Scheduler" in out
 
+    def test_install_stops_running_monitor_before_unregister(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Unregister-ScheduledTask never interrupts a running instance, so a
+        # reinstall without the Stop orphans the old monitor and every launch
+        # of the new task exits 75 against its PID file.
+        _force_win32(monkeypatch)
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return _stub_run()()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        ts_backend.TaskSchedulerBackend().install(ClaudeAccountSwitcher())
+
+        scripts = [c[-1] for c in calls if c and c[0] == "powershell"]
+        unregister_script = next(
+            s for s in scripts if "Unregister-ScheduledTask" in s
+        )
+        assert "Stop-ScheduledTask" in unregister_script
+        assert unregister_script.index("Stop-ScheduledTask") < unregister_script.index(
+            "Unregister-ScheduledTask"
+        )
+
     def test_idempotent_reinstall_overwrites_xml(
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -282,6 +308,32 @@ class TestUninstall:
         assert "Unregister-ScheduledTask" in scripts
         assert ts_backend.service_spec.SERVICE_ID in scripts
         assert "Service removed" in capsys.readouterr().out
+
+    def test_uninstall_stops_running_monitor_before_unregister(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Deleting the task does not kill its process: without the Stop, the
+        # uninstalled monitor keeps rewriting credentials until logoff.
+        _force_win32(monkeypatch)
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return _stub_run()()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(ts_backend, "_query_task_state", lambda: (True, "Running"))
+
+        ts_backend.TaskSchedulerBackend().uninstall(ClaudeAccountSwitcher())
+
+        scripts = [c[-1] for c in calls if c and c[0] == "powershell"]
+        unregister_script = next(
+            s for s in scripts if "Unregister-ScheduledTask" in s
+        )
+        assert "Stop-ScheduledTask" in unregister_script
+        assert unregister_script.index("Stop-ScheduledTask") < unregister_script.index(
+            "Unregister-ScheduledTask"
+        )
 
     def test_idempotent_when_absent(
         self,
