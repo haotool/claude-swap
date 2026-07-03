@@ -35,11 +35,11 @@ from claude_swap.json_output import (
     switch_noop,
     switch_result_from_op,
 )
-from claude_swap.usage_policy import (
-    binding_pct as max_usage_pct,
-    headroom,
-    pick_best_from_snapshots,
-    plan_automated_switch,
+from claude_swap.credentials import (
+    SECURITY_SERVICE,
+    ActiveCredentials,
+    CredentialStore,
+    looks_like_api_key,
 )
 from claude_swap.locking import FileLock
 from claude_swap.logging_config import setup_logging
@@ -68,12 +68,6 @@ from claude_swap.paths import (
     get_legacy_backup_root,
     migrate_legacy_backup_dir,
 )
-from claude_swap.credentials import (
-    SECURITY_SERVICE,
-    ActiveCredentials,
-    CredentialStore,
-    looks_like_api_key,
-)
 from claude_swap.credential_refresh import CredentialRefresher
 # ``DEFAULT_AUTO_SWITCH_THRESHOLD`` is re-exported (``as`` alias) so
 # ``from claude_swap.switcher import DEFAULT_AUTO_SWITCH_THRESHOLD`` keeps working
@@ -89,6 +83,12 @@ from claude_swap.usage_cache import (
     _usage_from_cache,
     _usage_slot_trusted,
     extract_retry_after,
+)
+from claude_swap.usage_policy import (
+    binding_pct as max_usage_pct,
+    headroom,
+    pick_best_from_snapshots,
+    plan_automated_switch,
 )
 from typing import TYPE_CHECKING, Any, assert_never, cast
 
