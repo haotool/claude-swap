@@ -965,3 +965,144 @@ class TestGuards:
         assert not (session_dir / ".credentials.json").exists()
         assert (session_dir / ".claude.json").exists()
         assert block_real_keychain.get_password(service, account) is None
+
+
+# ---------------------------------------------------------------------------
+# history sharing (--share-history)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def history_setup(share_setup, temp_home: Path):
+    """share_setup plus conversation history on both sides."""
+    source, session_dir, mgr = share_setup
+    (source / "projects").mkdir()
+    (source / "projects" / "-home-user-app").mkdir()
+    (source / "projects" / "-home-user-app" / "aaa.jsonl").write_text("main-a\n")
+    (source / "history.jsonl").write_text('{"p": "main"}\n')
+    return source, session_dir, mgr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="history sharing is POSIX-only")
+class TestShareHistoryPosix:
+    def test_not_shared_by_default(self, history_setup):
+        source, session_dir, mgr = history_setup
+        mgr._sync_sharing(session_dir, share=True)
+
+        assert not (session_dir / "projects").exists()
+        assert not (session_dir / "history.jsonl").exists()
+        manifest = json.loads((session_dir / SHARE_MANIFEST).read_text())
+        assert "projects" not in manifest["items"]
+
+    def test_links_history_items(self, history_setup):
+        source, session_dir, mgr = history_setup
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        assert (session_dir / "projects").readlink() == source / "projects"
+        assert (session_dir / "history.jsonl").readlink() == source / "history.jsonl"
+        manifest = json.loads((session_dir / SHARE_MANIFEST).read_text())
+        assert {"projects", "history.jsonl"} <= set(manifest["items"])
+
+    def test_creates_missing_source(self, share_setup):
+        source, session_dir, mgr = share_setup  # no history in ~/.claude yet
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        assert (source / "projects").is_dir()
+        assert (source / "history.jsonl").is_file()
+        assert (session_dir / "projects").readlink() == source / "projects"
+
+    def test_merges_existing_profile_history(self, history_setup):
+        source, session_dir, mgr = history_setup
+        proj = session_dir / "projects" / "-home-user-app"
+        proj.mkdir(parents=True)
+        (proj / "bbb.jsonl").write_text("profile-b\n")
+        (session_dir / "projects" / "-home-user-other").mkdir()
+        (session_dir / "projects" / "-home-user-other" / "ccc.jsonl").write_text(
+            "profile-c\n"
+        )
+        (session_dir / "history.jsonl").write_text(
+            '{"p": "main"}\n{"p": "profile"}\n'
+        )
+
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        # Profile history landed in ~/.claude, alongside what was there.
+        merged = source / "projects"
+        assert (merged / "-home-user-app" / "aaa.jsonl").read_text() == "main-a\n"
+        assert (merged / "-home-user-app" / "bbb.jsonl").read_text() == "profile-b\n"
+        assert (merged / "-home-user-other" / "ccc.jsonl").read_text() == "profile-c\n"
+        # Prompt history merged without duplicating shared lines.
+        assert source / "history.jsonl" == (session_dir / "history.jsonl").readlink()
+        lines = (source / "history.jsonl").read_text().splitlines()
+        assert lines.count('{"p": "main"}') == 1
+        assert '{"p": "profile"}' in lines
+        # And the profile now links to the shared copy.
+        assert (session_dir / "projects").readlink() == merged
+
+    def test_merge_collision_keeps_target(self, history_setup):
+        source, session_dir, mgr = history_setup
+        proj = session_dir / "projects" / "-home-user-app"
+        proj.mkdir(parents=True)
+        (proj / "aaa.jsonl").write_text("profile-duplicate\n")
+
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        assert (
+            source / "projects" / "-home-user-app" / "aaa.jsonl"
+        ).read_text() == "main-a\n"
+        assert (session_dir / "projects").is_symlink()
+
+    def test_merge_deferred_while_profile_live(self, history_setup, monkeypatch):
+        source, session_dir, mgr = history_setup
+        (session_dir / "projects").mkdir()
+        (session_dir / "projects" / "x.jsonl").write_text("live\n")
+        monkeypatch.setattr(
+            session_mod, "live_sessions_for", lambda _dir: [object()]
+        )
+
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        # Untouched: no merge, no link, not claimed in the manifest.
+        assert not (session_dir / "projects").is_symlink()
+        assert (session_dir / "projects" / "x.jsonl").read_text() == "live\n"
+        manifest = json.loads((session_dir / SHARE_MANIFEST).read_text())
+        assert "projects" not in manifest["items"]
+
+    def test_toggle_off_removes_links_keeps_data(self, history_setup):
+        source, session_dir, mgr = history_setup
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+        mgr._sync_sharing(session_dir, share=True, share_history=False)
+
+        assert not (session_dir / "projects").exists()
+        assert not (session_dir / "history.jsonl").exists()
+        # Shared source data is never touched; customizations stay linked.
+        assert (source / "projects" / "-home-user-app" / "aaa.jsonl").exists()
+        assert (session_dir / "settings.json").is_symlink()
+
+    def test_share_history_independent_of_no_share(self, history_setup):
+        source, session_dir, mgr = history_setup
+        mgr._sync_sharing(session_dir, share=False, share_history=True)
+
+        assert (session_dir / "projects").is_symlink()
+        assert not (session_dir / "settings.json").exists()
+
+
+class TestShareHistoryWindows:
+    def test_sync_never_links_history_in_copy_mode(self, history_setup):
+        source, session_dir, mgr = history_setup
+        mgr.switcher.platform = Platform.WINDOWS
+        mgr._sync_sharing(session_dir, share=True, share_history=True)
+
+        assert not (session_dir / "projects").exists()
+        manifest = json.loads((session_dir / SHARE_MANIFEST).read_text())
+        assert "projects" not in manifest["items"]
+
+    def test_run_rejects_flag(self, history_setup, monkeypatch):
+        source, session_dir, mgr = history_setup
+        mgr.switcher.platform = Platform.WINDOWS
+        monkeypatch.setattr(
+            session_mod.shutil, "which", lambda _name: "/usr/bin/claude"
+        )
+
+        with pytest.raises(SessionError, match="Windows"):
+            mgr.run(ACCOUNT_NUM, [], share=True, share_history=True)
