@@ -134,6 +134,26 @@ def _use_native_tls() -> None:
         pass
 
 
+def _relax_redirected_stream_encoding() -> None:
+    """Keep redirected Windows output from crashing on non-ANSI glyphs.
+
+    Redirected/piped stdout on Windows encodes with the locale ANSI code page
+    (e.g. cp1252) under ``errors=strict``, so the tree connectors and bullets
+    in ``--list`` made ``cswap --list > file`` raise ``UnicodeEncodeError``.
+    Interactive consoles go through the wide-char API and are unaffected —
+    only non-tty streams are degraded. ``hasattr`` guards a replaced
+    ``sys.stdout`` that is not a ``TextIOWrapper``.
+    """
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if (
+                stream is not None
+                and hasattr(stream, "reconfigure")
+                and not stream.isatty()
+            ):
+                stream.reconfigure(errors="replace")
+
+
 def _service_command(argv: list[str]) -> None:
     """Handle `cswap service install|uninstall|status|logs`.
 
@@ -584,6 +604,7 @@ def _dispatch_action(
 def main() -> None:
     """Main entry point for the CLI."""
     _use_native_tls()
+    _relax_redirected_stream_encoding()
     if len(sys.argv) > 1 and sys.argv[1] in _SUBCOMMANDS:
         # Subcommands return only in tests where exec/sys.exit is mocked.
         globals()[_SUBCOMMANDS[sys.argv[1]]](sys.argv[2:])
