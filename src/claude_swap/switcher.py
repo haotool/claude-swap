@@ -378,8 +378,6 @@ class ClaudeAccountSwitcher:
 
 
     def _kc_read_backup(self, account_num: str, email: str) -> str:
-        # Keychain-only (no .enc fallback): the macOS keyring→security migration
-        # must not mistake an existing .enc file for an already-migrated entry.
         return self._store._kc_read_backup(account_num, email)
 
     def _kc_write_backup(self, account_num: str, email: str, credentials: str) -> None:
@@ -892,10 +890,10 @@ class ClaudeAccountSwitcher:
         """Guard for ``add_account``: never capture a live managed key as OAuth.
 
         ``add_account`` snapshots the *live* active credential under an
-        ``oauthAccount`` identity. Now that ``_read_credentials`` can return a
-        raw ``sk-ant-api…`` key, a live ``/login`` key could be backed up as a
-        kindless account, corrupting the kind-keyed logic. Reject with guidance
-        toward the supported path instead.
+        ``oauthAccount`` identity. Now that ``_read_credentials`` can return a raw
+        ``sk-ant-api…`` key, a live ``/login`` key could be backed up as a kindless
+        account, corrupting the session-guard / export / collision logic that keys
+        off ``kind``. Reject with guidance toward the supported path instead.
         """
         if looks_like_api_key(creds):
             raise ValidationError(
