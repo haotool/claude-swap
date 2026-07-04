@@ -136,6 +136,15 @@ def _recover_pending_rotation_body(
         replaces = payload.get("replaces") or []
         if not isinstance(credentials, str) or not isinstance(replaces, list):
             raise ValueError("malformed pending rotation payload")
+    except FileNotFoundError:
+        # Benign lost race: a concurrent locked pass consumed the park between
+        # our existence probe and this read. Nothing was discarded.
+        host._logger.debug(
+            "Pending credential rotation for account %s (%s) was already "
+            "consumed by a concurrent pass.",
+            account_num, email,
+        )
+        return None
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         host._logger.warning(
             "Discarding unreadable pending credential rotation for account %s (%s).",

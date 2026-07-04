@@ -239,6 +239,48 @@ class TestProbe5Eradication:
             sw.credentials_dir, "2", "b@example.com"
         ).exists()
 
+    def test_lost_recovery_race_reads_as_benign_not_unreadable(
+        self, temp_home: Path, monkeypatch, caplog
+    ):
+        """Two concurrent passes can race to recover the same park; the loser
+        reads a path the winner already consumed. That FileNotFoundError is a
+        benign lost race — it must not surface as the scary "Discarding
+        unreadable pending credential rotation" warning."""
+        sw = _seed_switcher(temp_home)
+        old = _oauth_creds("old", expired=True)
+        sw._write_account_credentials("2", "b@example.com", old)
+        park_rotated_credential(
+            sw.credentials_dir, "2", "b@example.com",
+            _oauth_creds("rotated"), replaces=["rt-old"],
+        )
+        pending = pending_rotation_path(sw.credentials_dir, "2", "b@example.com")
+
+        class WinnerConsumesDuringLockWait(FileLock):
+            # The concurrent winner applies and consumes the park while the
+            # loser waits on the lock (its exists() probe already passed).
+            def acquire(self, timeout: float | None = None) -> bool:
+                got = super().acquire(timeout)
+                pending.unlink(missing_ok=True)
+                return got
+
+        monkeypatch.setattr(
+            "claude_swap.credential_refresh.FileLock", WinnerConsumesDuringLockWait
+        )
+        with caplog.at_level(logging.DEBUG, logger="claude-swap"):
+            recovered = recover_pending_rotation(sw, "2", "b@example.com")
+
+        assert recovered is None
+        assert sw._read_account_credentials("2", "b@example.com") == old
+        assert not any(
+            "unreadable pending credential rotation" in r.message
+            for r in caplog.records
+        ), "a lost recovery race must not be reported as an unreadable park"
+        assert any(
+            "consumed by a concurrent pass" in r.message
+            and r.levelno == logging.DEBUG
+            for r in caplog.records
+        )
+
     def test_unreadable_pending_file_is_discarded_loudly(
         self, temp_home: Path, caplog
     ):
