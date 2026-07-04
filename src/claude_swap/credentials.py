@@ -576,14 +576,19 @@ class CredentialStore:
     def _write_oauth_credentials(self, credentials: str) -> None:
         """Write Claude Code's active OAuth credentials.
 
-        macOS writes the Keychain when usable (recording backend ``"keychain"``)
-        and **leaves the plaintext file untouched**, mirroring Claude Code, which
-        preserves the file alongside a populated Keychain for container ``~/.claude``
-        sharing (#1414): cswap can't prove an existing file is its own stale fallback
-        vs. a credential another consumer relies on. If the Keychain write fails — or
-        the Keychain is already known unusable — it writes the plaintext file and
-        best-effort clears any stale Keychain entry (#30337), recording backend
-        ``"file"``. Linux/WSL/Windows always write the file.
+        macOS writes the Keychain when usable (recording backend ``"keychain"``). On
+        a successful Keychain write it then **rewrites an already-present**
+        ``.credentials.json`` with the same fresh creds — never *creating* one when
+        absent, never *deleting* one. This bumps the file's mtime so a running Claude
+        Code session's disk-mtime cache invalidation fires and it hot-reloads the new
+        account instead of serving its memoized token until restart (#86); it also
+        keeps the file consistent for the container ``~/.claude`` sharing consumer
+        (#1414) rather than stranding it on stale content. Keychain-only users keep
+        their fileless posture — their absent-file path already hot-reloads via the
+        ~30s Keychain TTL — and never gain a plaintext credential on disk. If the
+        Keychain write fails — or the Keychain is already known unusable — it writes
+        the plaintext file and best-effort clears any stale Keychain entry (#30337),
+        recording backend ``"file"``. Linux/WSL/Windows always write the file.
 
         Raises:
             CredentialWriteError: If writing credentials fails.
@@ -601,6 +606,10 @@ class CredentialStore:
                 # (A programming error is NOT caught here — it propagates.)
                 self._host._logger.warning(f"Keychain write failed, falling back to file: {e}")
             else:
+                # Keychain (primary) now holds the fresh credential. Bump an
+                # already-present shadow file's mtime so running sessions hot-reload
+                # (#86); best-effort, never creates one — see the helper.
+                self._refresh_stale_credentials_file(credentials)
                 self._last_active_credentials_backend = "keychain"
                 return
 
@@ -614,6 +623,34 @@ class CredentialStore:
             raise CredentialWriteError(f"Failed to write credentials: {e}")
         self._delete_active_keychain_entry()
         self._last_active_credentials_backend = "file"
+
+    def _refresh_stale_credentials_file(self, credentials: str) -> None:
+        """Bump an already-present ``.credentials.json``'s mtime after a Keychain write.
+
+        Rewrite-when-present / never-create (#86). Claude Code invalidates its
+        memoized OAuth token only when this file's mtime changes or the file is
+        absent; a Keychain-only switch leaves a *stale* file's mtime frozen, so a
+        running session serves the old token until restart. Rewriting the existing
+        file with the same fresh creds bumps the mtime (atomic ``os.replace``, so it
+        bumps even when the content is unchanged) and keeps a file-reading consumer
+        (#1414 shared ``~/.claude``) consistent. We never *create* the file when
+        absent — Keychain-only users keep their fileless posture and their absent-file
+        (~30s Keychain-TTL) path already hot-reloads.
+
+        Best-effort: the Keychain write is authoritative on macOS and already
+        succeeded, so a failure here must not fail the switch — it only means a
+        running session may lag until restart.
+        """
+        cred_file = get_credentials_path()
+        if not cred_file.exists():
+            return
+        try:
+            self._write_active_credentials_file(credentials)
+        except Exception as e:
+            self._host._logger.warning(
+                f"Could not refresh .credentials.json after Keychain write ({e}); "
+                "a running session may not hot-reload until restart"
+            )
 
     def _uses_file_backup_backend(self) -> bool:
         """Whether per-account backup *writes* go to files vs. the Keychain.

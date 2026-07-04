@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -366,16 +367,75 @@ class TestMacosKeychainFallback:
         assert get_credentials_path().read_text() == '{"fresh":1}'
         assert (CLAUDE_CODE_KEYCHAIN_SERVICE, acct) not in block_real_keychain.data
 
-    def test_keychain_write_leaves_existing_file_untouched(
+    def test_keychain_write_refreshes_existing_file(
         self, temp_home: Path, block_real_keychain
     ):
+        # #86: an already-present shadow file must be rewritten (mtime bumped) so a
+        # running Claude Code session invalidates its memoized token and hot-reloads.
+        # #1414: it is rewritten, never deleted — a file-reading consumer stays valid.
         s = self._macos_switcher()
         cred = get_credentials_path()
         cred.parent.mkdir(parents=True, exist_ok=True)
-        cred.write_text("PRESERVE-ME")
-        s._write_credentials('{"fresh":1}')
+        cred.write_text("OLD-CREDS")
+        os.utime(cred, (1_000_000_000, 1_000_000_000))  # force an old mtime
+        old_mtime_ns = cred.stat().st_mtime_ns
+
+        s._write_credentials('{"fresh":1}')  # keychain usable → writes keychain
+
         assert s._store._last_active_credentials_backend == "keychain"
-        assert cred.read_text() == "PRESERVE-ME"
+        assert cred.exists()  # never deleted (#1414)
+        assert cred.read_text() == '{"fresh":1}'  # rewritten to the fresh account
+        assert cred.stat().st_mtime_ns > old_mtime_ns  # the actual invalidation trigger
+
+    def test_keychain_write_bumps_mtime_even_when_content_unchanged(
+        self, temp_home: Path, block_real_keychain
+    ):
+        # The fix bumps mtime via atomic os.replace, so it fires even when the new
+        # creds are byte-identical to the old — the purest test of the mechanism
+        # (a content-only assertion would silently miss this).
+        s = self._macos_switcher()
+        cred = get_credentials_path()
+        cred.parent.mkdir(parents=True, exist_ok=True)
+        cred.write_text('{"same":1}')
+        os.utime(cred, (1_000_000_000, 1_000_000_000))
+        old_mtime_ns = cred.stat().st_mtime_ns
+
+        s._write_credentials('{"same":1}')  # identical content
+
+        assert cred.stat().st_mtime_ns > old_mtime_ns
+
+    def test_keychain_write_does_not_create_absent_file(
+        self, temp_home: Path, block_real_keychain
+    ):
+        # Keychain-only users keep their fileless posture: no .credentials.json is
+        # created, so no plaintext credential lands on their disk (#86).
+        s = self._macos_switcher()
+        cred = get_credentials_path()
+        assert not cred.exists()
+
+        s._write_credentials('{"fresh":1}')  # keychain usable → writes keychain
+
+        assert s._store._last_active_credentials_backend == "keychain"
+        assert not cred.exists()
+
+    def test_refresh_stale_file_is_best_effort(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        # The Keychain write is authoritative and already succeeded; a failure to
+        # refresh the shadow file must warn, not fail the switch.
+        s = self._macos_switcher()
+        cred = get_credentials_path()
+        cred.parent.mkdir(parents=True, exist_ok=True)
+        cred.write_text("OLD-CREDS")
+
+        def boom(_credentials):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(s._store, "_write_active_credentials_file", boom)
+
+        s._write_credentials('{"fresh":1}')  # must not raise
+
+        assert s._store._last_active_credentials_backend == "keychain"
 
     # -- backup store: .enc-wins -----------------------------------------
 
@@ -469,14 +529,14 @@ class TestMacosKeychainFallback:
     def test_verify_ignores_stale_file_when_keychain_write_succeeded(
         self, temp_home: Path, monkeypatch, block_real_keychain
     ):
-        """R2/Bugbot: a successful Keychain write must not be failed by a
-        leftover plaintext file when the verify read-back hits a transiently
-        locked Keychain.
+        """R2/Bugbot: a successful Keychain write must not be failed by the
+        verify read-back hitting a transiently locked Keychain.
 
-        Reading back through ``_read_credentials`` would fall through to the
-        stale ``.credentials.json`` (#1414 leaves it in place), mismatch, and
-        abort a switch that actually succeeded. An unreadable just-written
-        backend is inconclusive, not a mismatch.
+        An unreadable just-written backend is inconclusive, not a mismatch —
+        without this, the fallthrough read could mismatch (e.g. no file at
+        all) and abort a switch that actually succeeded. Since #86 the
+        shadow file is refreshed on a successful Keychain write, so the
+        fallthrough now reads the fresh creds rather than stale ones.
         """
         s = self._macos_switcher()
         cred = get_credentials_path()
@@ -497,7 +557,7 @@ class TestMacosKeychainFallback:
 
         acct = macos_keychain.keychain_account_name()
         assert block_real_keychain.data[(CLAUDE_CODE_KEYCHAIN_SERVICE, acct)] == '{"fresh":1}'
-        assert cred.read_text() == '{"stale":"other-account"}'
+        assert cred.read_text() == '{"fresh":1}'  # refreshed, never deleted (#86)
 
     def test_verify_still_detects_silent_keychain_corruption(
         self, temp_home: Path, monkeypatch, block_real_keychain
