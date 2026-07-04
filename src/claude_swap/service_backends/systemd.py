@@ -274,7 +274,12 @@ class SystemdBackend:
             service_spec.print_status_installed_but_not_loaded()
             return 0
 
-        proc = _systemctl("status", UNIT_NAME, check=False)
+        # ``show -p`` gives stable KEY=VALUE lines; ``systemctl status`` output
+        # (``Active:`` / ``Main PID:``) is localized prose the filter in
+        # print_status_loaded would drop entirely.
+        proc = _systemctl(
+            "show", "-p", "ActiveState", "-p", "MainPID", UNIT_NAME, check=False
+        )
         service_spec.print_status_loaded(supervisor_stdout=proc.stdout)
         service_spec.print_status_decision_log(switcher)
         return 0

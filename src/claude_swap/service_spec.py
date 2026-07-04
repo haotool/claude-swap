@@ -174,11 +174,18 @@ def print_status_installed_but_not_loaded() -> None:
 
 
 def print_status_loaded(*, supervisor_stdout: str) -> None:
-    """Print the loaded-service status with the supervisor's key state lines."""
+    """Print the loaded-service status with the supervisor's key state lines.
+
+    Recognizes both supervisors' vocabularies: ``launchctl print`` emits
+    ``state = running`` / ``pid = 123``; ``systemctl show -p`` emits
+    ``ActiveState=active`` / ``MainPID=1234``.
+    """
     print(f"{bolded('Service:')} {accent('loaded')} {muted(SERVICE_LABEL)}")
     for line in supervisor_stdout.splitlines():
         stripped = line.strip()
-        if stripped.startswith(("state =", "pid =", "last exit code =")):
+        if stripped.startswith(
+            ("state =", "pid =", "last exit code =", "ActiveState=", "MainPID=")
+        ):
             print(f"  {muted(stripped)}")
 
 

@@ -531,7 +531,8 @@ class TestStatus:
             self._fake_run(
                 {
                     "is-active": (0, "active\n", ""),
-                    "status": (0, "state = running\nnoise line\n", ""),
+                    # Real `systemctl show -p ActiveState -p MainPID` output.
+                    "show": (0, "ActiveState=active\nMainPID=4242\n", ""),
                 }
             ),
         )
@@ -542,8 +543,8 @@ class TestStatus:
         assert rc == 0
         out = capsys.readouterr().out
         assert "loaded" in out
-        assert "state = running" in out
-        assert "noise line" not in out
+        assert "ActiveState=active" in out
+        assert "MainPID=4242" in out
         assert "decision log" in out
 
     def test_loaded_warns_on_version_drift(
