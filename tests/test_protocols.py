@@ -14,6 +14,7 @@ from claude_swap.models import (
     SwitchPreconditions,
 )
 from claude_swap.monitor import MonitorRuntimeState, monitor_step
+from claude_swap.sequence_store import AutoSwitchConfig
 from claude_swap.switch_cli import run_switch_cli
 
 
@@ -21,8 +22,10 @@ def _monitor_host(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         backup_dir=tmp_path,
         _logger=logging.getLogger("test.monitor_host"),
-        get_auto_switch_config=lambda: {"enabled": False, "threshold": 95},
-        ensure_auto_switch_enabled=lambda: {"enabled": True, "threshold": 95},
+        # The config seam is typed: hosts hand the monitor an AutoSwitchConfig,
+        # not a raw dict (monitor reads .enabled/.threshold attributes).
+        get_auto_switch_config=lambda: AutoSwitchConfig(enabled=False, threshold=95),
+        ensure_auto_switch_enabled=lambda: AutoSwitchConfig(enabled=True, threshold=95),
         get_active_usage_pct=lambda: None,
         get_active_usage_breakdown=lambda: None,
         active_account_is_api_key=lambda: False,

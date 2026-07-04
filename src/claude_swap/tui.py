@@ -39,6 +39,7 @@ from claude_swap.monitor import (
     monitor_step,
     release_pid,
 )
+from claude_swap.sequence_store import AutoSwitchConfig
 from claude_swap.switcher import ClaudeAccountSwitcher, auto_switch_display
 
 
@@ -400,9 +401,9 @@ def _watch_loop(
 
 # Auto-switch flow
 def _auto_toggle(
-    stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, cfg: dict[str, Any],
+    stdscr: CursesWindow, switcher: ClaudeAccountSwitcher, cfg: AutoSwitchConfig,
 ) -> None:
-    switcher.set_auto_switch_config(enabled=not cfg["enabled"])
+    switcher.set_auto_switch_config(enabled=not cfg.enabled)
 
 
 def _auto_threshold(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
@@ -439,7 +440,7 @@ def _auto_service_status(
 
 def _auto_start_monitor(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
     cfg = switcher.ensure_auto_switch_enabled()
-    _run_auto_monitor(stdscr, switcher, cfg["threshold"])
+    _run_auto_monitor(stdscr, switcher, cfg.threshold)
 
 
 def _do_auto_switch(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> None:
@@ -468,8 +469,8 @@ def _do_auto_switch(stdscr: CursesWindow, switcher: ClaudeAccountSwitcher) -> No
             f"Background service {current_service_state}"
         )
         items: list[tuple[str, str | None]] = [
-            (f"Auto-switch: {'Disable' if cfg['enabled'] else 'Enable'}", "toggle"),
-            (f"Threshold: set to {cfg['threshold']}%", "threshold"),
+            (f"Auto-switch: {'Disable' if cfg.enabled else 'Enable'}", "toggle"),
+            (f"Threshold: set to {cfg.threshold}%", "threshold"),
             (_service_menu_label(current_service_state), "service-toggle"),
             ("Background service: Show status", "service-status"),
             ("Start monitor now", "start"),

@@ -75,6 +75,7 @@ from claude_swap.credential_refresh import CredentialRefresher
 from claude_swap.sequence_store import (
     DEFAULT_AUTO_SWITCH_THRESHOLD as DEFAULT_AUTO_SWITCH_THRESHOLD,
     AccountRecord,
+    AutoSwitchConfig,
     SequenceData,
     SequenceStore,
 )
@@ -114,13 +115,11 @@ _ONLY_ONE_ACCOUNT_MSG = (
 # re-exported above so ``from claude_swap.switcher import
 # DEFAULT_AUTO_SWITCH_THRESHOLD`` keeps working for callers/tests.
 
-def auto_switch_display(cfg: dict[str, Any]) -> tuple[bool, int, str, str]:
+def auto_switch_display(cfg: AutoSwitchConfig) -> tuple[bool, int, str, str]:
     """Normalized auto-switch fields for CLI/TUI status formatters."""
-    enabled = bool(cfg["enabled"])
-    threshold = int(cfg["threshold"])
-    on_off = "ON" if enabled else "OFF"
-    enabled_disabled = "enabled" if enabled else "disabled"
-    return enabled, threshold, on_off, enabled_disabled
+    on_off = "ON" if cfg.enabled else "OFF"
+    enabled_disabled = "enabled" if cfg.enabled else "disabled"
+    return cfg.enabled, cfg.threshold, on_off, enabled_disabled
 
 
 def _sweep_legacy_keyring(usernames: list[str], removed_items: list[str]) -> None:
@@ -1909,19 +1908,18 @@ class ClaudeAccountSwitcher:
         from claude_swap.list_reporter import run_status
         return run_status(self, json_output=json_output)
 
-    def get_auto_switch_config(self) -> dict[str, Any]:
+    def get_auto_switch_config(self) -> AutoSwitchConfig:
         """Return the persisted auto-switch (Beta) settings.
 
         Auto-switch is opt-in and stored in ``sequence.json`` under the
         ``autoSwitch`` key. Defaults to disabled at
         ``DEFAULT_AUTO_SWITCH_THRESHOLD``%.
         """
-        cfg = self._sequence_store.load_or_empty().auto_switch
-        return {"enabled": cfg.enabled, "threshold": cfg.threshold}
+        return self._sequence_store.load_or_empty().auto_switch
 
     def set_auto_switch_config(
         self, *, enabled: bool | None = None, threshold: int | None = None
-    ) -> dict[str, Any]:
+    ) -> AutoSwitchConfig:
         """Persist auto-switch (Beta) settings, returning the merged config.
 
         Only the provided fields are updated; the rest keep their stored (or
@@ -1938,17 +1936,16 @@ class ClaudeAccountSwitcher:
             enabled=enabled, threshold=threshold
         )
         self._sequence_store.save(data)
-        cfg = data.auto_switch
-        return {"enabled": cfg.enabled, "threshold": cfg.threshold}
+        return data.auto_switch
 
-    def ensure_auto_switch_enabled(self) -> dict[str, Any]:
+    def ensure_auto_switch_enabled(self) -> AutoSwitchConfig:
         """Return config, persisting ``enabled=True`` if currently disabled.
 
         Foreground monitors (CLI ``--monitor``, TUI "Start monitor now")
         treat starting as opt-in.
         """
         cfg = self.get_auto_switch_config()
-        if not cfg["enabled"]:
+        if not cfg.enabled:
             cfg = self.set_auto_switch_config(enabled=True)
         return cfg
 

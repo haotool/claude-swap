@@ -12,6 +12,7 @@ from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
 from claude_swap.printer import bolded, dimmed, error, muted
+from claude_swap.sequence_store import AutoSwitchConfig
 from claude_swap.switcher import ClaudeAccountSwitcher, auto_switch_display
 
 
@@ -210,7 +211,7 @@ Examples:
         sys.exit(130)
 
 
-def _print_auto_switch_config(config: dict[str, Any]) -> None:
+def _print_auto_switch_config(config: AutoSwitchConfig) -> None:
     _enabled, threshold, on_off, _state = auto_switch_display(config)
     print(f"{bolded('Auto-switch:')} {on_off} {muted(f'(threshold {threshold}%)')}")
 

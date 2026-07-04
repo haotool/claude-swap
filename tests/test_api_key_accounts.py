@@ -30,6 +30,7 @@ from claude_swap.json_output import USAGE_API_KEY, usage_fields
 from claude_swap.models import Platform
 from claude_swap.monitor import MonitorRuntimeState, monitor_step
 from claude_swap.paths import get_credentials_path, get_global_config_path
+from claude_swap.sequence_store import AutoSwitchConfig
 from claude_swap.session import SessionManager
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.transfer import export_accounts, import_accounts
@@ -494,7 +495,9 @@ def test_monitor_active_api_key_is_idle(temp_home: Path):
     state = MonitorRuntimeState()
     with (
         patch.object(
-            s, "get_auto_switch_config", return_value={"enabled": True, "threshold": 95}
+            s,
+            "get_auto_switch_config",
+            return_value=AutoSwitchConfig(enabled=True, threshold=95),
         ),
         patch.object(s, "_live_default_mode_claude_pids", return_value=[123]),
         patch.object(s, "get_active_usage_pct", return_value=None),
@@ -511,7 +514,9 @@ def test_monitor_real_unavailable_still_backs_off(temp_home: Path):
     state = MonitorRuntimeState()
     with (
         patch.object(
-            s, "get_auto_switch_config", return_value={"enabled": True, "threshold": 95}
+            s,
+            "get_auto_switch_config",
+            return_value=AutoSwitchConfig(enabled=True, threshold=95),
         ),
         patch.object(s, "_live_default_mode_claude_pids", return_value=[123]),
         patch.object(s, "get_active_usage_pct", return_value=None),

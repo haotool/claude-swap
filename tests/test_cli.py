@@ -15,6 +15,7 @@ import pytest
 
 from claude_swap import __version__
 from claude_swap import cli
+from claude_swap.sequence_store import AutoSwitchConfig
 from claude_swap.switcher import auto_switch_display
 
 # src layout: ensure subprocess can find claude_swap
@@ -667,10 +668,9 @@ class TestAutoSwitchCommand:
             patch("os.geteuid", return_value=1000),
             patch.object(sys, "argv", ["claude-swap", "auto-switch", "status"]),
         ):
-            switcher_cls.return_value.get_auto_switch_config.return_value = {
-                "enabled": True,
-                "threshold": 95,
-            }
+            switcher_cls.return_value.get_auto_switch_config.return_value = (
+                AutoSwitchConfig(enabled=True, threshold=95)
+            )
             cli.main()
 
         switcher_cls.return_value.get_auto_switch_config.assert_called_once_with()
@@ -685,10 +685,9 @@ class TestAutoSwitchCommand:
             patch("os.geteuid", return_value=1000),
             patch.object(sys, "argv", ["claude-swap", "auto-switch", "enable"]),
         ):
-            switcher_cls.return_value.set_auto_switch_config.return_value = {
-                "enabled": True,
-                "threshold": 95,
-            }
+            switcher_cls.return_value.set_auto_switch_config.return_value = (
+                AutoSwitchConfig(enabled=True, threshold=95)
+            )
             cli.main()
 
         switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
@@ -704,10 +703,9 @@ class TestAutoSwitchCommand:
             patch("os.geteuid", return_value=1000),
             patch.object(sys, "argv", ["claude-swap", "auto-switch", "disable"]),
         ):
-            switcher_cls.return_value.set_auto_switch_config.return_value = {
-                "enabled": False,
-                "threshold": 95,
-            }
+            switcher_cls.return_value.set_auto_switch_config.return_value = (
+                AutoSwitchConfig(enabled=False, threshold=95)
+            )
             cli.main()
 
         switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
@@ -727,10 +725,9 @@ class TestAutoSwitchCommand:
                 ["claude-swap", "auto-switch", "set-threshold", "95"],
             ),
         ):
-            switcher_cls.return_value.set_auto_switch_config.return_value = {
-                "enabled": False,
-                "threshold": 95,
-            }
+            switcher_cls.return_value.set_auto_switch_config.return_value = (
+                AutoSwitchConfig(enabled=False, threshold=95)
+            )
             cli.main()
 
         switcher_cls.return_value.set_auto_switch_config.assert_called_once_with(
@@ -764,7 +761,7 @@ class TestAutoSwitchCommand:
     def test_status_label_matches_tui_on_off(self, capsys):
         from claude_swap import tui
 
-        config = {"enabled": True, "threshold": 88}
+        config = AutoSwitchConfig(enabled=True, threshold=88)
         _enabled, _threshold, on_off, _state = auto_switch_display(config)
 
         cli._print_auto_switch_config(config)

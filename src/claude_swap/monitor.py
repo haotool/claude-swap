@@ -771,12 +771,12 @@ def _monitor_step_body(
     """One raising decision cycle — ``monitor_step`` owns the error boundary."""
     log = _logger(switcher)
     cfg = switcher.get_auto_switch_config()
-    if not cfg["enabled"]:
+    if not cfg.enabled:
         return _step_disabled(
-            state, int(cfg["threshold"]), poll_seconds, log,
+            state, cfg.threshold, poll_seconds, log,
         )
 
-    threshold = int(cfg["threshold"])
+    threshold = cfg.threshold
     wall = time.time()
 
     live_pids = switcher._live_default_mode_claude_pids()
@@ -1238,7 +1238,7 @@ def run_cli_monitor(
     out = stream or sys.stdout
     log = _logger(switcher)
     cfg = switcher.ensure_auto_switch_enabled()
-    threshold = int(cfg["threshold"])
+    threshold = cfg.threshold
 
     pid_path = _pid_file(switcher)
     running_pid = _acquire_monitor_pid(pid_path)

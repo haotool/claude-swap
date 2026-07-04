@@ -26,6 +26,7 @@ from claude_swap.models import (
     InteractiveAutoSwitchIntent,
     SwitchPlanResult,
 )
+from claude_swap.sequence_store import AutoSwitchConfig
 from claude_swap.switcher import (
     DEFAULT_AUTO_SWITCH_THRESHOLD,
     ClaudeAccountSwitcher,
@@ -142,29 +143,29 @@ class TestAutoSwitchConfig:
     def test_default_is_disabled(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         cfg = switcher.get_auto_switch_config()
-        assert cfg == {
-            "enabled": False,
-            "threshold": DEFAULT_AUTO_SWITCH_THRESHOLD,
-        }
+        assert cfg == AutoSwitchConfig(
+            enabled=False,
+            threshold=DEFAULT_AUTO_SWITCH_THRESHOLD,
+        )
 
     def test_enable_and_persist(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         switcher.set_auto_switch_config(enabled=True)
         # A fresh instance reads the persisted value.
-        assert ClaudeAccountSwitcher().get_auto_switch_config()["enabled"] is True
+        assert ClaudeAccountSwitcher().get_auto_switch_config().enabled is True
 
     def test_set_threshold(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         cfg = switcher.set_auto_switch_config(threshold=80)
-        assert cfg["threshold"] == 80
-        assert switcher.get_auto_switch_config()["threshold"] == 80
+        assert cfg.threshold == 80
+        assert switcher.get_auto_switch_config().threshold == 80
 
     def test_partial_update_keeps_other_field(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         switcher.set_auto_switch_config(enabled=True, threshold=70)
         switcher.set_auto_switch_config(threshold=60)
         cfg = switcher.get_auto_switch_config()
-        assert cfg == {"enabled": True, "threshold": 60}
+        assert cfg == AutoSwitchConfig(enabled=True, threshold=60)
 
     @pytest.mark.parametrize("bad", [0, -5, 101, 999])
     def test_invalid_threshold_rejected(self, temp_home: Path, bad: int):
@@ -266,14 +267,14 @@ class TestDoAutoSwitch:
         # Enter on "Enable" (idx 0), then Esc to leave the settings screen.
         screen.getch.side_effect = [10, 27]
         tui._do_auto_switch(screen, switcher)
-        assert switcher.get_auto_switch_config()["enabled"] is True
+        assert switcher.get_auto_switch_config().enabled is True
 
     def test_back_does_nothing(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
         screen.getch.side_effect = [27]  # Esc immediately
         tui._do_auto_switch(screen, switcher)
-        assert switcher.get_auto_switch_config()["enabled"] is False
+        assert switcher.get_auto_switch_config().enabled is False
 
     def test_set_threshold_via_prompt(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
@@ -288,7 +289,7 @@ class TestDoAutoSwitch:
             ),
         ):
             tui._do_auto_switch(screen, switcher)
-        assert switcher.get_auto_switch_config()["threshold"] == 80
+        assert switcher.get_auto_switch_config().threshold == 80
 
     def test_service_toggle_installs_on_macos(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
@@ -410,7 +411,7 @@ class TestRunAutoMonitor:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=10.0),
             patch("claude_swap.tui._auto_perform_switch") as mock_switch,
@@ -429,7 +430,7 @@ class TestRunAutoMonitor:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
             patch(
@@ -453,7 +454,7 @@ class TestRunAutoMonitor:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
         ):
@@ -477,7 +478,7 @@ class TestRunAutoMonitor:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=91.0),
             patch(
@@ -517,7 +518,7 @@ class TestRunAutoMonitor:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch(
                 "claude_swap.tui.monitor_step",
@@ -556,7 +557,7 @@ class TestRunAutoMonitor:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=91.0),
             patch(
@@ -594,7 +595,7 @@ class TestRunAutoMonitor:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
         ):
@@ -622,7 +623,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
         ):
@@ -651,7 +652,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=50.0),
             patch.object(
@@ -677,7 +678,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=50.0),
             patch.object(
@@ -706,7 +707,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
         ):
@@ -730,7 +731,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=99.0),
         ):
@@ -760,7 +761,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
         ):
@@ -793,7 +794,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
         ):
@@ -819,7 +820,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=99.0),
             patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
@@ -869,7 +870,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
             patch.object(
@@ -894,7 +895,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
             patch.object(
@@ -928,7 +929,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
         ):
@@ -970,7 +971,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
         ):
@@ -1006,7 +1007,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
             patch.object(
@@ -1035,7 +1036,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
             patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
@@ -1075,7 +1076,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=100.0),
             patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
@@ -1117,7 +1118,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=100.0),
             patch.object(
@@ -1155,7 +1156,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=100.0),
             patch("claude_swap.monitor.time.time", return_value=1_000_000.0),
@@ -1189,7 +1190,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(
                 switcher,
@@ -1232,7 +1233,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=96.0),
             patch.object(
@@ -1285,7 +1286,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(
                 ClaudeAccountSwitcher,
@@ -1327,7 +1328,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "_read_credentials", return_value=creds),
             patch(
@@ -1374,7 +1375,7 @@ class TestMonitorEngine:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=10.0),
             patch.object(switcher, "_account_is_switchable", return_value=True),
@@ -1476,7 +1477,7 @@ class TestMonitorStepSelfHeals:
             patch.object(
                 switcher,
                 "get_auto_switch_config",
-                return_value={"enabled": True, "threshold": 95},
+                return_value=AutoSwitchConfig(enabled=True, threshold=95),
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=42.0),
         ):
@@ -2230,8 +2231,8 @@ class TestCliAutoMonitor:
                 switcher,
                 "get_auto_switch_config",
                 side_effect=[
-                    {"enabled": True, "threshold": 98},
-                    {"enabled": False, "threshold": 98},
+                    AutoSwitchConfig(enabled=True, threshold=98),
+                    AutoSwitchConfig(enabled=False, threshold=98),
                 ],
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=99.0),
@@ -2252,8 +2253,8 @@ class TestCliAutoMonitor:
                 switcher,
                 "get_auto_switch_config",
                 side_effect=[
-                    {"enabled": True, "threshold": 98},
-                    {"enabled": True, "threshold": 50},
+                    AutoSwitchConfig(enabled=True, threshold=98),
+                    AutoSwitchConfig(enabled=True, threshold=50),
                 ],
             ),
             patch.object(switcher, "get_active_usage_pct", return_value=60.0),

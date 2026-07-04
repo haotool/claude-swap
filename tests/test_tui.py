@@ -23,6 +23,7 @@ from tests.conftest import stub_screen  # noqa: E402
 
 from claude_swap import tui  # noqa: E402
 from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.sequence_store import AutoSwitchConfig
 from claude_swap.switcher import ClaudeAccountSwitcher, auto_switch_display
 
 
@@ -312,10 +313,9 @@ class TestMainLoopHealth:
     def test_health_entry_dispatches_with_flags(self, temp_home: Path):
         switcher = MagicMock(spec=ClaudeAccountSwitcher)
         # _status_line consults the switcher; keep it cheap and deterministic.
-        switcher.get_auto_switch_config.return_value = {
-            "enabled": False,
-            "threshold": 90,
-        }
+        switcher.get_auto_switch_config.return_value = AutoSwitchConfig(
+            enabled=False, threshold=90,
+        )
         switcher._get_sequence_data_migrated.return_value = None
         switcher._get_current_account.return_value = None
 
@@ -344,10 +344,9 @@ class TestMainLoopHealth:
     def test_quick_list_entry_uses_no_flags(self, temp_home: Path):
         """Regression: the list entry stays flag-free."""
         switcher = MagicMock(spec=ClaudeAccountSwitcher)
-        switcher.get_auto_switch_config.return_value = {
-            "enabled": False,
-            "threshold": 90,
-        }
+        switcher.get_auto_switch_config.return_value = AutoSwitchConfig(
+            enabled=False, threshold=90,
+        )
         switcher._get_sequence_data_migrated.return_value = None
         switcher._get_current_account.return_value = None
 
@@ -524,10 +523,14 @@ class TestAutoSwitchHandlers:
     def test_auto_toggle_flips_enabled(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         screen = stub_screen()
-        tui._auto_toggle(screen, switcher, {"enabled": False, "threshold": 90})
-        assert switcher.get_auto_switch_config()["enabled"] is True
-        tui._auto_toggle(screen, switcher, {"enabled": True, "threshold": 90})
-        assert switcher.get_auto_switch_config()["enabled"] is False
+        tui._auto_toggle(
+            screen, switcher, AutoSwitchConfig(enabled=False, threshold=90),
+        )
+        assert switcher.get_auto_switch_config().enabled is True
+        tui._auto_toggle(
+            screen, switcher, AutoSwitchConfig(enabled=True, threshold=90),
+        )
+        assert switcher.get_auto_switch_config().enabled is False
 
     def test_auto_threshold_persists_valid_value(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
@@ -537,7 +540,7 @@ class TestAutoSwitchHandlers:
             patch("claude_swap.tui.curses.curs_set"),
         ):
             tui._auto_threshold(screen, switcher)
-        assert switcher.get_auto_switch_config()["threshold"] == 80
+        assert switcher.get_auto_switch_config().threshold == 80
 
     def test_auto_threshold_rejects_non_integer(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
