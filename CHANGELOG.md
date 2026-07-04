@@ -29,6 +29,44 @@ Release version is defined in `pyproject.toml` (currently `0.16.0b1+haotool.1`).
   pass over the slot. A re-login or import that lands after the park wins over
   the parked rotation. Previously the token was dropped with only a log
   record, degrading the slot to manual re-login.
+- **Windows service hardening (8 fixes):**
+  - `service uninstall` stops the running monitor before unregistering the
+    task, so uninstall no longer strands an orphan monitor that blocks the
+    next install.
+  - The monitor's Windows PID probes (`tasklist` / PowerShell CIM) are
+    bounded by a 10s timeout and no longer flash console windows under
+    `pythonw`; a wedged probe reads as "undeterminable" instead of stalling
+    a supervised start forever.
+  - The Task Scheduler watchdog re-fire is anchored to a time trigger, so it
+    also covers the logon session the service was installed in — the logon
+    trigger alone only armed at the next sign-in.
+  - `service install` warns that Task Scheduler cannot forward
+    `CLAUDE_CONFIG_DIR` into the monitor process.
+  - Redirected/piped output on Windows degrades to `errors="replace"`, so
+    `cswap --list > file` cannot crash on tree glyphs under a cp1252 locale.
+  - The WSL keepalive suggestion is now `sleep infinity`, which ships with
+    coreutils on the default Ubuntu image — `dbus-launch` (dbus-x11) does
+    not.
+  - The shared decision log keeps appending when a size-cap rollover is
+    refused by a concurrent holder (Windows sharing violation) instead of
+    silencing every record after it.
+  - The task XML scopes its logon trigger to the installing user
+    (`DOMAIN\user`), system binaries resolve under `%SystemRoot%` rather
+    than PATH, and a failed task query reports the failure instead of
+    "not installed".
+- **macOS purge sweeps both credential backends:** account removal and
+  `--purge` delete Keychain items *and* fallback `.enc` files
+  unconditionally, instead of trusting the per-process capability cache to
+  know which backend past runs wrote to.
+- **Monitor survives wedged locks and torn reads:** a `FileLock` held past
+  its timeout by a concurrent switch/list, or a transient read error racing
+  an `os.replace` writer (Windows sharing violations), maps to the
+  usage-unavailable backoff and retries next cycle — the service adapters
+  previously treated the escaping exception as fatal.
+- **`sync_live_to_backup` keeps its never-raises promise:** a busy lock
+  (`LockError`) during the live→backup sync is logged and swallowed like
+  every other environmental failure, instead of aborting the surrounding
+  list/status/switch pass.
 
 ### Changed
 
@@ -41,6 +79,11 @@ Release version is defined in `pyproject.toml` (currently `0.16.0b1+haotool.1`).
 - **Test hardening:** the `--import` rollback failure matrix and the service
   backends' status/logs/error surfaces are now covered (transfer 82% → 95%;
   launchd/systemd/task_scheduler 98–100% line coverage).
+- **Author-style convergence:** fork-only modules carry contract docstrings in
+  upstream's voice, spellings follow upstream's American convention, and
+  `switcher.py`'s indentation, docstrings, and import prologue were re-aligned
+  with upstream — shrinking the shared-file diff against `upstream/main` by
+  ~240 lines. Comments/docs only, no behavior change.
 
 ## [0.15.1+haotool.1] — 2026-07-03
 
