@@ -308,7 +308,12 @@ Defaults live in settings.json in the backup root; flags override them.
                 else logging.INFO
             )
             log.log(level, "auto: %s", event.human())
-            stdout_emit(event)
+            try:
+                stdout_emit(event)
+            except BrokenPipeError:
+                # `cswap auto --json | head` closes the pipe; treat it as a
+                # stop request instead of cascading through the tick guard.
+                engine.stop()
 
         settings = merged_with_cli(load_settings(switcher.backup_dir), args)
         engine = AutoSwitchEngine(

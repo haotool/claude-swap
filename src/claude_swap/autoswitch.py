@@ -528,6 +528,9 @@ class AutoSwitchEngine:
             self._emit(ErrorEvent(message=str(e), transient=True))
             return TickOutcome.ERROR
         except Exception as e:  # pragma: no cover - safety net
+            # The event stream carries only the message; keep the traceback in
+            # the structured log so pythonw crashes stay diagnosable.
+            _logger.warning("auto-switch tick crashed", exc_info=True)
             self._emit(
                 ErrorEvent(message=f"{type(e).__name__}: {e}", transient=True)
             )
@@ -1058,6 +1061,7 @@ class AutoSwitchEngine:
             try:
                 outcome = self.tick()
             except Exception as e:  # pragma: no cover - tick() already guards
+                _logger.warning("auto-switch loop crashed", exc_info=True)
                 self._emit(
                     ErrorEvent(message=f"{type(e).__name__}: {e}", transient=True)
                 )
