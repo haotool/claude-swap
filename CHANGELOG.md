@@ -6,8 +6,35 @@ Release version is defined in `pyproject.toml` (currently `0.17.0+haotool.1`).
 
 ## [Unreleased]
 
+> **Upgrading with an installed background service?** Run
+> `cswap service install` once after upgrading. The old service command line
+> (`--monitor --service-monitor`) is retired; until you reinstall, the
+> installed service starts, prints a migration note, and exits cleanly —
+> no auto-switching happens and no supervisor restart loop is triggered.
+
 ### Added
 
+- **Upstream v0.17.0 merged** (per-account usage store, adaptive
+  auto-switch, `cswap config` — upstream #73/#84/#88 and the 07-04 `main`
+  series):
+  - **Per-account usage store.** Usage snapshots persist per account in
+    `usage_store.json` with stale-on-error semantics (a failed fetch keeps
+    the last good reading, marked stale, instead of blanking the row),
+    staggered fetches, and a per-account `backoffUntil` that honors the
+    server's `Retry-After` on 429s. `--list`/`--status`/TUI read through
+    the store; the fork's `usage_cache` is retired in its favor (one cache,
+    upstream's).
+  - **Adaptive auto-switch polling.** Each tick polls the active account
+    plus one rotating candidate instead of the whole roster; polling
+    escalates near the threshold, skips ahead to the earliest quota reset
+    when everything is exhausted, and slows down when usage is not moving.
+  - **Idle-hold.** An expired active token with Claude Code idle holds
+    instead of switching — protection resumes on the next activity.
+  - **`cswap config` subcommand.** `config list|get|set|unset|path` edits
+    `settings.json` with strict validation; settings are defined in one
+    table (`SettingSpec`) shared by loading, validation, and help text.
+  - **Subcommand aliases** (`cswap ls`, `rm`, `update`, …) and usage-fetch
+    failure classification with WARNING-level logs.
 - **Upstream v0.16.0 merged** (`cswap auto` engine and per-model usage,
   upstream #81/#83 plus the author's alignment fix): `cswap auto` runs a
   UI-agnostic threshold auto-switcher — poll usage, switch proactively to
@@ -37,13 +64,21 @@ Release version is defined in `pyproject.toml` (currently `0.17.0+haotool.1`).
   the structured `claude-swap.log`, so background runs stay observable on
   Windows where `pythonw` has no visible stdout.
 - **One settings file.** Auto-switch configuration lives in
-  `settings.json` (`autoswitch.threshold` etc.). A one-time migration
-  moves a previously tuned threshold out of `sequence.json` and drops the
-  legacy `autoSwitch` section.
-- **Retry-After honored by the engine.** When the usage API rate-limits a
-  poll, the engine's next delay respects the server's `Retry-After`
-  (capped at 15 minutes) instead of hammering on the fixed interval —
-  carried over from the retired monitor, and an upstream PR candidate.
+  `settings.json` (`autoswitch.threshold` etc.), managed with
+  `cswap config`. A one-time migration moves a previously tuned threshold
+  out of `sequence.json` and drops the legacy `autoSwitch` section; an
+  out-of-range legacy threshold is clamped into the engine's valid range
+  with a warning instead of silently discarded.
+- **Breaking: `enabled=false` is gone.** The retired monitor honored
+  `autoSwitch.enabled=false` as "watch but never switch"; the engine has
+  no disabled mode — an installed service switches proactively. The
+  migration warns on stderr and in the log when it drops a legacy
+  `enabled=false` while a service is installed; run
+  `cswap service uninstall` if you don't want proactive switching.
+- **Fork Retry-After patch superseded.** The fork's engine-level
+  `Retry-After` handling (previously listed here as "capped at 15
+  minutes") is retired: upstream's usage store now persists a per-account
+  `backoffUntil` honoring `Retry-After`, which replaces it wholesale.
 - **Schema-drift warning moved to the shared parser.** An answered usage
   payload with no recognized rate-limit windows logs one structured
   warning from `build_usage_result`, covering the engine, `--list`, and
@@ -70,19 +105,12 @@ Release version is defined in `pyproject.toml` (currently `0.17.0+haotool.1`).
   pass over the slot. A re-login or import that lands after the park wins over
   the parked rotation. Previously the token was dropped with only a log
   record, degrading the slot to manual re-login.
-- **Windows service hardening (8 fixes):**
-  - `service uninstall` stops the running monitor before unregistering the
-    task, so uninstall no longer strands an orphan monitor that blocks the
-    next install.
-  - The monitor's Windows PID probes (`tasklist` / PowerShell CIM) are
-    bounded by a 10s timeout and no longer flash console windows under
-    `pythonw`; a wedged probe reads as "undeterminable" instead of stalling
-    a supervised start forever.
+- **Windows service hardening:**
   - The Task Scheduler watchdog re-fire is anchored to a time trigger, so it
     also covers the logon session the service was installed in — the logon
     trigger alone only armed at the next sign-in.
   - `service install` warns that Task Scheduler cannot forward
-    `CLAUDE_CONFIG_DIR` into the monitor process.
+    `CLAUDE_CONFIG_DIR` into the service process.
   - Redirected/piped output on Windows degrades to `errors="replace"`, so
     `cswap --list > file` cannot crash on tree glyphs under a cp1252 locale.
   - The WSL keepalive suggestion is now `sleep infinity`, which ships with
@@ -99,11 +127,6 @@ Release version is defined in `pyproject.toml` (currently `0.17.0+haotool.1`).
   `--purge` delete Keychain items *and* fallback `.enc` files
   unconditionally, instead of trusting the per-process capability cache to
   know which backend past runs wrote to.
-- **Monitor survives wedged locks and torn reads:** a `FileLock` held past
-  its timeout by a concurrent switch/list, or a transient read error racing
-  an `os.replace` writer (Windows sharing violations), maps to the
-  usage-unavailable backoff and retries next cycle — the service adapters
-  previously treated the escaping exception as fatal.
 - **`sync_live_to_backup` keeps its never-raises promise:** a busy lock
   (`LockError`) during the live→backup sync is logged and swallowed like
   every other environmental failure, instead of aborting the surrounding
@@ -114,39 +137,28 @@ Release version is defined in `pyproject.toml` (currently `0.17.0+haotool.1`).
   bootstrap can land in that window — up to three times, 0.5s apart, instead
   of leaving the agent installed but not loaded. Any other failure still
   surfaces immediately.
-- **Monitor backs off on persistent switch failures:** consecutive failed
-  switch attempts raise the retry interval exponentially (capped at 300s)
-  instead of re-paying a full plan and forced-refresh churn every poll cycle
-  while pinned at the threshold. Success, idle, or a wake gap resets the
-  backoff.
 - **A consumed rotation survives failed backup verification:** when the
   backup write cannot be verified after a network refresh has already
   consumed the single-use refresh token, the rotation is parked in the
   slot's pending file (the same recovery path as a wedged lock) before the
   error surfaces, instead of being lost with the error.
-- **Windows PID probe survives localized `tasklist` output:** the CSV is
-  parsed with the `csv` module (quoted image names may contain commas) and
-  "no process owns the PID" is decided structurally — no data row carries
-  the queried PID — instead of matching the English-only `INFO:` notice.
-- **Stale PID files are reclaimed by atomic rename:** the reclaim captures
-  the file under a unique temp name, so exactly one reclaimer wins the race
-  and a racer's fresh PID file is restored with no-overwrite semantics
-  instead of deleted — closing the read-verify-unlink window that could let
-  two monitors run at once.
-- **Threshold triggers refuse masked stale readings:** when a trusted prior
-  cache row masks this cycle's failed usage fetch, the monitor holds instead
-  of switching on a pct that may be arbitrarily old, and switches only once
-  a fresh fetch succeeds.
 - **A lost pending-rotation recovery race is quiet:** when two concurrent
   passes race to recover the same parked rotation, the loser's read of the
   already-consumed file logs at debug instead of warning "Discarding
   unreadable pending credential rotation" over a rotation that was in fact
   applied.
-- **An honored Retry-After no longer reads as a wake gap:** the wake-gap
-  detector accounts for the interval the monitor was told to sleep, so
-  honoring a long server backoff (up to 300s > the 4x poll-ceiling window)
-  no longer resets the failure count and velocity baseline on wake. A real
-  machine sleep past the planned interval still resets.
+- **systemd `service status` shows real state lines:** the status detail
+  now comes from `systemctl show -p ActiveState -p MainPID`; the previous
+  filter only recognized launchctl vocabulary and dropped every line of
+  `systemctl status` output.
+- **Engine crash tracebacks reach the log:** the tick/loop safety nets log
+  the full traceback into `claude-swap.log` before emitting the error
+  event, so a service crash under `pythonw` (no stderr) stays diagnosable.
+- **A corrupt quarantine state entry no longer wedges every tick:** a
+  non-dict entry in `autoswitch_state.json` is dropped (with an
+  unquarantine event) instead of raising before each poll.
+- **`cswap auto --json | head` exits cleanly:** a closed stdout pipe stops
+  the engine instead of cascading `BrokenPipeError` through the tick guard.
 
 ### Changed
 
@@ -164,21 +176,11 @@ Release version is defined in `pyproject.toml` (currently `0.17.0+haotool.1`).
   `switcher.py`'s indentation, docstrings, and import prologue were re-aligned
   with upstream — shrinking the shared-file diff against `upstream/main` by
   ~240 lines. Comments/docs only, no behavior change.
-- **Auto-switch config seam is typed:** `get_auto_switch_config` /
-  `ensure_auto_switch_enabled` / `set_auto_switch_config` return the
-  sequence-store `AutoSwitchConfig` dataclass instead of a `dict[str, Any]`,
-  so the monitor, CLI, and TUI read `.enabled` / `.threshold` under
-  mypy-strict. Internal typing only — no behavior change.
-- **Monitor's sequence seam is typed:** the `MonitorHost` protocol and
-  `usage_policy.pick_best_from_snapshots` consume the sequence-store
-  `SequenceData` view instead of a raw `dict[str, Any]`. The raw-dict shim
-  remains for the list/migration/transfer consumers. Internal typing only —
-  no behavior change.
 - **Test suite reorganized:** the two largest test files were split by
   feature (switch path, broken-slot resilience, add-account, org migration,
-  purge, monitor PID lifecycle, poll cadence) and the obvious copy-paste
-  tables converted to `pytest.mark.parametrize`. No assertion was removed;
-  coverage is unchanged.
+  purge) and the obvious copy-paste tables converted to
+  `pytest.mark.parametrize`. No assertion was removed; coverage is
+  unchanged.
 - **CI registers a real scheduled task on Windows:** a new
   `windows-task-scheduler` job round-trips the production task XML through
   `Register-ScheduledTask` under a run-unique name (no `Start-ScheduledTask`)
