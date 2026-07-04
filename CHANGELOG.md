@@ -2,11 +2,52 @@
 
 All notable user-facing changes to claude-swap are documented here.
 
-Release version is defined in `pyproject.toml` (currently `0.16.0b1+haotool.1`).
+Release version is defined in `pyproject.toml` (currently `0.16.0+haotool.1`).
 
 ## [Unreleased]
 
 ### Added
+
+- **Upstream v0.16.0 merged** (`cswap auto` engine and per-model usage,
+  upstream #81/#83 plus the author's alignment fix): `cswap auto` runs a
+  UI-agnostic threshold auto-switcher — poll usage, switch proactively to
+  the account with the most headroom, quarantine dead refresh-token
+  lineages, sleep until the earliest quota reset when everything is
+  exhausted — with `--once` cron ticks (outcome in the exit code),
+  `--json` event streams, `--dry-run`, and `settings.json` defaults.
+  `--list`/`--status` now render per-model weekly windows (e.g. `Fable:`)
+  with an `(!)` at-limit marker, integrated into the fork's `ListReporter`
+  pipeline and label-aligned across rows. Manual and automatic switches
+  (and active-token persists) now hold Claude Code's own advisory locks
+  (`~/.claude.lock`, `~/.claude.json.lock`) while writing, so a swap can
+  never interleave with a running token refresh. OAuth refresh failures
+  are classified (`RefreshOutcome`): dead grants quarantine, network blips
+  retry. Upstream's rewritten `--list` rendering and `persist_active`
+  hardening were ported into `list_reporter.py`, where the fork keeps
+  those paths; the new engine modules were annotated to keep the repo-wide
+  `mypy --strict` gate green.
+### Changed
+
+- **One decision core.** The fork's monitor loop is retired; the upstream
+  `cswap auto` engine is the only auto-switcher. `cswap service install`
+  supervises it on all three platforms (same service slot and log
+  surfaces), the TUI's **Auto-switch at limit** drives the same engine in
+  the foreground, and `cswap --monitor` / `service install --runner` /
+  the `auto-switch` subcommand are gone. Engine events are mirrored into
+  the structured `claude-swap.log`, so background runs stay observable on
+  Windows where `pythonw` has no visible stdout.
+- **One settings file.** Auto-switch configuration lives in
+  `settings.json` (`autoswitch.threshold` etc.). A one-time migration
+  moves a previously tuned threshold out of `sequence.json` and drops the
+  legacy `autoSwitch` section.
+- **Retry-After honored by the engine.** When the usage API rate-limits a
+  poll, the engine's next delay respects the server's `Retry-After`
+  (capped at 15 minutes) instead of hammering on the fixed interval —
+  carried over from the retired monitor, and an upstream PR candidate.
+- **Schema-drift warning moved to the shared parser.** An answered usage
+  payload with no recognized rate-limit windows logs one structured
+  warning from `build_usage_result`, covering the engine, `--list`, and
+  the TUI alike.
 
 - **Upstream v0.16.0b1 merged** (`--share-history`, upstream #80 plus the
   author's hardening pass): `cswap run --share-history` links `projects/` and

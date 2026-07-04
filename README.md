@@ -8,7 +8,7 @@ Multi-account switcher for Claude Code. Easily switch between multiple Claude ac
 
 | Item | Value |
 |------|-------|
-| **Release version (SSOT)** | `pyproject.toml` → `[project].version` (currently `0.16.0b1+haotool.1`) |
+| **Release version (SSOT)** | `pyproject.toml` → `[project].version` (currently `0.16.0+haotool.1`) |
 | **Scheme** | [PEP 440](https://peps.python.org/pep-0440/) with a **local version label** (`+haotool.1`) to distinguish this fork from upstream |
 | **PyPI** | **Not publishable** — PyPI rejects local version segments (`+…`); this fork is installed from git/source only |
 | **Upstream PyPI** | Publishes plain semver (e.g. `0.15.1`) without the `+haotool.*` suffix |
@@ -144,50 +144,27 @@ cswap run 2 --share-history     # share your chat history with this account too
 
 Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, etc.), but each account keeps its own chat history. Pass `--share-history` if you want your accounts to continue the same conversations — a session started under one account shows up in `--resume` under the others, and nothing already saved is lost. Not supported on Windows yet.
 
-### Auto-switch at usage limit (Beta)
+### The interactive menu
 
-Launch the interactive menu with `cswap --tui`. Alongside the account actions it
+Launch the arrow-key menu with `cswap --tui`. Alongside the account actions it
 offers **Watch (live status + usage)** — a read-only dashboard that re-captures
-`cswap --list` on an interval and redraws in place — and **Auto-switch at limit
-(Beta)**:
+`cswap --list` on an interval and redraws in place — and **Auto-switch at
+limit**, a frontend over the same engine as `cswap auto`:
 
 ```bash
 cswap --tui
 ```
 
-Or start the same foreground monitor directly from the CLI:
-
-```bash
-cswap --monitor
-```
-
-From there you can:
-
-- **Enable/Disable** automatic switching (the setting persists across runs).
-- **Set threshold** — the usage percentage that triggers a switch (default `95%`).
-- **Start monitor now** — runs the same adaptive auto-switch engine as
-  `cswap --monitor` (typically 5–60s polling based on usage velocity).
-  When usage reaches the threshold, it picks the best target using trusted
-  usage snapshots: unsaturated accounts first, otherwise the soonest
-  cooldown reset. If you are already on that account, it holds until the
-  window frees. Press `s` to check immediately, or `q`/`Esc` to stop.
+From there you can set the switch threshold (persisted in `settings.json`),
+install or remove the background service, and run the engine in the foreground
+with a live event feed. Press `s` to check immediately, `q`/`Esc` to stop.
 
 Because switching doesn't require a Claude Code restart (see the note above),
 the new account takes effect on your next message — on macOS once the Keychain
-cache expires. For automated paths (TUI monitor + background service) the target
-account's OAuth token is force-refreshed *before* activation, so the first API
-call after handoff uses a freshly-issued token with maximum remaining lifetime.
-The TUI's **Start monitor now** is foreground-only; `cswap --monitor` and
-`cswap service install` run the same engine in the background. `cswap --monitor`
-records its PID and exits without starting another monitor if one is already
-running. Manual
-`cswap --switch` still uses predictable round-robin; automated paths never
-guess from stale cache — they require fresh usage snapshots (from polling or
-`cswap --list`).
-
-> **Beta:** automated switching is new. Usage percentages come from the same
-> API as `cswap --list`. Please report any rough
-> edges via [Issues](https://github.com/haotool/claude-swap/issues).
+cache expires. The engine refreshes the target's OAuth token *before*
+activation when it is close to expiry, so the first API call after handoff
+uses a token with plenty of lifetime left. Manual `cswap --switch` still uses
+predictable round-robin.
 
 #### Run it in the background
 
@@ -196,20 +173,20 @@ Install and run `cswap` in the **same environment as Claude Code** — WSL `~/.c
 ```bash
 cswap service install      # start at login (platform-native supervisor)
 cswap service status       # is it loaded? last exit?
-cswap service logs         # tail recent monitor output
+cswap service logs         # tail recent engine output
 cswap service uninstall    # stop and remove
 ```
 
-The service runs the same `cswap --monitor` loop, restarting on failure and writing a structured log to `<backup_dir>/claude-swap.log`. `cswap --monitor` remains available for a foreground run.
+The service supervises the same `cswap auto` loop (see [Automatic switching](#automatic-switching)), restarting on failure. Engine events go to the supervisor's log files and are mirrored into the structured log at `<backup_dir>/claude-swap.log` — the surface to check on Windows, where the hidden task has no visible stdout.
 
 | Platform | Supervisor | What `install` writes |
 |----------|------------|------------------------|
 | **macOS** | launchd LaunchAgent | `~/Library/LaunchAgents/com.claude-swap.monitor.plist` — stdout/stderr → `<backup_dir>/logs/monitor.{out,err}` |
-| **Linux** | systemd user unit | `~/.config/systemd/user/cswap-monitor.service` — `systemctl --user enable --now`; also runs `loginctl enable-linger $USER` so the monitor survives logout |
+| **Linux** | systemd user unit | `~/.config/systemd/user/cswap-monitor.service` — `systemctl --user enable --now`; also runs `loginctl enable-linger $USER` so the engine survives logout |
 | **Windows** | Task Scheduler | Per-user **At log on** task `cswap-monitor` (no admin, hidden via `pythonw.exe`); task XML saved under `<backup_dir>/logs/` |
 | **WSL2** | systemd user unit (inside the distro) | Same as Linux; see below |
 
-**Linux / WSL (systemd --user).** The unit runs `<absolute python> -m claude_swap --monitor` with `Restart=on-failure` and `RestartSec=30`. After install, check with `cswap service status` or `journalctl --user -u cswap-monitor -f`. If `loginctl enable-linger` fails, the monitor may stop when you log out — enable linger manually for your user.
+**Linux / WSL (systemd --user).** The unit runs `<absolute python> -m claude_swap auto` with `Restart=on-failure` and `RestartSec=30`. After install, check with `cswap service status` or `journalctl --user -u cswap-monitor -f`. If `loginctl enable-linger` fails, the engine may stop when you log out — enable linger manually for your user.
 
 **WSL2.** Install `cswap` **inside** the WSL distro where Claude Code runs, not on Windows native. User systemd must be enabled in `/etc/wsl.conf`:
 
@@ -218,7 +195,7 @@ The service runs the same `cswap --monitor` loop, restarting on failure and writ
 systemd=true
 ```
 
-Then from Windows: `wsl --shutdown`, reopen the distro, and run `cswap service install` there. WSL shuts the distro down when idle, and [systemd services do not keep it alive](https://learn.microsoft.com/en-us/windows/wsl/systemd) — so the monitor stops unless a user-launched process holds the instance open. To boot the distro at Windows login **and** keep it alive, add a **Task Scheduler** task (At log on, no admin):
+Then from Windows: `wsl --shutdown`, reopen the distro, and run `cswap service install` there. WSL shuts the distro down when idle, and [systemd services do not keep it alive](https://learn.microsoft.com/en-us/windows/wsl/systemd) — so the engine stops unless a user-launched process holds the instance open. To boot the distro at Windows login **and** keep it alive, add a **Task Scheduler** task (At log on, no admin):
 
 ```text
 wsl.exe -d <distro> -u <user> --exec sleep infinity
@@ -226,24 +203,22 @@ wsl.exe -d <distro> -u <user> --exec sleep infinity
 
 `sleep infinity` never exits, which is what keeps the instance from idle-terminating (a command that exits immediately would not), and it ships with coreutils on every distro. Replace `<distro>` with `echo $WSL_DISTRO_NAME` inside WSL and `<user>` with your Linux username. `cswap service install` prints this guidance on WSL.
 
-**Windows (native).** The scheduled task runs at logon under your user account (`RunLevel` limited — no elevation). Monitor output goes to the structured log; use `cswap service logs` to inspect it.
+**Windows (native).** The scheduled task runs at logon under your user account (`RunLevel` limited — no elevation). Engine events go to the structured log; use `cswap service logs` to inspect it.
 
-#### Failure modes and upgrade
+#### Failure modes
 
-Automated switching is **fail-closed**: it never guesses from stale cache.
-Manual `cswap --switch` still uses round-robin.
+The engine polls the usage API directly each tick, so there is no cache to
+pre-seed. Common event lines and what they mean:
 
-| Symptom | Meaning | What to do |
+| Event | Meaning | What to do |
 |---------|---------|------------|
-| `no trusted usage snapshots` / `Cannot choose auto-switch target` | Usage cache is cold or expired at threshold — the monitor will not rotate blindly | Run `cswap --list` to seed fresh snapshots (do this on every machine with auto-switch enabled **before** upgrading) |
-| `already on optimal` / hold at threshold | You are already on the soonest-to-free account; rotation would not help | Expected — wait for the cooldown window to reset |
-| `Only one account` (background monitor) | Auto-switch needs at least two managed accounts | Add another account with `cswap --add-account` |
-| Monitor idle / no switches after upgrade | Background service may still be on an old build or cold cache | After upgrading: run `cswap --list`, then `cswap service install`, then `cswap service status` |
+| `no switch: cooldown` | A switch just happened; the cooldown floor bounds the switch rate | Expected — wait it out, or lower `cooldownSeconds` in `settings.json` |
+| `no switch: no-viable-target` | No candidate has meaningfully more headroom than the active account | Expected near-uniform usage; add an account if it persists |
+| `all accounts exhausted` | Every account is at its limit; the engine sleeps until the earliest reset | Expected — it wakes and switches on its own |
+| `account quarantined` | An account's refresh token has died | Log in with it and re-run `cswap --add-account --slot N` |
 
-**Upgrade checklist (beta)**
-
-1. **Before deploy:** `cswap --list` on each machine with auto-switch enabled.
-2. **After deploy:** `cswap service install` (background users), verify `cswap service status`, tail `cswap service logs` or `claude-swap.log` for the first threshold event.
+After upgrading, reinstall the service once (`cswap service install`) so the
+supervisor picks up the new entry point, then check `cswap service status`.
 
 ### Refresh expired tokens
 
@@ -266,8 +241,7 @@ cswap --health                  # Show account health, usage, and OAuth token st
 cswap --status                  # Show current account
 cswap --add-account --slot 3    # Add account to a specific slot (prompts before overwrite)
 cswap --remove-account 2        # Remove an account
-cswap --tui                     # Launch the interactive arrow-key menu (incl. Watch + auto-switch, Beta)
-cswap --monitor                 # Run the foreground auto-switch monitor
+cswap --tui                     # Launch the interactive arrow-key menu (incl. Watch + auto-switch)
 cswap --upgrade                 # Upgrade upstream/PyPI installs; fork builds use git pull
 cswap --purge                   # Remove all claude-swap data
 ```
