@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from claude_swap import oauth
 from claude_swap.credentials import ActiveCredentials, pending_rotation_path
 from claude_swap.json_output import USAGE_API_KEY, USAGE_KEYCHAIN_UNAVAILABLE
@@ -65,6 +67,56 @@ class TestListAccountsUsage:
         assert "└ 7d:" in output
         assert "10%" in output
         assert "50%" in output
+
+    def test_list_renders_per_model_scoped_rows_end_to_end(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+        capsys,
+    ):
+        """A weekly_scoped limit flows API → cache → _format_usage_lines → --list."""
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+        backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
+
+        usage_response = {
+            "five_hour": {"utilization": 10.0, "resets_at": "2026-01-01T00:00:00Z"},
+            "seven_day": {"utilization": 50.0, "resets_at": "2026-01-02T00:00:00Z"},
+            "limits": [
+                {
+                    "kind": "weekly_scoped",
+                    "percent": 100,
+                    "resets_at": "2026-01-02T00:00:00Z",
+                    "scope": {"model": {"display_name": "Fable"}},
+                },
+            ],
+        }
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(usage_response).encode()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        with (
+            patch.object(switcher, "_read_credentials", return_value=active_creds),
+            patch.object(
+                switcher, "_read_account_credentials", return_value=backup_creds
+            ),
+            patch(
+                "claude_swap.oauth.urllib.request.urlopen", return_value=mock_response
+            ),
+        ):
+            switcher.list_accounts()
+
+        output = capsys.readouterr().out
+        assert "Fable:" in output
+        assert "(!)" in output  # 100% → at-limit marker
+        # The scoped label widens every label column, 5h/7d included.
+        assert "5h:" in output and "7d:" in output
 
     def test_list_syncs_refreshed_active_credentials_to_backup(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
@@ -2090,6 +2142,19 @@ class TestFormatUsageLines:
         usage = {"scoped": [{"name": "Fable", "pct": 100.0}]}
         lines = _format_usage_lines(usage)
         assert lines == ["Fable: 100%  (!)"]
+
+    @pytest.mark.parametrize(
+        ("pct", "flagged"),
+        [
+            (99.0, False),
+            (99.9, False),
+            (100.0, True),
+            (120.0, True),
+        ],
+    )
+    def test_at_limit_marker_boundary(self, pct: float, flagged: bool):
+        lines = _format_usage_lines({"scoped": [{"name": "Fable", "pct": pct}]})
+        assert lines[0].rstrip().endswith("(!)") is flagged
 
     def test_no_scoped_key_renders_only_standard_windows(self):
         usage = {"five_hour": {"pct": 7.0}, "seven_day": {"pct": 72.0}}
