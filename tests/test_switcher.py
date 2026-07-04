@@ -34,31 +34,35 @@ from tests.conftest import usage_payload as _usage_payload
 class TestEmailValidation:
     """Test email validation."""
 
-    def test_valid_emails(self, temp_home: Path):
-        """Test that valid emails pass validation."""
-        switcher = ClaudeAccountSwitcher()
-        valid_emails = [
+    @pytest.mark.parametrize(
+        "email",
+        [
             "user@example.com",
             "user.name@example.co.uk",
             "user+tag@example.org",
             "user123@test.io",
-        ]
-        for email in valid_emails:
-            assert switcher._validate_email(email), f"Expected {email} to be valid"
-
-    def test_invalid_emails(self, temp_home: Path):
-        """Test that invalid emails fail validation."""
+        ],
+    )
+    def test_valid_emails(self, temp_home: Path, email: str):
+        """Test that valid emails pass validation."""
         switcher = ClaudeAccountSwitcher()
-        invalid_emails = [
+        assert switcher._validate_email(email), f"Expected {email} to be valid"
+
+    @pytest.mark.parametrize(
+        "email",
+        [
             "not-an-email",
             "@example.com",
             "user@",
             "user@.com",
             "",
             "user@com",
-        ]
-        for email in invalid_emails:
-            assert not switcher._validate_email(email), f"Expected {email} to be invalid"
+        ],
+    )
+    def test_invalid_emails(self, temp_home: Path, email: str):
+        """Test that invalid emails fail validation."""
+        switcher = ClaudeAccountSwitcher()
+        assert not switcher._validate_email(email), f"Expected {email} to be invalid"
 
 
 class TestFindAccountSlot:
@@ -72,38 +76,22 @@ class TestFindAccountSlot:
         }
     }
 
-    def test_matches_composite_identity(self):
+    @pytest.mark.parametrize(
+        ("email", "org_uuid", "expected"),
+        [
+            pytest.param("user@example.com", "org-123", "2", id="composite-identity"),
+            pytest.param("user@example.com", "org-999", None, id="same-email-wrong-org"),
+            pytest.param("nobody@example.com", "", None, id="absent-email"),
+            pytest.param("user@example.com", "", "1", id="empty-org-matches-empty-field"),
+            pytest.param("other@example.com", "", "3", id="empty-org-matches-missing-field"),
+        ],
+    )
+    def test_composite_key_lookup(
+        self, email: str, org_uuid: str, expected: str | None
+    ):
         assert (
-            ClaudeAccountSwitcher._find_account_slot(
-                self.DATA, "user@example.com", "org-123"
-            )
-            == "2"
-        )
-
-    def test_same_email_wrong_org_is_no_match(self):
-        assert (
-            ClaudeAccountSwitcher._find_account_slot(
-                self.DATA, "user@example.com", "org-999"
-            )
-            is None
-        )
-
-    def test_absent_email_is_no_match(self):
-        assert (
-            ClaudeAccountSwitcher._find_account_slot(
-                self.DATA, "nobody@example.com", ""
-            )
-            is None
-        )
-
-    def test_empty_org_matches_missing_or_empty_org_field(self):
-        assert (
-            ClaudeAccountSwitcher._find_account_slot(self.DATA, "user@example.com", "")
-            == "1"
-        )
-        assert (
-            ClaudeAccountSwitcher._find_account_slot(self.DATA, "other@example.com", "")
-            == "3"
+            ClaudeAccountSwitcher._find_account_slot(self.DATA, email, org_uuid)
+            == expected
         )
 
     def test_empty_data_is_no_match(self):
@@ -113,36 +101,31 @@ class TestFindAccountSlot:
 class TestPlatformDetection:
     """Test platform detection."""
 
-    @patch("sys.platform", "darwin")
-    def test_macos_detection(self, temp_home: Path):
-        """Test macOS platform detection."""
-        assert Platform.detect() == Platform.MACOS
-
-    @patch("sys.platform", "linux")
-    @patch.dict(os.environ, {}, clear=False)
-    def test_linux_detection(self, temp_home: Path):
-        """Test Linux platform detection."""
-        # Ensure WSL_DISTRO_NAME is not set
-        env = os.environ.copy()
-        env.pop("WSL_DISTRO_NAME", None)
-        with patch.dict(os.environ, env, clear=True):
-            assert Platform.detect() == Platform.LINUX
-
-    @patch("sys.platform", "linux")
-    @patch.dict(os.environ, {"WSL_DISTRO_NAME": "Ubuntu"})
-    def test_wsl_detection(self, temp_home: Path):
-        """Test WSL platform detection."""
-        assert Platform.detect() == Platform.WSL
-
-    @patch("sys.platform", "win32")
-    def test_windows_detection(self, temp_home: Path):
-        """Test Windows platform detection."""
-        assert Platform.detect() == Platform.WINDOWS
-
-    @patch("sys.platform", "freebsd13")
-    def test_unknown_platform(self, temp_home: Path):
-        """Test unknown platform detection."""
-        assert Platform.detect() == Platform.UNKNOWN
+    @pytest.mark.parametrize(
+        ("sys_platform", "wsl_distro", "expected"),
+        [
+            pytest.param("darwin", None, Platform.MACOS, id="macos"),
+            pytest.param("linux", None, Platform.LINUX, id="linux"),
+            pytest.param("linux", "Ubuntu", Platform.WSL, id="wsl"),
+            pytest.param("win32", None, Platform.WINDOWS, id="windows"),
+            pytest.param("freebsd13", None, Platform.UNKNOWN, id="unknown"),
+        ],
+    )
+    def test_detects_platform(
+        self,
+        temp_home: Path,
+        sys_platform: str,
+        wsl_distro: str | None,
+        expected: Platform,
+    ):
+        env = {k: v for k, v in os.environ.items() if k != "WSL_DISTRO_NAME"}
+        if wsl_distro is not None:
+            env["WSL_DISTRO_NAME"] = wsl_distro
+        with (
+            patch("sys.platform", sys_platform),
+            patch.dict(os.environ, env, clear=True),
+        ):
+            assert Platform.detect() == expected
 
 
 class TestJsonOperations:
@@ -1267,16 +1250,18 @@ class TestPerformSwitchPostDisplay:
         assert "Keychain" in text
         assert "next message" not in text
 
-    def test_switch_followup_non_macos(self, temp_home: Path):
+    @pytest.mark.parametrize(
+        "plat", [Platform.LINUX, Platform.WSL, Platform.WINDOWS]
+    )
+    def test_switch_followup_non_macos(self, temp_home: Path, plat: Platform):
         """Linux/WSL/Windows show the immediate, no-restart note."""
-        for plat in (Platform.LINUX, Platform.WSL, Platform.WINDOWS):
-            switcher = ClaudeAccountSwitcher()
-            switcher.platform = plat
+        switcher = ClaudeAccountSwitcher()
+        switcher.platform = plat
 
-            text = switcher._activation_followup_text()
+        text = switcher._activation_followup_text()
 
-            assert "next message" in text, plat
-            assert "30s" not in text, plat
+        assert "next message" in text, plat
+        assert "30s" not in text, plat
 
     def test_write_credentials_verify_failure_aborts_switch(
         self,
