@@ -568,7 +568,7 @@ class AutoSwitchEngine:
             "email": "",
         }
 
-        entries, usage, headroom = self._collect_scheduled_usage(current)
+        entries, usage, headroom = self._collect_scheduled_usage(current, quarantined)
         self._emit(
             PollEvent(
                 active=active_ref,
@@ -787,7 +787,7 @@ class AutoSwitchEngine:
     # -- adaptive usage scheduling ---------------------------------------------
 
     def _collect_scheduled_usage(
-        self, current: str
+        self, current: str, quarantined: set[str] = frozenset()
     ) -> tuple[dict, dict[str, dict | str | None], dict[str, float | None]]:
         """Two-phase usage collection with an O(1) baseline.
 
@@ -810,8 +810,12 @@ class AutoSwitchEngine:
         decision values and ``headroom`` the derived headroom per account.
         """
         now = self.clock()
+        # Quarantined accounts can never be switch targets, so spending the
+        # single alternate poll slot (or an escalation fetch) on one is wasted.
         candidates = [
-            n for n in self.switcher.switchable_account_numbers() if n != current
+            n
+            for n in self.switcher.switchable_account_numbers()
+            if n != current and n not in quarantined
         ]
 
         pre = self.switcher.usage_entries_by_account(fetch=set())

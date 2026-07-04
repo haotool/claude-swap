@@ -324,8 +324,9 @@ def _do_watch(stdscr, switcher: ClaudeAccountSwitcher) -> None:
 def _watch_loop(stdscr, switcher: ClaudeAccountSwitcher, interval: int = 5) -> None:
     """Re-capture ``list_accounts()`` every ``interval`` seconds and redraw.
 
-    Usage is cache-gated at switcher._USAGE_CACHE_TTL (15s), so sub-15s
-    intervals re-render cached usage rather than re-fetching from the network.
+    Usage comes from the per-account store (usage_store.SERVE_TTL_S, 30s):
+    redraws inside that window re-render stored usage rather than re-fetching
+    from the network.
     """
     stdscr.timeout(250)  # non-blocking getch, 250ms tick
     try:

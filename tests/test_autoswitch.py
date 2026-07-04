@@ -542,6 +542,49 @@ class TestAdaptiveScheduler:
         assert "http-429" in poll.human()
         assert poll.to_json()["fetchErrors"] == {"1": "http-429"}
 
+    def test_quarantined_candidate_never_consumes_the_poll_slot(
+        self, temp_home, monkeypatch
+    ):
+        h = self._harness(temp_home, monkeypatch)
+        h.engine._quarantine("2", "b@example.com", "invalid_grant")
+        usage = {"1": _usage(50), "2": _usage(10), "3": _usage(20)}
+        counts: dict[str, int] = {}
+        for _ in range(3):
+            self._tick(h, counts, usage)
+            h.clock.advance(60)
+        # The alternate slot always went to account 3; 2 is dead weight.
+        assert "2" not in counts
+        assert counts["3"] >= 1
+
+    def test_expired_active_enters_idle_hold_even_during_backoff(
+        self, temp_home, monkeypatch
+    ):
+        """Finding-2 regression: the owned+expired sentinel must not be hidden
+        by the active row's failure backoff (e.g. a Retry-After window), or
+        the engine would count unhealthy ticks toward a spurious failover."""
+        from claude_swap.usage_store import FetchRecord
+
+        h = self._harness(temp_home, monkeypatch)
+        # Active token locally expired while an owner is present.
+        (h.temp_home / ".claude" / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-live", "refreshToken": "rt-live",
+                "expiresAt": 1000,
+            },
+        }))
+        # Active row sits in a long failure backoff → the fetch path (and its
+        # own expired short-circuit) is unreachable this tick.
+        h.switcher._usage_store.record(
+            {"1": FetchRecord(error="http-429", retry_after_s=600.0)},
+            {"1": ("a@example.com", "")},
+        )
+        counts: dict[str, int] = {}
+        outcome = self._tick(h, counts, {"2": _usage(10), "3": _usage(20)})
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.engine._unhealthy_ticks == 0
+        reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert reasons == ["active-idle"]
+
 
 class TestApiKeyAccounts:
     def _mark_api_key(self, harness, num: int) -> None:

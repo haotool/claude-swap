@@ -1527,7 +1527,7 @@ class ClaudeAccountSwitcher:
         Re-derived on every collect pass (never persisted), so it can't
         outlive the condition that produced it.
         """
-        _num, _email, _, _, is_active, creds = account_info
+        num, email, _, _, is_active, creds = account_info
         if looks_like_api_key(creds):
             # Managed API-key account: no subscription quota to fetch.
             return USAGE_API_KEY
@@ -1535,6 +1535,23 @@ class ClaudeAccountSwitcher:
             if is_active and self._active_keychain_unavailable:
                 return USAGE_KEYCHAIN_UNAVAILABLE
             return USAGE_NO_CREDENTIALS
+        if is_active:
+            # Owned + locally expired must be visible even when the fetch is
+            # gated (fresh entry, failure backoff, concurrent claim) — the
+            # auto engine's idle-hold keys on this sentinel, and it is provable
+            # locally: only an owner (Claude Code / live session) may refresh
+            # this credential, and it hasn't. The expiry check gates the
+            # process scan, so the common non-expired path pays nothing.
+            oauth_data = oauth.extract_oauth_data(creds)
+            if (
+                oauth_data
+                and oauth.is_oauth_token_expired(oauth_data.get("expiresAt"))
+                and (
+                    self._active_cc_running()
+                    or self._live_session_pids(str(num), email)
+                )
+            ):
+                return USAGE_TOKEN_EXPIRED
         return None
 
     def _fetch_account_usage(
@@ -1723,10 +1740,14 @@ class ClaudeAccountSwitcher:
             if is_active:
                 active_num = num
             entry = entries[str(num)]
+            # JSON carries the decision-grade value: last-good only while it is
+            # recent enough to act on (≤ STALE_OK_S), else unavailable. Showing
+            # older measurements is a human-display affordance only — scripts
+            # keying on usageStatus == "ok" must not act on arbitrarily old data.
             accounts.append(
                 account_row(
                     num, email, org_name, org_uuid, is_active,
-                    entry.sentinel if entry.sentinel is not None else entry.last_good,
+                    entry.decision_value(),
                     usage_fetched_at=entry.fetched_at,
                     usage_age_s=entry.age_s,
                 )
@@ -1858,9 +1879,9 @@ class ClaudeAccountSwitcher:
         org_name = acct.get("organizationName", "") or ""
         org_uuid = acct.get("organizationUuid", "") or ""
         entry = self._active_account_usage(account_num, current_email, org_uuid)
-        status, usage = usage_fields(
-            entry.sentinel if entry.sentinel is not None else entry.last_good
-        )
+        # Decision-grade projection, same rule as the --list payload: stale
+        # beyond STALE_OK_S reports unavailable, not "ok" with old numbers.
+        status, usage = usage_fields(entry.decision_value())
         active: dict = {
             "number": int(account_num),
             "email": current_email,

@@ -982,6 +982,28 @@ class TestActiveAccountRefresh:
         output = capsys.readouterr().out
         assert "token expired — Claude Code refreshes the active account" in output
 
+    def test_expired_owned_sentinel_wins_over_stored_entry(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        """The owned+expired sentinel is derived statically, so a fresh store
+        entry (or a backoff/claim gate skipping the fetch) can't hide it."""
+        switcher = self._switcher(sample_sequence_data)
+        UsageStore(switcher.backup_dir / "cache").record(
+            {"1": FetchRecord(usage={"five_hour": {"pct": 25.0}})},
+            {"1": ("test@example.com", "")},
+        )
+        info = (1, "test@example.com", "", "", True, self._EXPIRED)
+
+        with patch.object(switcher, "_active_cc_running", return_value=True), \
+             patch.object(switcher, "_live_session_pids", return_value=[]), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account") as mock_fetch:
+            entry = switcher._collect_usage_entries([info])["1"]
+
+        assert entry.sentinel == USAGE_TOKEN_EXPIRED
+        assert entry.decision_value() == USAGE_TOKEN_EXPIRED
+        assert entry.last_good == {"five_hour": {"pct": 25.0}}  # last-seen kept
+        mock_fetch.assert_not_called()
+
 
 class TestPerformSwitchPostDisplay:
     """Regression tests for the post-switch display running outside the lock."""
