@@ -331,6 +331,60 @@ class TestDecisionTable:
         assert harness.engine._sleep_until_ts is not None
 
 
+class TestRetryAfter:
+    def _rate_limited(self, retry_after: str) -> oauth.UsageFetchError:
+        return oauth.UsageFetchError(
+            reason="rate_limited",
+            status_code=429,
+            message="rate limited",
+            retry_after=retry_after,
+        )
+
+    def test_rate_limited_fetch_floors_next_delay(self, harness):
+        outcome = harness.tick_with_usage({
+            "1": self._rate_limited("120"), "2": _usage(10), "3": _usage(10),
+        })
+        assert outcome is TickOutcome.NO_ACTION  # first unhealthy tick
+        assert harness.engine._next_delay(outcome) >= 120
+
+    def test_retry_after_is_capped(self, harness):
+        outcome = harness.tick_with_usage({
+            "1": self._rate_limited("9000"), "2": _usage(10), "3": _usage(10),
+        })
+        assert harness.engine._next_delay(outcome) == 300.0
+
+    def test_masked_429_side_field_floors_next_delay(self, harness):
+        # A trusted prior usage row masking an active 429 carries the server
+        # window as the _last_rate_limit side field (stamped by usage_cache);
+        # honor it exactly like a live rate-limited error.
+        masked = _usage(50)
+        masked["_last_rate_limit"] = {"retry_after": "200", "at": harness.clock()}
+        outcome = harness.tick_with_usage({
+            "1": masked, "2": _usage(10), "3": _usage(10),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert harness.engine._next_delay(outcome) >= 199
+
+    def test_stale_retry_after_decays_to_nothing(self, harness):
+        masked = _usage(50)
+        masked["_last_rate_limit"] = {
+            "retry_after": "60", "at": harness.clock() - 120,
+        }
+        outcome = harness.tick_with_usage({
+            "1": masked, "2": _usage(10), "3": _usage(10),
+        })
+        assert harness.engine._next_delay(outcome) <= 66.0
+
+    def test_retry_after_clears_on_recovery(self, harness):
+        harness.tick_with_usage({
+            "1": self._rate_limited("120"), "2": _usage(10), "3": _usage(10),
+        })
+        outcome = harness.tick_with_usage({
+            "1": _usage(50), "2": _usage(10), "3": _usage(10),
+        })
+        assert harness.engine._next_delay(outcome) <= 66.0
+
+
 class TestApiKeyAccounts:
     def _mark_api_key(self, harness, num: int) -> None:
         data = harness.switcher._get_sequence_data()

@@ -47,6 +47,7 @@ from claude_swap.json_output import SCHEMA_VERSION
 from claude_swap.locking import FileLock
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json
 from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.usage_cache import extract_retry_after
 
 STATE_FILENAME = "autoswitch_state.json"
 STATE_SCHEMA_VERSION = 1
@@ -62,6 +63,11 @@ FRESHEN_BUFFER_MS = 10 * 60 * 1000
 RESET_SLACK_S = 60.0
 MAX_SLEEP_S = 6 * 3600.0
 NO_RESET_FALLBACK_S = 300.0
+
+# Honor a server Retry-After from a rate-limited usage fetch up to this
+# ceiling, so a 429 slows the loop down without wedging it into an
+# arbitrarily long sleep.
+RETRY_AFTER_CAP_S = 300.0
 
 
 def _now_iso() -> str:
@@ -274,6 +280,30 @@ def _ref(number: str, email: str) -> dict[str, Any]:
     return {"number": int(number), "email": email}
 
 
+def _live_retry_after(
+    usage: dict[str, dict[str, Any] | str | oauth.UsageFetchError | None],
+    now: float,
+) -> float | None:
+    """Largest remaining server Retry-After across this tick's usage entries.
+
+    Reads both shapes a rate limit can take: a live rate-limited
+    ``UsageFetchError``, and the side field a trusted prior row carries when
+    it masks an active 429 (stamped by ``usage_cache``, decayed for elapsed
+    time by ``extract_retry_after``).
+    """
+    longest: float | None = None
+    for entry in usage.values():
+        if isinstance(entry, oauth.UsageFetchError):
+            if entry.reason != "rate_limited":
+                continue
+            seconds = oauth.parse_retry_after_seconds(entry.retry_after)
+        else:
+            seconds = extract_retry_after(entry, now)
+        if seconds is not None and (longest is None or seconds > longest):
+            longest = float(seconds)
+    return longest
+
+
 class AutoSwitchEngine:
     """Threshold-policy auto-switcher over a :class:`ClaudeAccountSwitcher`.
 
@@ -300,11 +330,13 @@ class AutoSwitchEngine:
         self.clock = clock
         self._stop = threading.Event()
         self._unhealthy_ticks = 0
-        # Both set per tick: a known-reset sleep target, and whether a BLOCKED
+        # All set per tick: a known-reset sleep target, whether a BLOCKED
         # outcome is static enough (truly exhausted / no candidates) to wait
-        # longer than the normal interval.
+        # longer than the normal interval, and a live server Retry-After from
+        # a rate-limited usage fetch.
         self._sleep_until_ts: float | None = None
         self._blocked_wait_long = False
+        self._retry_after_s: float | None = None
 
     # -- state file ---------------------------------------------------------
 
@@ -452,6 +484,7 @@ class AutoSwitchEngine:
     def _tick_inner(self) -> TickOutcome:
         self._sleep_until_ts = None
         self._blocked_wait_long = False
+        self._retry_after_s = None
         settings = self.settings
         state = self._read_state()
         if not self.dry_run:
@@ -494,6 +527,9 @@ class AutoSwitchEngine:
         }
 
         usage = self.switcher.usage_by_account()
+        # A rate-limited usage endpoint sets a floor under the next delay;
+        # polling through the server's window only earns more 429s.
+        self._retry_after_s = _live_retry_after(usage, self.clock())
         headroom = {
             num: oauth.account_headroom(entry if isinstance(entry, dict) else None)
             for num, entry in usage.items()
@@ -763,18 +799,23 @@ class AutoSwitchEngine:
 
     def _next_delay(self, outcome: TickOutcome) -> float:
         interval = self.settings.interval_seconds
+        delay: float | None = None
         if outcome is TickOutcome.BLOCKED:
             if self._sleep_until_ts is not None:
-                delay = self._sleep_until_ts - self.clock()
-                return min(max(delay, interval), MAX_SLEEP_S)
-            if self._blocked_wait_long:
+                until = self._sleep_until_ts - self.clock()
+                delay = min(max(until, interval), MAX_SLEEP_S)
+            elif self._blocked_wait_long:
                 # Truly exhausted with no reset time known / no candidates.
-                return max(interval, NO_RESET_FALLBACK_S)
-            # Blocked on something that can resolve any tick (hysteresis,
-            # unreadable usage) — keep the normal cadence so the at-limit
-            # escape isn't missed.
-        # ±10% jitter so multiple machines don't synchronize their API hits.
-        return interval * (0.9 + 0.2 * random.random())
+                delay = max(interval, NO_RESET_FALLBACK_S)
+            # Otherwise blocked on something that can resolve any tick
+            # (hysteresis, unreadable usage) — keep the normal cadence so
+            # the at-limit escape isn't missed.
+        if delay is None:
+            # ±10% jitter so multiple machines don't synchronize their API hits.
+            delay = interval * (0.9 + 0.2 * random.random())
+        if self._retry_after_s is not None:
+            delay = max(delay, min(self._retry_after_s, RETRY_AFTER_CAP_S))
+        return delay
 
     def run_loop(self) -> int:
         """Tick forever (until :meth:`stop`); a failing tick never kills it."""
