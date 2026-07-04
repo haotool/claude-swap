@@ -70,6 +70,11 @@ MONITOR_FAILURE_BACKOFF_BASE = MONITOR_POLL_SECONDS_MIN
 # Honor a server ``Retry-After`` up to this ceiling so a 429 cannot wedge the
 # monitor into a pathologically long sleep.
 MONITOR_RETRY_AFTER_CAP = 300
+# Consecutive switch failures back off exponentially to this ceiling: near the
+# threshold the adaptive interval pins at t_min, and every failed attempt pays
+# a full plan (a `security` subprocess per slot on macOS) plus forced-refresh
+# token rotation churn — retrying that at t_min forever is not acceptable.
+MONITOR_SWITCH_FAILURE_BACKOFF_CAP = MONITOR_RETRY_AFTER_CAP
 
 # After an hour of continuous idle (no live Claude Code sessions) log one
 # warning per hour — prolonged silence can also mean the session-detection
@@ -200,6 +205,7 @@ class MonitorRuntimeState:
     last_poll_time: float | None = None
     last_wall_time: float | None = None
     consecutive_failures: int = 0
+    consecutive_switch_failures: int = 0
     last_switch_error: str | None = None
     saturated_hold: bool = False
     usage_cache_warmed: bool = False
@@ -278,6 +284,7 @@ def _step_idle(
     state.last_poll_time = None
     state.last_wall_time = None
     state.consecutive_failures = 0
+    state.consecutive_switch_failures = 0
     state.saturated_hold = False
     return MonitorStepResult(
         kind="idle",
@@ -309,6 +316,7 @@ def _apply_wake_gap_reset(
         state.last_switch_error = None
         state.saturated_hold = False
         state.consecutive_failures = 0
+        state.consecutive_switch_failures = 0
 
 
 def _step_idle_api_key(
@@ -319,6 +327,7 @@ def _step_idle_api_key(
     log: logging.Logger,
 ) -> MonitorStepResult:
     state.consecutive_failures = 0
+    state.consecutive_switch_failures = 0
     state.reset_pcts()
     state.last_poll_time = None
     state.last_wall_time = wall
@@ -492,17 +501,31 @@ def _finalize_threshold_step(
 ) -> MonitorStepResult:
     state.last_wall_time = wall
     if switch_error is not None:
+        state.consecutive_switch_failures += 1
+        # Near the threshold `interval` pins at t_min; a persistently failing
+        # switch must back off exponentially instead of paying the full plan
+        # and refresh churn every t_min seconds (cap 0 keeps the test path's
+        # no-sleep contract when poll_seconds <= 0).
+        backoff = _failure_backoff_seconds(
+            state.consecutive_switch_failures,
+            t_max=(
+                MONITOR_SWITCH_FAILURE_BACKOFF_CAP
+                if poll_seconds > 0
+                else poll_seconds
+            ),
+        )
         state.reset_pcts()
         state.last_poll_time = None
         return MonitorStepResult(
             kind="switch_failed",
             threshold=threshold,
             pct=pct,
-            next_interval=interval,
+            next_interval=max(interval, backoff),
             pct_text=pct_text,
             switch_error=switch_error,
             user_message=f"Reached {pct:.0f}% — switch failed (see above).",
         )
+    state.consecutive_switch_failures = 0
     if switched:
         state.saturated_hold = False
         state.reset_pcts()

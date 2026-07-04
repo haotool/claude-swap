@@ -854,6 +854,91 @@ class TestMonitorEngine:
         assert len(warnings) == 1
         assert len(debugs) == 1
 
+    def test_switch_failure_backoff_grows_and_caps(self, temp_home: Path):
+        """Consecutive switch failures back off exponentially instead of
+        retrying at the near-threshold t_min: every failed attempt pays a
+        full plan (a `security` subprocess per slot on macOS) plus a forced
+        token refresh, so the retry cadence must grow and cap."""
+        switcher = ClaudeAccountSwitcher()
+        state = monitor.MonitorRuntimeState()
+
+        def boom(_decision) -> bool:
+            raise ClaudeSwitchError("switch keeps failing")
+
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+        ):
+            intervals: list[int] = []
+            for _ in range(8):
+                result = monitor.monitor_step(
+                    switcher,
+                    state,
+                    poll_seconds=monitor.MONITOR_POLL_SECONDS,
+                    perform_switch=boom,
+                )
+                assert result.kind == "switch_failed"
+                intervals.append(result.next_interval)
+
+        base = monitor.MONITOR_FAILURE_BACKOFF_BASE
+        cap = monitor.MONITOR_SWITCH_FAILURE_BACKOFF_CAP
+        assert intervals == [min(base * 2**n, cap) for n in range(8)]
+        assert intervals[-1] == cap
+
+    def test_switch_failure_backoff_resets_after_success(self, temp_home: Path):
+        switcher = ClaudeAccountSwitcher()
+        state = monitor.MonitorRuntimeState()
+        outcomes = iter(
+            [
+                ClaudeSwitchError("boom"),
+                ClaudeSwitchError("boom"),
+                True,
+                ClaudeSwitchError("boom"),
+            ]
+        )
+
+        def perform(_decision) -> bool:
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+        ):
+            kinds: list[str] = []
+            intervals: list[int] = []
+            for _ in range(4):
+                result = monitor.monitor_step(
+                    switcher,
+                    state,
+                    poll_seconds=monitor.MONITOR_POLL_SECONDS,
+                    perform_switch=perform,
+                )
+                kinds.append(result.kind)
+                intervals.append(result.next_interval)
+
+        base = monitor.MONITOR_FAILURE_BACKOFF_BASE
+        assert kinds == [
+            "switch_failed",
+            "switch_failed",
+            "switched",
+            "switch_failed",
+        ]
+        assert intervals[0] == base
+        assert intervals[1] == base * 2
+        # The successful switch reset the failure streak.
+        assert intervals[3] == base
+
     def test_step_decision_error_returns_switch_failed(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
         state = monitor.MonitorRuntimeState()
