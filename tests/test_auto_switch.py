@@ -854,6 +854,65 @@ class TestMonitorEngine:
         assert len(warnings) == 1
         assert len(debugs) == 1
 
+    def test_threshold_on_masked_stale_pct_requires_fresh_fetch(
+        self, temp_home: Path
+    ):
+        """A trusted prior cache row can mask a failed fetch, so the pct the
+        threshold sees may be arbitrarily old. The trigger signal joins the
+        no-trusted-signal philosophy: hold, and only switch once a poll's
+        fetch actually succeeds."""
+        switcher = ClaudeAccountSwitcher()
+        state = monitor.MonitorRuntimeState()
+        perform = MagicMock(return_value=True)
+
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch.object(
+                switcher,
+                "active_usage_is_masked_failure",
+                return_value=True,
+            ),
+        ):
+            result = monitor.monitor_step(
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
+            )
+
+        assert result.kind == "no_trusted_signal"
+        perform.assert_not_called()
+        assert state.saturated_hold is True
+
+        # The next poll's fetch succeeds: the gate opens and the switch runs.
+        with (
+            patch.object(
+                switcher,
+                "get_auto_switch_config",
+                return_value={"enabled": True, "threshold": 95},
+            ),
+            patch.object(switcher, "get_active_usage_pct", return_value=96.0),
+            patch.object(
+                switcher,
+                "active_usage_is_masked_failure",
+                return_value=False,
+            ),
+        ):
+            result2 = monitor.monitor_step(
+                switcher,
+                state,
+                poll_seconds=0,
+                perform_switch=perform,
+            )
+
+        assert result2.kind == "switched"
+        perform.assert_called_once()
+
     def test_switch_failure_backoff_grows_and_caps(self, temp_home: Path):
         """Consecutive switch failures back off exponentially instead of
         retrying at the near-threshold t_min: every failed attempt pays a

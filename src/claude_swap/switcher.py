@@ -189,6 +189,10 @@ class ClaudeAccountSwitcher:
             read_json=lambda p: self._read_json(p),
             write_json=lambda p, d: self._write_json(p, d),
         )
+        # Fetch note from the last _resolve_active_usage call: non-None when a
+        # trusted prior cache row masked a failed fetch (the displayed pct may
+        # be arbitrarily old). Read via active_usage_is_masked_failure().
+        self._active_usage_note: oauth.UsageFetchError | None = None
 
         # Run any pending one-time data migrations (e.g. relocating Windows
         # backup credentials out of Credential Manager into files). Imported
@@ -2008,13 +2012,15 @@ class ClaudeAccountSwitcher:
         source for ``get_active_usage_pct`` and ``get_active_usage_breakdown``
         so a monitor poll performs exactly one fetch.
         """
+        self._active_usage_note = None
         slot = self._active_account_slot()
         if slot is None:
             return None
         account_num, current_email = slot
 
         if account_num is not None:
-            usage, _ = self._resolve_active_usage_entry(account_num, current_email)
+            usage, note = self._resolve_active_usage_entry(account_num, current_email)
+            self._active_usage_note = note
             if not isinstance(usage, dict):
                 usage = None
         else:
@@ -2069,6 +2075,17 @@ class ClaudeAccountSwitcher:
                 if isinstance(pct, (int, float)):
                     out[key] = float(pct)
         return out or None
+
+    def active_usage_is_masked_failure(self) -> bool:
+        """Whether the last resolved active usage masked a failed fetch.
+
+        True when the displayed value came from a trusted prior cache row
+        while this cycle's live fetch failed (``_merge_usage_with_previous``
+        surfaced a note): the reading may be arbitrarily old, so the monitor
+        must not treat it as a fresh switch-trigger signal. Reads the note
+        stashed by ``_resolve_active_usage`` — no extra network call.
+        """
+        return self._active_usage_note is not None
 
     def active_account_is_api_key(self) -> bool:
         """Whether the live active credential is a managed API key (no quota).

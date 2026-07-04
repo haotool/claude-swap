@@ -1560,6 +1560,77 @@ class TestUsageCacheFreshness:
 
         mock_fetch.assert_called_once()
 
+    def test_masked_fetch_failure_is_flagged_for_the_monitor(
+        self,
+        temp_home: Path,
+    ):
+        """When a prior cache row masks a failed fetch, the stale pct is
+        still displayed but ``active_usage_is_masked_failure`` must flag it
+        so the monitor refuses to treat it as a switch trigger; a successful
+        fresh fetch clears the flag."""
+        s = ClaudeAccountSwitcher()
+        s._setup_directories()
+        (temp_home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "oauthAccount": {
+                        "emailAddress": "a1@example.com",
+                        "accountUuid": "uuid-1",
+                    },
+                }
+            )
+        )
+        data = {
+            "accounts": {
+                "1": {"email": "a1@example.com", "organizationUuid": "uuid-1"},
+            },
+            "sequence": [1],
+            "activeAccountNumber": 1,
+        }
+        s._write_json(s.sequence_file, data)
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        cache_path = s.backup_dir / "cache" / "usage.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": time.time(),
+                    "data": {
+                        "1": {
+                            "five_hour": {"pct": 96},
+                            "_cached_at": time.time() - 9999,
+                        },
+                    },
+                }
+            )
+        )
+
+        with (
+            patch.object(s, "_read_active_credentials",
+                         return_value=ActiveCredentials(creds, False)),
+            patch("claude_swap.oauth.extract_access_token", return_value="tok"),
+            patch(
+                "claude_swap.oauth.fetch_usage_for_account",
+                return_value=oauth.UsageFetchError(
+                    reason="network_error", message="down",
+                ),
+            ),
+        ):
+            assert s.get_active_usage_pct() == 96.0
+            assert s.active_usage_is_masked_failure() is True
+
+        with (
+            patch.object(s, "_read_active_credentials",
+                         return_value=ActiveCredentials(creds, False)),
+            patch("claude_swap.oauth.extract_access_token", return_value="tok"),
+            patch(
+                "claude_swap.oauth.fetch_usage_for_account",
+                return_value={"five_hour": {"pct": 97}},
+            ),
+        ):
+            assert s.get_active_usage_pct() == 97.0
+            assert s.active_usage_is_masked_failure() is False
+
     def test_get_active_usage_breakdown_returns_per_window(
         self,
         temp_home: Path,

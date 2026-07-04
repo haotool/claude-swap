@@ -595,6 +595,30 @@ def _step_threshold(
             wall=wall,
             log=log,
         )
+    if switcher.active_usage_is_masked_failure():
+        # The pct came from a prior cache row masking this cycle's failed
+        # fetch, so it may be arbitrarily old. The trigger signal joins the
+        # no-trusted-signal philosophy: hold, and only switch once a poll's
+        # fetch actually succeeds.
+        log.info(
+            "monitor: threshold pct=%s is a prior-row reading masking a "
+            "failed fetch — holding until a fresh fetch succeeds",
+            pct,
+        )
+        return _finalize_threshold_step(
+            state,
+            "no_trusted_signal",
+            threshold=threshold,
+            pct=pct,
+            pct_text=pct_text,
+            windows=windows,
+            interval=interval,
+            poll_seconds=poll_seconds,
+            wall=wall,
+            now=now,
+            switched=False,
+            switch_error=None,
+        )
     if state.saturated_hold:
         log.info(
             "monitor: saturated hold at pct=%s — replanning at %ds",
