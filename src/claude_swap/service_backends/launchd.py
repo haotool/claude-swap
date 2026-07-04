@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import plistlib
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,14 @@ _LAUNCHCTL = (
     if os.path.exists("/bin/launchctl")
     else "/usr/bin/launchctl"
 )
+
+# launchd tears the previous instance down asynchronously after ``bootout``;
+# an immediate ``bootstrap`` can hit that window and fail with EIO (rc=5),
+# leaving the agent installed but not loaded. A short bounded retry rides the
+# window out; any other failure — or exhaustion — surfaces as usual.
+_BOOTSTRAP_TEARDOWN_RACE_RC = 5
+_BOOTSTRAP_ATTEMPTS = 3
+_BOOTSTRAP_RETRY_DELAY_SECONDS = 0.5
 
 
 def _plist_path() -> Path:
@@ -65,6 +74,15 @@ def _launchd_service_target() -> str:
     return f"{_launchd_domain()}/{service_spec.SERVICE_LABEL}"
 
 
+def _launchctl_failure(
+    args: tuple[str, ...], proc: subprocess.CompletedProcess[str]
+) -> ClaudeSwitchError:
+    return ClaudeSwitchError(
+        f"launchctl {' '.join(args)} failed (rc={proc.returncode}): "
+        f"{proc.stderr.strip()}"
+    )
+
+
 def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Invoke launchctl; surface failures as ``ClaudeSwitchError``."""
     try:
@@ -80,11 +98,23 @@ def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[st
             f"{service_spec.SUBPROCESS_TIMEOUT}s"
         )
     if check and proc.returncode != 0:
-        raise ClaudeSwitchError(
-            f"launchctl {' '.join(args)} failed (rc={proc.returncode}): "
-            f"{proc.stderr.strip()}"
-        )
+        raise _launchctl_failure(args, proc)
     return proc
+
+
+def _bootstrap(plist_path: Path) -> None:
+    """Bootstrap the agent, retrying the post-bootout teardown race (rc=5)."""
+    args = ("bootstrap", _launchd_domain(), str(plist_path))
+    for attempt in range(1, _BOOTSTRAP_ATTEMPTS + 1):
+        proc = _launchctl(*args, check=False)
+        if proc.returncode == 0:
+            return
+        if (
+            proc.returncode != _BOOTSTRAP_TEARDOWN_RACE_RC
+            or attempt == _BOOTSTRAP_ATTEMPTS
+        ):
+            raise _launchctl_failure(args, proc)
+        time.sleep(_BOOTSTRAP_RETRY_DELAY_SECONDS)
 
 
 def _installed_version() -> str | None:
@@ -134,7 +164,7 @@ class LaunchdBackend:
                 pass
             raise
         _launchctl("bootout", _launchd_service_target(), check=False)
-        _launchctl("bootstrap", _launchd_domain(), str(plist_path))
+        _bootstrap(plist_path)
         log_path = service_spec.log_dir(switcher)
         service_spec.print_install_success(
             switcher,

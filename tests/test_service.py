@@ -143,12 +143,15 @@ class TestInstall:
             temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
         )
         monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
+        bootstrap_calls: list[list[str]] = []
 
-        # First call (bootout, check=False) succeeds; second (bootstrap, check=True) fails.
+        # Bootout (check=False) succeeds; bootstrap fails with a non-race rc,
+        # which must surface immediately (no retry — only rc=5 is retryable).
         def fake_run(argv, **kwargs):
             completed = MagicMock()
             if "bootstrap" in argv:
-                completed.returncode = 5
+                bootstrap_calls.append(list(argv))
+                completed.returncode = 1
                 completed.stderr = "Bootstrap failed"
             else:
                 completed.returncode = 0
@@ -159,6 +162,75 @@ class TestInstall:
         monkeypatch.setattr(subprocess, "run", fake_run)
         with pytest.raises(ClaudeSwitchError, match="bootstrap"):
             service.install(ClaudeAccountSwitcher())
+        assert len(bootstrap_calls) == 1
+
+    def test_bootstrap_retries_past_teardown_race(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Reinstall over a loaded agent: launchd tears the old instance down
+        asynchronously after ``bootout``, so an immediate ``bootstrap`` can
+        race it and fail with EIO (rc=5), leaving the service installed but
+        not loaded. A bounded retry must ride out the window."""
+        _force_darwin(monkeypatch)
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
+        )
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
+        bootstrap_rcs = iter([5, 0])
+        bootstrap_calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            completed = MagicMock()
+            completed.stdout = ""
+            completed.stderr = ""
+            if "bootstrap" in argv:
+                bootstrap_calls.append(list(argv))
+                completed.returncode = next(bootstrap_rcs)
+                completed.stderr = "Bootstrap failed: 5: Input/output error"
+            else:
+                completed.returncode = 0
+            return completed
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        sleeps: list[float] = []
+        monkeypatch.setattr(launchd.time, "sleep", sleeps.append)
+
+        rc = service.install(ClaudeAccountSwitcher())
+
+        assert rc == 0
+        assert len(bootstrap_calls) == 2
+        assert sleeps == [launchd._BOOTSTRAP_RETRY_DELAY_SECONDS]
+
+    def test_bootstrap_retry_exhaustion_surfaces_error(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A persistent rc=5 is not swallowed: retries are bounded and the
+        final failure surfaces as ``ClaudeSwitchError``."""
+        _force_darwin(monkeypatch)
+        plist_path = (
+            temp_home / "Library" / "LaunchAgents" / f"{service_spec.SERVICE_LABEL}.plist"
+        )
+        monkeypatch.setattr(launchd, "_plist_path", lambda: plist_path)
+        bootstrap_calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            completed = MagicMock()
+            completed.stdout = ""
+            completed.stderr = ""
+            if "bootstrap" in argv:
+                bootstrap_calls.append(list(argv))
+                completed.returncode = 5
+                completed.stderr = "Bootstrap failed: 5: Input/output error"
+            else:
+                completed.returncode = 0
+            return completed
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(launchd.time, "sleep", lambda _s: None)
+
+        with pytest.raises(ClaudeSwitchError, match=r"bootstrap.*rc=5"):
+            service.install(ClaudeAccountSwitcher())
+        assert len(bootstrap_calls) == launchd._BOOTSTRAP_ATTEMPTS
 
 
 class TestUninstall:
