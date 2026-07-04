@@ -85,6 +85,43 @@ jobs:
         # pass, which is what catches Windows-only regressions.
         run: pytest
 
+  windows-task-scheduler:
+    runs-on: windows-latest
+    # continue-on-error until this job's first green run on CI proves the real
+    # registration path, then flip it to blocking.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -e . pytest
+
+      - name: Task Scheduler registration round-trip
+        # Registers the production task XML under a run-unique name, asserts
+        # Get-ScheduledTask reports it loaded, then uninstalls. No
+        # Start-ScheduledTask — registration acceptance is the thing under
+        # test (XML schema, version stamp, argv quoting), not the monitor.
+        env:
+          CSWAP_TASK_SCHEDULER_INTEGRATION: '1'
+        run: pytest tests/service_backends/test_task_scheduler_integration.py -v -m windows_service_integration
+
+      - name: Sweep any leftover CI task
+        # Backstop for a crashed pytest process; the test's own try/finally
+        # covers ordinary assertion failures.
+        if: always()
+        shell: pwsh
+        run: |
+          $name = "cswap-monitor-ci-$env:GITHUB_RUN_ID"
+          Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+          Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
+          exit 0
+
   macos-keychain:
     runs-on: macos-latest
 

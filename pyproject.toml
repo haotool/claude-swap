@@ -73,4 +73,5 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "no_keychain_fake: opt out of the autouse in-memory Keychain guard (test mocks subprocess itself, or runs against a temp keychain on GitHub Actions)",
+    "windows_service_integration: real Task Scheduler registration round-trip (CI windows-task-scheduler job only)",
 ]
