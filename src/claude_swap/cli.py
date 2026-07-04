@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from typing import Any, cast
@@ -224,11 +225,26 @@ Defaults live in settings.json in the backup root; flags override them.
                 error("Error: Do not run this script as root (unless running in a container)")
                 sys.exit(1)
 
+        stdout_emit = jsonl_emit if args.json else human_emit
+        log = switcher._logger
+
+        def emit(event: AutoSwitchEvent) -> None:
+            # Mirror every event into the structured decision log
+            # (claude-swap.log): under a service supervisor stdout may go
+            # nowhere — on Windows pythonw it doesn't exist at all.
+            level = (
+                logging.WARNING
+                if event.kind in ("error", "account-quarantined")
+                else logging.INFO
+            )
+            log.log(level, "auto: %s", event.human())
+            stdout_emit(event)
+
         settings = merged_with_cli(load_settings(switcher.backup_dir), args)
         engine = AutoSwitchEngine(
             switcher,
             settings,
-            jsonl_emit if args.json else human_emit,
+            emit,
             dry_run=args.dry_run,
         )
 

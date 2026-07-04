@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -805,6 +806,32 @@ class TestAutoCommand:
             payload = json.loads(line)
             assert payload["event"] == "no-switch"
             assert payload["schemaVersion"] == 1
+
+    def test_events_mirror_into_decision_log(self, temp_home, caplog):
+        # A supervised engine's stdout may go nowhere (pythonw has none), so
+        # every event must also land in the structured claude-swap.log.
+        from claude_swap.autoswitch import (
+            ErrorEvent,
+            NoSwitchEvent,
+            TickOutcome,
+        )
+
+        class EmittingEngine(self.FakeEngine):
+            def tick(self):
+                self.on_event(NoSwitchEvent(reason="below-threshold"))
+                self.on_event(ErrorEvent(message="boom"))
+                return TickOutcome.NO_ACTION
+
+        with patch("claude_swap.autoswitch.AutoSwitchEngine", EmittingEngine), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "auto", "--once"]), \
+             caplog.at_level(logging.INFO, logger="claude-swap"):
+            with pytest.raises(SystemExit):
+                cli.main()
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("below-threshold" in r.getMessage() for r in infos)
+        assert any("boom" in r.getMessage() for r in warnings)
 
     def test_unknown_flag_errors(self, temp_home, capsys):
         with patch.object(sys, "argv", ["claude-swap", "auto", "--bogus"]):
