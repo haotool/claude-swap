@@ -1028,13 +1028,17 @@ def _read_running_pid(path: Path) -> int | None:
 
 
 def _remove_stale_pid_file(path: Path) -> None:
-    """Remove a dead owner's PID file, and only that file (read-verify-unlink).
+    """Reclaim a dead owner's PID file, and only that file (claim-by-rename).
 
-    Every PID-file writer creates with ``O_CREAT|O_EXCL``, so between two reads
-    the content can only change if a concurrent starter unlinked the stale file
-    and won the create. Re-reading immediately before the unlink and requiring
-    the exact bytes just judged stale keeps this cleanup from deleting that
-    winner's fresh PID file — the TOCTOU that let two monitors run at once.
+    Every PID-file writer creates with ``O_CREAT|O_EXCL``, so a concurrent
+    starter can only reuse the path by unlinking it first. A read-verify-unlink
+    cleanup still left a window between its verify read and the unlink where
+    that starter's fresh file could land — and be deleted, letting two
+    monitors run. Renaming to a unique temp name closes it: the rename is
+    atomic, so exactly one reclaimer captures the file (losers get
+    ``FileNotFoundError`` and exit the race), and a capture whose bytes are
+    not the ones judged stale — a racer's fresh file — is restored with
+    no-overwrite semantics instead of discarded.
     """
     try:
         stale_text = path.read_text(encoding="utf-8")
@@ -1046,9 +1050,38 @@ def _remove_stale_pid_file(path: Path) -> None:
         pid = None
     if pid is not None and _pid_is_running(pid):
         return
+    claim = path.with_name(
+        f"{path.name}.reclaim-{os.getpid()}-{time.monotonic_ns()}"
+    )
     try:
-        if path.read_text(encoding="utf-8") == stale_text:
-            path.unlink()
+        os.rename(path, claim)
+    except OSError:
+        # Another starter claimed or replaced the path first; exit the race.
+        return
+    try:
+        claimed_text = claim.read_text(encoding="utf-8")
+    except OSError:
+        # Unverifiable capture: treat it like a racer's file and restore it.
+        claimed_text = None
+    if claimed_text == stale_text:
+        try:
+            claim.unlink()
+        except OSError:
+            pass
+        return
+    # The rename captured a racer's fresh file (created between the staleness
+    # read and the claim). Put it back without clobbering an even newer
+    # winner: os.rename refuses to overwrite on Windows, link+unlink gives
+    # the same guarantee on POSIX.
+    try:
+        if os.name == "nt":
+            os.rename(claim, path)
+        else:
+            os.link(claim, path)
+            claim.unlink()
+    except FileExistsError:
+        # A newer starter already owns the path; the captured copy is moot.
+        claim.unlink(missing_ok=True)
     except OSError:
         pass
 

@@ -1797,8 +1797,9 @@ class TestMonitorPidLifecycle:
     def test_remove_stale_pid_file_only_removes_verified_content(
         self, temp_home: Path, monkeypatch
     ):
-        """The cleanup unlinks only when the re-read matches the bytes it
-        judged stale; content swapped by a concurrent winner survives."""
+        """The reclaim discards the file only when the captured bytes match
+        the ones it judged stale; a concurrent winner's fresh file — landed
+        inside the reclaim window — is put back."""
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
         pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
@@ -1809,29 +1810,141 @@ class TestMonitorPidLifecycle:
             monitor._remove_stale_pid_file(pid_path)
         assert not pid_path.exists()
 
-        # Dead owner, but the content changes between the staleness read and
-        # the verify read (a concurrent winner replaced the file): kept.
+        # Dead owner, but a concurrent winner replaces the file inside the
+        # reclaim window (after the staleness read): the winner's file
+        # survives with its content intact.
         pid_path.write_text("424242", encoding="utf-8")
         real_read_text = Path.read_text
-        reads = {"n": 0}
+        swapped = {"done": False}
 
         def racing_read_text(self_path, *args, **kwargs):
-            if self_path == pid_path:
-                reads["n"] += 1
-                if reads["n"] == 2:
-                    return str(os.getpid())  # winner's fresh pid
-            return real_read_text(self_path, *args, **kwargs)
+            text = real_read_text(self_path, *args, **kwargs)
+            if self_path == pid_path and not swapped["done"]:
+                swapped["done"] = True
+                self_path.unlink()
+                self_path.write_text("31337", encoding="utf-8")
+            return text
 
         monkeypatch.setattr(Path, "read_text", racing_read_text)
         with patch("claude_swap.monitor._pid_is_running", return_value=False):
             monitor._remove_stale_pid_file(pid_path)
         monkeypatch.setattr(Path, "read_text", real_read_text)
-        assert pid_path.exists()
+        assert pid_path.read_text(encoding="utf-8") == "31337"
 
         # Live owner: never removed.
         with patch("claude_swap.monitor._pid_is_running", return_value=True):
             monitor._remove_stale_pid_file(pid_path)
         assert pid_path.exists()
+
+    def test_reclaim_captures_atomically_instead_of_unlinking_in_place(
+        self, temp_home: Path, monkeypatch
+    ):
+        """The stale file must leave the contended path via an atomic rename
+        (claim), never an in-place unlink: the unlink is what left a window
+        — between the verify read and the unlink — where a concurrent
+        winner's fresh PID file could still be deleted."""
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
+        pid_path.write_text("424242", encoding="utf-8")
+
+        real_unlink = Path.unlink
+        unlinked: list[Path] = []
+
+        def recording_unlink(self_path, *args, **kwargs):
+            unlinked.append(self_path)
+            return real_unlink(self_path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", recording_unlink)
+        with patch("claude_swap.monitor._pid_is_running", return_value=False):
+            monitor._remove_stale_pid_file(pid_path)
+
+        assert not pid_path.exists()
+        assert pid_path not in unlinked
+
+    def test_reclaim_loser_exits_quietly_on_lost_rename(self, temp_home: Path):
+        """Two reclaimers race: the loser's rename raises FileNotFoundError
+        and it must exit the race without touching anything."""
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
+        pid_path.write_text("424242", encoding="utf-8")
+
+        with (
+            patch("claude_swap.monitor._pid_is_running", return_value=False),
+            patch(
+                "claude_swap.monitor.os.rename",
+                side_effect=FileNotFoundError,
+            ),
+        ):
+            monitor._remove_stale_pid_file(pid_path)
+
+        assert pid_path.read_text(encoding="utf-8") == "424242"
+
+    def test_reclaim_restores_via_rename_on_windows(
+        self, temp_home: Path, monkeypatch
+    ):
+        """The restore path uses os.rename on nt (no-overwrite semantics
+        there); the captured fresh file must land back on the pid path."""
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
+        pid_path.write_text("424242", encoding="utf-8")
+        monkeypatch.setattr(monitor.os, "name", "nt")
+
+        real_read_text = Path.read_text
+        swapped = {"done": False}
+
+        def racing_read_text(self_path, *args, **kwargs):
+            text = real_read_text(self_path, *args, **kwargs)
+            if self_path == pid_path and not swapped["done"]:
+                swapped["done"] = True
+                self_path.unlink()
+                self_path.write_text("31337", encoding="utf-8")
+            return text
+
+        monkeypatch.setattr(Path, "read_text", racing_read_text)
+        with patch("claude_swap.monitor._pid_is_running", return_value=False):
+            monitor._remove_stale_pid_file(pid_path)
+        monkeypatch.setattr(Path, "read_text", real_read_text)
+
+        assert pid_path.read_text(encoding="utf-8") == "31337"
+        assert not list(switcher.backup_dir.glob("*.reclaim-*"))
+
+    def test_reclaim_restore_defers_to_newer_winner(
+        self, temp_home: Path, monkeypatch
+    ):
+        """Restore refuses to overwrite: when yet another starter recreated
+        the path before the restore lands, the captured copy is dropped and
+        no reclaim temp file is left behind."""
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        pid_path = switcher.backup_dir / "auto-switch-monitor.pid"
+        pid_path.write_text("424242", encoding="utf-8")
+
+        real_read_text = Path.read_text
+        swapped = {"done": False}
+
+        def racing_read_text(self_path, *args, **kwargs):
+            text = real_read_text(self_path, *args, **kwargs)
+            if self_path == pid_path and not swapped["done"]:
+                swapped["done"] = True
+                self_path.unlink()
+                self_path.write_text("31337", encoding="utf-8")
+            return text
+
+        monkeypatch.setattr(Path, "read_text", racing_read_text)
+        with (
+            patch("claude_swap.monitor._pid_is_running", return_value=False),
+            patch(
+                "claude_swap.monitor.os.link",
+                side_effect=FileExistsError,
+            ),
+        ):
+            monitor._remove_stale_pid_file(pid_path)
+        monkeypatch.setattr(Path, "read_text", real_read_text)
+
+        assert not list(switcher.backup_dir.glob("*.reclaim-*"))
 
     def test_run_cli_monitor_releases_pid_in_finally(self, temp_home: Path):
         switcher = ClaudeAccountSwitcher()
