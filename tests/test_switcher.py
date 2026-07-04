@@ -588,3 +588,22 @@ class TestStatusCache:
         )
         assert entries["1"].last_good == usage_result
         assert entries["2"].last_good == {"five_hour": {"pct": 80}}
+
+
+class TestUsageFetchStamps:
+    def test_stamps_reflect_store_without_fetching(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        assert switcher.usage_fetch_stamps() == {"1": None, "2": None}
+
+        UsageStore(switcher.backup_dir / "cache").record(
+            {"1": FetchRecord(usage={"five_hour": {"pct": 25}})},
+            {"1": ("account1@example.com", "")},
+        )
+        stamps = switcher.usage_fetch_stamps()
+        assert stamps["1"] is not None
+        assert stamps["2"] is None

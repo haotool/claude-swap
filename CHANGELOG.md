@@ -35,6 +35,11 @@ Release version is defined in `pyproject.toml` (currently `0.17.0+haotool.1`).
     table (`SettingSpec`) shared by loading, validation, and help text.
   - **Subcommand aliases** (`cswap ls`, `rm`, `update`, …) and usage-fetch
     failure classification with WARNING-level logs.
+  - **Watch view rides the usage store.** The TUI dashboard drops its
+    refresh-interval knob (`+`/`-`): network traffic now follows the
+    store's discipline — active account plus at most one due alternate
+    per serve-TTL window — and just-refreshed rows flash briefly. `r`
+    still forces a full pass.
 - **Upstream v0.16.0 merged** (`cswap auto` engine and per-model usage,
   upstream #81/#83 plus the author's alignment fix): `cswap auto` runs a
   UI-agnostic threshold auto-switcher — poll usage, switch proactively to

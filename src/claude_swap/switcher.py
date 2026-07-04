@@ -474,6 +474,21 @@ class ClaudeAccountSwitcher:
         accounts_info = reporter.build_accounts_info()
         return reporter.collect_usage_entries(accounts_info, fetch=fetch)
 
+    def usage_fetch_stamps(self) -> dict[str, float | None]:
+        """Per-slot ``fetchedAt`` snapshot from the usage store — a pure file
+        read (no fetching, no credential access). The TUI watch view diffs
+        consecutive snapshots to flash rows whose usage just refreshed.
+        """
+        data = self._get_sequence_data() or {}
+        identities = {
+            num: (info.get("email", ""), info.get("organizationUuid", "") or "")
+            for num, info in data.get("accounts", {}).items()
+        }
+        return {
+            num: entry.fetched_at
+            for num, entry in self._usage_store.entries(identities).items()
+        }
+
     def set_usage_poll_plan(
         self, plans: dict[str, tuple[float | None, float | None]]
     ) -> None:
@@ -1652,14 +1667,21 @@ class ClaudeAccountSwitcher:
         show_token_status: bool = False,
         show_health: bool = False,
         json_output: bool = False,
+        fetch: set[str] | None = None,
     ) -> dict[str, Any] | None:
-        """List all managed accounts."""
+        """List all managed accounts.
+
+        ``fetch`` restricts which accounts *may* be fetched this pass (the TUI
+        watch view's adaptive set); ``None`` — the CLI default — leaves every
+        stale account eligible.
+        """
         from claude_swap.list_reporter import run_list
         return run_list(
             self,
             show_token_status=show_token_status,
             show_health=show_health,
             json_output=json_output,
+            fetch=fetch,
         )
 
     def status(self, json_output: bool = False) -> dict[str, Any] | None:

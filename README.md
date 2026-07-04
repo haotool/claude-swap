@@ -150,9 +150,10 @@ Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, etc.), 
 ### The interactive menu
 
 Launch the arrow-key menu with `cswap --tui`. Alongside the account actions it
-offers **Watch (live status + usage)** — a read-only dashboard that re-captures
-`cswap --list` on an interval and redraws in place — and **Auto-switch at
-limit**, a frontend over the same engine as `cswap auto`:
+offers **Watch (live status + usage)** — a read-only dashboard that redraws in
+place, polling through the usage store like `cswap auto` (active account plus
+one alternate per pass) and flashing rows whose usage just refreshed — and
+**Auto-switch at limit**, a frontend over the same engine as `cswap auto`:
 
 ```bash
 cswap --tui

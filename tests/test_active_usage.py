@@ -592,6 +592,47 @@ class TestListAccountsUsage:
         assert "10%" in output
         assert "25%" not in output
 
+    def test_list_fetch_set_restricts_fetches(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
+    ):
+        """``fetch`` caps which accounts may be fetched (the TUI watch view's
+        adaptive set); the default ``None`` keeps every stale account eligible
+        (covered by test_list_refetches_stale_entries)."""
+        sample_sequence_data["accounts"]["1"]["email"] = "test@example.com"
+        active_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-active"}})
+        backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
+
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._write_json(switcher.sequence_file, sample_sequence_data)
+
+        usage_result = {
+            "five_hour": {"pct": 10, "clock": "Jan 1 03:00", "countdown": "0m"},
+            "seven_day": {"pct": 50, "clock": "Jan 2 03:00", "countdown": "0m"},
+        }
+
+        with patch.object(switcher, "_read_active_credentials",
+                          return_value=ActiveCredentials(active_creds, False)), \
+             patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
+             patch("claude_swap.list_reporter.ListReporter._active_cc_running",
+                   return_value=True), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome(usage_result)) as mock_fetch:
+            switcher.list_accounts(fetch=set())
+        # Both accounts are stale (nothing stored) yet nobody may be fetched.
+        mock_fetch.assert_not_called()
+
+        with patch.object(switcher, "_read_active_credentials",
+                          return_value=ActiveCredentials(active_creds, False)), \
+             patch.object(switcher, "_read_account_credentials", return_value=backup_creds), \
+             patch("claude_swap.list_reporter.ListReporter._active_cc_running",
+                   return_value=True), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome(usage_result)) as mock_fetch:
+            switcher.list_accounts(fetch={"2"})
+        # Only the allowed slot is fetched.
+        assert mock_fetch.call_count == 1
+        assert mock_fetch.call_args.args[0] == "2"
 
 
 class TestRotatedTokenPersistContention:

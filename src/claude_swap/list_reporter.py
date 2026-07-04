@@ -185,12 +185,14 @@ def run_list(
     show_token_status: bool = False,
     show_health: bool = False,
     json_output: bool = False,
+    fetch: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """List all managed accounts via *host*."""
     return ListReporter(host).list_accounts(
         show_token_status=show_token_status,
         show_health=show_health,
         json_output=json_output,
+        fetch=fetch,
     )
 
 
@@ -229,8 +231,14 @@ class ListReporter:
         show_token_status: bool = False,
         show_health: bool = False,
         json_output: bool = False,
+        fetch: set[str] | None = None,
     ) -> dict[str, Any] | None:
-        """List all managed accounts."""
+        """List all managed accounts.
+
+        ``fetch`` restricts which accounts *may* be fetched this pass (the TUI
+        watch view's adaptive set); ``None`` — the CLI default — leaves every
+        stale account eligible.
+        """
         if json_output:
             if not self.sequence_file.exists():
                 return empty_list_payload()
@@ -241,7 +249,7 @@ class ListReporter:
                 ce, ou = current_identity
                 active_num = _slot_for_identity(data.get("accounts", {}), ce, ou)
             accounts_info, _ = self.collect_accounts_info(data, active_num)
-            entries = self.resolve_usages(accounts_info)
+            entries = self.collect_usage_entries(accounts_info, fetch=fetch)
             return self.build_list_payload(accounts_info, entries)
         if not self.sequence_file.exists():
             print(dimmed("No accounts are managed yet."))
@@ -258,7 +266,7 @@ class ListReporter:
             )
 
         accounts_info, health_notes = self.collect_accounts_info(data, active_num)
-        entries = self.resolve_usages(accounts_info)
+        entries = self.collect_usage_entries(accounts_info, fetch=fetch)
         self.print_account_rows(
             accounts_info,
             entries,
