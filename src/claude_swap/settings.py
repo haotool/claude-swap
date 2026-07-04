@@ -11,6 +11,7 @@ warning, never a crash — so a bad hand edit degrades to default behavior.
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import json
 import logging
@@ -19,6 +20,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 SETTINGS_SCHEMA_VERSION = 1
 SETTINGS_FILENAME = "settings.json"
@@ -68,7 +70,7 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
     """Clamp values into sane ranges; fall back to the default on bad types."""
     defaults = AutoSwitchSettings()
 
-    def num(value, default: float, lo: float, hi: float) -> float:
+    def num(value: object, default: float, lo: float, hi: float) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return default
         return float(min(max(value, lo), hi))
@@ -96,7 +98,7 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
     )
 
 
-def _read_raw(path: Path) -> dict:
+def _read_raw(path: Path) -> dict[str, Any]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -141,7 +143,9 @@ def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
     atomic_write_json(path, raw)
 
 
-def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
+def merged_with_cli(
+    settings: AutoSwitchSettings, args: argparse.Namespace
+) -> AutoSwitchSettings:
     """Overlay non-None CLI overrides (argparse Namespace) onto settings."""
     overrides = {}
     for attr, field in (
@@ -158,7 +162,7 @@ def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
     return _clamped(dataclasses.replace(settings, **overrides))
 
 
-def atomic_write_json(path: Path, data: dict) -> None:
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     """Atomically write JSON with the backup dir's 0600/0700 modes.
 
     Shared by settings.json and the autoswitch state file (and any future

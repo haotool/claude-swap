@@ -739,7 +739,9 @@ class ClaudeAccountSwitcher:
 
     # -- public accessors for the auto-switch engine -----------------------
 
-    def usage_by_account(self) -> dict[str, dict | str | None]:
+    def usage_by_account(
+        self,
+    ) -> dict[str, dict[str, Any] | str | oauth.UsageFetchError | None]:
         """Public wrapper: account number → usage entry (cache-first)."""
         return self._usage_by_account()
 
@@ -759,7 +761,8 @@ class ClaudeAccountSwitcher:
     def account_email(self, account_num: str) -> str:
         """Stored email for a slot; empty string when unknown."""
         data = self._get_sequence_data() or {}
-        return data.get("accounts", {}).get(str(account_num), {}).get("email", "")
+        email = data.get("accounts", {}).get(str(account_num), {}).get("email", "")
+        return email if isinstance(email, str) else ""
 
     def current_account_number(self) -> str | None:
         """Slot of the live login; ``None`` when there is none or it's unmanaged.

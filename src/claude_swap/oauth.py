@@ -175,14 +175,14 @@ def try_refresh_oauth_credentials(credentials: str) -> RefreshOutcome:
         data["claudeAiOauth"] = oauth
         return RefreshOutcome(json.dumps(data), None)
     except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
-        _logger.debug("OAuth refresh failed: %r, body: %s", e, body[:500])
+        err_body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
+        _logger.debug("OAuth refresh failed: %r, body: %s", e, err_body[:500])
         # Permanent only when the server itself rejected the grant: a 4xx AND
         # an explicit marker in the body. Anything ambiguous stays transient —
         # a misclassified transient costs one retry, a misclassified permanent
         # would wrongly quarantine a live token.
         if e.code in (400, 401, 403) and (
-            "invalid_grant" in body or "invalid_client" in body
+            "invalid_grant" in err_body or "invalid_client" in err_body
         ):
             return RefreshOutcome(None, "invalid_grant")
         return RefreshOutcome(None, "transient")
@@ -312,7 +312,7 @@ def build_usage_result(data: dict[str, Any]) -> dict[str, Any] | None:
     # ``limits``) simply yield no ``scoped`` key.
     limits = data.get("limits")
     if isinstance(limits, list):
-        scoped: list[dict] = []
+        scoped: list[dict[str, Any]] = []
         for lim in limits:
             if not isinstance(lim, dict):
                 continue
@@ -322,7 +322,7 @@ def build_usage_result(data: dict[str, Any]) -> dict[str, Any] | None:
             pct = lim.get("percent")
             if not name or not isinstance(pct, (int, float)):
                 continue
-            scoped_entry: dict = {"name": name, "pct": float(pct)}
+            scoped_entry: dict[str, Any] = {"name": name, "pct": float(pct)}
             if lim.get("resets_at"):
                 scoped_entry["resets_at"] = lim["resets_at"]
                 scoped_entry["countdown"], scoped_entry["clock"] = format_reset(lim["resets_at"])

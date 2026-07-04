@@ -39,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from claude_swap import oauth
 from claude_swap.exceptions import ClaudeSwitchError
@@ -85,10 +85,10 @@ class AutoSwitchEvent:
     kind: ClassVar[str] = "event"
     ts: str = field(default_factory=_now_iso, kw_only=True)
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {}
 
-    def to_json(self) -> dict:
+    def to_json(self) -> dict[str, Any]:
         return {
             "schemaVersion": SCHEMA_VERSION,
             "event": self.kind,
@@ -103,11 +103,11 @@ class AutoSwitchEvent:
 @dataclass(frozen=True)
 class PollEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "poll"
-    active: dict | None  # account_ref shape, or None
+    active: dict[str, Any] | None  # account_ref shape, or None
     headroom: dict[str, float | None]  # account number → headroom pct (None=unknown)
     threshold: float
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {
             "active": self.active,
             "headroomPct": self.headroom,
@@ -136,12 +136,12 @@ class PollEvent(AutoSwitchEvent):
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
     trigger: str  # "proactive" | "at-limit" | "failover"
-    from_ref: dict | None
-    to_ref: dict | None
+    from_ref: dict[str, Any] | None
+    to_ref: dict[str, Any] | None
     warnings: list[str] = field(default_factory=list)
     dry_run: bool = False
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {
             "trigger": self.trigger,
             "from": self.from_ref,
@@ -169,7 +169,7 @@ class NoSwitchEvent(AutoSwitchEvent):
     reason: str
     detail: str = ""
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {"reason": self.reason, "detail": self.detail}
 
     def human(self) -> str:
@@ -183,7 +183,7 @@ class QuarantineEvent(AutoSwitchEvent):
     email: str
     reason: str
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {"number": self.number, "email": self.email, "reason": self.reason}
 
     def human(self) -> str:
@@ -201,7 +201,7 @@ class UnquarantineEvent(AutoSwitchEvent):
     email: str
     reason: str = "credentials-replaced"
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {"number": self.number, "email": self.email, "reason": self.reason}
 
     def human(self) -> str:
@@ -213,7 +213,7 @@ class AllExhaustedEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "all-exhausted"
     earliest_reset_at: str | None
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {"earliestResetAt": self.earliest_reset_at}
 
     def human(self) -> str:
@@ -228,7 +228,7 @@ class SleepEvent(AutoSwitchEvent):
     seconds: float
     until: str
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {"seconds": round(self.seconds, 1), "until": self.until}
 
     def human(self) -> str:
@@ -241,7 +241,7 @@ class ErrorEvent(AutoSwitchEvent):
     message: str
     transient: bool = True
 
-    def _fields(self) -> dict:
+    def _fields(self) -> dict[str, Any]:
         return {"message": self.message, "transient": self.transient}
 
     def human(self) -> str:
@@ -270,7 +270,7 @@ def _refresh_fingerprint(credentials: str) -> str | None:
     return "sha256:" + hashlib.sha256(token.encode()).hexdigest()
 
 
-def _ref(number: str, email: str) -> dict:
+def _ref(number: str, email: str) -> dict[str, Any]:
     return {"number": int(number), "email": email}
 
 
@@ -311,14 +311,16 @@ class AutoSwitchEngine:
     def _state_lock(self) -> FileLock:
         return FileLock(self.state_path.parent / ".autoswitch_state.lock")
 
-    def _read_state(self) -> dict:
+    def _read_state(self) -> dict[str, Any]:
         try:
             raw = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return {}
         return raw if isinstance(raw, dict) else {}
 
-    def _mutate_state(self, mutator: Callable[[dict], None]) -> dict:
+    def _mutate_state(
+        self, mutator: Callable[[dict[str, Any]], None]
+    ) -> dict[str, Any]:
         """Read-modify-write the state file under its lock; returns new state.
 
         The lock prevents two concurrent engines (loop + cron ``--once``) from
@@ -338,7 +340,7 @@ class AutoSwitchEngine:
         creds = self.switcher.read_account_credentials(number, email)
         fingerprint = _refresh_fingerprint(creds) if creds else None
 
-        def add(state: dict) -> None:
+        def add(state: dict[str, Any]) -> None:
             state.setdefault("quarantine", {})[number] = {
                 "email": email,
                 "reason": reason,
@@ -349,7 +351,9 @@ class AutoSwitchEngine:
         self._mutate_state(add)
         self._emit(QuarantineEvent(number=number, email=email, reason=reason))
 
-    def _release_recovered_quarantines(self, state: dict) -> dict:
+    def _release_recovered_quarantines(
+        self, state: dict[str, Any]
+    ) -> dict[str, Any]:
         """Drop quarantine entries whose credential was replaced since.
 
         A changed refresh-token fingerprint (or a removed/re-added slot) means
@@ -374,7 +378,7 @@ class AutoSwitchEngine:
         if not to_release:
             return state
 
-        def drop(s: dict) -> None:
+        def drop(s: dict[str, Any]) -> None:
             q = s.get("quarantine")
             if isinstance(q, dict):
                 for number, _, _ in to_release:
@@ -721,14 +725,16 @@ class AutoSwitchEngine:
 
     # -- helpers --------------------------------------------------------------
 
-    def _in_cooldown(self, state: dict) -> bool:
+    def _in_cooldown(self, state: dict[str, Any]) -> bool:
         last = state.get("lastSwitchAt")
         if not isinstance(last, (int, float)):
             return False
         return (self.clock() - last) < self.settings.cooldown_seconds
 
     @staticmethod
-    def _earliest_reset(usage: dict[str, dict | str | None]) -> datetime | None:
+    def _earliest_reset(
+        usage: dict[str, dict[str, Any] | str | oauth.UsageFetchError | None],
+    ) -> datetime | None:
         """Earliest known window reset across all accounts (UTC)."""
         earliest: datetime | None = None
         for entry in usage.values():

@@ -31,6 +31,7 @@ import os
 import random
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -67,7 +68,7 @@ def proper_lockfile(
     *,
     timeout: float | None = None,
     staleness: float = STALENESS_S,
-):
+) -> Iterator[None]:
     """Acquire a proper-lockfile-compatible directory lock.
 
     Blocks up to ``timeout`` seconds (default ``DEFAULT_TIMEOUT_S``, resolved
@@ -134,14 +135,14 @@ def proper_lockfile(
 
 
 @contextmanager
-def claude_credentials_lock(*, timeout: float | None = None):
+def claude_credentials_lock(*, timeout: float | None = None) -> Iterator[None]:
     """Hold Claude Code's credential-refresh lock (``~/.claude.lock``)."""
     with proper_lockfile(credentials_lock_dir(), timeout=timeout):
         yield
 
 
 @contextmanager
-def claude_config_lock(*, timeout: float | None = None):
+def claude_config_lock(*, timeout: float | None = None) -> Iterator[None]:
     """Hold Claude Code's global-config write lock (``~/.claude.json.lock``)."""
     with proper_lockfile(config_lock_dir(), timeout=timeout):
         yield
