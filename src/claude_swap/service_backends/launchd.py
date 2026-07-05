@@ -97,6 +97,7 @@ def _launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[st
             [_LAUNCHCTL, *args],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=service_spec.SUBPROCESS_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
