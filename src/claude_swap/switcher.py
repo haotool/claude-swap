@@ -59,17 +59,15 @@ from claude_swap.paths import (
     migrate_legacy_backup_dir,
 )
 from claude_swap.credential_refresh import CredentialRefresher
+from claude_swap.list_reporter import ListReporter, run_list, run_status
 from claude_swap.sequence_store import (
     AccountRecord,
     SequenceData,
     SequenceStore,
 )
-from claude_swap.usage_policy import headroom
+from claude_swap.usage_policy import headroom, rank_headroom_best
 from claude_swap.usage_store import UsageEntry, UsageStore
-from typing import TYPE_CHECKING, Any, cast
-
-if TYPE_CHECKING:
-    from claude_swap.list_reporter import ListReporter
+from typing import Any, cast
 
 # Service name under which the legacy ``keyring`` backend stored per-account
 # backup credentials on macOS (kept for the one-time keyring → security migration
@@ -1313,7 +1311,6 @@ class ClaudeAccountSwitcher:
         pool — keep that ordering invariant.
         """
         if self._reporter is None:
-            from claude_swap.list_reporter import ListReporter
             self._reporter = ListReporter(self)
         return self._reporter
 
@@ -1351,8 +1348,6 @@ class ClaudeAccountSwitcher:
         Ties (including current-vs-other) resolve in favor of staying put.
         Never raises on network failure.
         """
-        from claude_swap.usage_policy import rank_headroom_best
-
         data = self._get_sequence_data() or {}
         others = [
             str(n) for n in data.get("sequence", [])
@@ -1671,7 +1666,6 @@ class ClaudeAccountSwitcher:
         watch view's adaptive set); ``None`` — the CLI default — leaves every
         stale account eligible.
         """
-        from claude_swap.list_reporter import run_list
         return run_list(
             self,
             show_token_status=show_token_status,
@@ -1682,7 +1676,6 @@ class ClaudeAccountSwitcher:
 
     def status(self, json_output: bool = False) -> dict[str, Any] | None:
         """Display current account status."""
-        from claude_swap.list_reporter import run_status
         return run_status(self, json_output=json_output)
 
     def _first_run_setup(self) -> None:

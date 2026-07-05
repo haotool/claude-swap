@@ -9,7 +9,7 @@ import os
 import sys
 from typing import Any, cast
 
-from claude_swap import __version__
+from claude_swap import __version__, service
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
 from claude_swap.printer import dimmed, error, muted
@@ -580,8 +580,6 @@ Examples:
 
     try:
         switcher = ClaudeAccountSwitcher(debug=args.debug)
-        from claude_swap import service
-
         action = {
             "install": service.install,
             "uninstall": service.uninstall,
