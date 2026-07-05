@@ -160,9 +160,50 @@ class TestBuildTaskXml:
         switcher = ClaudeAccountSwitcher()
         xml = ts_backend._build_task_xml(switcher)
         # ElementTree must escape & (and keep the space verbatim); a raw
-        # ampersand would make the task XML invalid.
-        assert "<Command>C:\\Program Files\\py &amp; co\\pythonw.exe</Command>" in xml
+        # ampersand would make the task XML invalid. The spaced path is
+        # additionally quoted for IExecAction (serialized as &quot;).
+        assert (
+            "<Command>&quot;C:\\Program Files\\py &amp; co\\pythonw.exe&quot;"
+            "</Command>" in xml
+        )
         assert "py & co" not in xml
+
+    def test_command_with_spaces_is_quoted(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # An unquoted "C:\Program Files\..." Command is ambiguous to Task
+        # Scheduler's action parser; the CI round-trip never covers it
+        # because the runner's Python lives in a space-free path.
+        _force_win32(monkeypatch)
+        monkeypatch.setattr(
+            ts_backend,
+            "_program_arguments",
+            lambda: [
+                r"C:\Program Files\Python312\pythonw.exe",
+                "-m",
+                "claude_swap",
+                "auto",
+            ],
+        )
+        xml = ts_backend._build_task_xml(ClaudeAccountSwitcher())
+        # minidom serializes the quote as &quot;; it parses back to a plain
+        # '"' in the Command value Task Scheduler sees.
+        assert (
+            "<Command>&quot;C:\\Program Files\\Python312\\pythonw.exe&quot;"
+            "</Command>" in xml
+        )
+
+    def test_command_without_spaces_stays_bare(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        _force_win32(monkeypatch)
+        monkeypatch.setattr(
+            ts_backend,
+            "_program_arguments",
+            lambda: [r"C:\venv\Scripts\pythonw.exe", "-m", "claude_swap", "auto"],
+        )
+        xml = ts_backend._build_task_xml(ClaudeAccountSwitcher())
+        assert "<Command>C:\\venv\\Scripts\\pythonw.exe</Command>" in xml
 
     def test_register_task_doubles_single_quotes_in_path(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

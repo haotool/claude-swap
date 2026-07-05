@@ -85,6 +85,12 @@ def _task_name_literal() -> str:
 def _build_task_xml(switcher: ServiceHost) -> str:
     argv = _program_arguments()
     command = argv[0]
+    if " " in command:
+        # Task Scheduler does not reliably treat an unquoted spaced path
+        # ("C:\Program Files\...") as one command; quote it, matching the
+        # argv escaping launchd/systemd already apply. Windows paths cannot
+        # contain '"', so wrapping is enough.
+        command = f'"{command}"'
     arguments = " ".join(argv[1:])
 
     ET.register_namespace("", _TASK_NS)
