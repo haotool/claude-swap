@@ -8,6 +8,7 @@ restrained aesthetic. Falls back to plain text when colors aren't supported.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import os
 import sys
 import time
@@ -27,20 +28,27 @@ _colors_enabled: bool | None = None  # lazy-initialized
 
 
 def _enable_windows_vt() -> bool:
-    """Enable VT processing on Windows console."""
+    """Enable VT processing on Windows console (True elsewhere)."""
     if sys.platform == "win32":
         try:
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            kernel32 = ctypes.windll.kernel32
             handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
             mode = ctypes.c_ulong()
-            kernel32.GetConsoleMode(handle, ctypes.byref(mode))
-            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-            return True
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return False
+            # Legacy conhost (pre-Win10 / old Server) rejects the flag; the
+            # returned failure must disable color or every style call would
+            # print bare escape codes.
+            return bool(
+                kernel32.SetConsoleMode(
+                    handle,
+                    mode.value | 0x0004,  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                )
+            )
         except Exception:
             return False
-    return True
+    else:
+        return True
 
 
 def _detect_color_support() -> bool:
@@ -57,10 +65,9 @@ def _detect_color_support() -> bool:
     # Windows: try to enable VT processing
     if sys.platform == "win32":
         return _enable_windows_vt()
-    # POSIX: check TERM
-    if os.environ.get("TERM", "") == "dumb":
-        return False
-    return True
+    else:
+        # POSIX: check TERM
+        return os.environ.get("TERM", "") != "dumb"
 
 
 def colors_enabled() -> bool:

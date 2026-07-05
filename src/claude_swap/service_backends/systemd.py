@@ -15,11 +15,12 @@ import getpass
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 from claude_swap import service_spec
 from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.models import is_linux
+from claude_swap.paths import get_claude_config_home
 from claude_swap.printer import bolded, dimmed, muted, warning
 from claude_swap.protocols import ServiceHost, ServiceState
 
@@ -67,12 +68,12 @@ def _user_manager_available() -> bool:
 
 
 def _require_systemd() -> None:
-    if not sys.platform.startswith("linux"):
+    if not is_linux():
         raise ClaudeSwitchError(
             "cswap service (systemd) requires Linux or WSL. "
             "Use `cswap auto` in the foreground on this platform."
         )
-    if not _pid1_is_systemd():  # type: ignore[unreachable]
+    if not _pid1_is_systemd():
         raise ClaudeSwitchError(
             "systemd is not running as PID 1 on this system. "
             "On WSL2, enable user systemd in /etc/wsl.conf:\n"
@@ -120,15 +121,18 @@ def _build_unit(switcher: ServiceHost) -> str:
 
 
 def _systemd_escape(arg: str) -> str:
+    # systemd expands % specifiers everywhere in a unit — inside quotes too —
+    # so a literal % must always be doubled, before the quoting decision.
     if not arg:
         return '""'
-    if re.fullmatch(r"[A-Za-z0-9_/@:.,+-]+", arg):
+    arg = arg.replace("%", "%%")
+    if re.fullmatch(r"[A-Za-z0-9_/@:.,+%-]+", arg):
         return arg
     return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _systemd_escape_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
 
 
 def _unescape_env_value(value: str) -> str:
@@ -138,6 +142,11 @@ def _unescape_env_value(value: str) -> str:
         char = value[index]
         if char == "\\" and index + 1 < len(value):
             out.append(value[index + 1])
+            index += 2
+        elif char == "%" and index + 1 < len(value) and value[index + 1] == "%":
+            # Escaping doubles % after the backslash pass, so every %% pair
+            # here denotes one literal % and never splits a \-escape.
+            out.append("%")
             index += 2
         else:
             out.append(char)
@@ -204,6 +213,17 @@ def _print_wsl_guidance() -> None:
     print(
         f"  {dimmed('WSL ~/.claude and Windows %USERPROFILE%\\.claude are separate; install cswap in the same environment as Claude Code.')}"
     )
+    config_home = get_claude_config_home()
+    if re.match(r"^/mnt/[a-zA-Z]/", str(config_home)):
+        # Windows-side session PID files hold Windows PIDs, which WSL's PID
+        # namespace cannot see — the engine would read every session as dead
+        # (or, worse, alive by PID collision).
+        warning(
+            f"CLAUDE_CONFIG_DIR points at the Windows side ({config_home}). "
+            "Windows Claude Code sessions are invisible to this WSL service; "
+            "it can only watch Claude Code running inside WSL. Install cswap "
+            "on the side where Claude Code actually runs."
+        )
 
 
 class SystemdBackend:

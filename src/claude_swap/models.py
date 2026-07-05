@@ -17,6 +17,15 @@ if TYPE_CHECKING:
 _WSL_PROC_PATHS = (Path("/proc/version"), Path("/proc/sys/kernel/osrelease"))
 
 
+def is_linux() -> bool:
+    """Return True on Linux (including WSL).
+
+    Runtime check so mypy keeps every platform branch reachable instead of
+    narrowing on ``sys.platform`` under ``--platform`` analysis.
+    """
+    return sys.platform.startswith("linux")
+
+
 def is_wsl() -> bool:
     """Return True when running under WSL (Microsoft kernel/userspace).
 
@@ -24,9 +33,9 @@ def is_wsl() -> bool:
     /proc, falling back to the WSL_DISTRO_NAME env var. Used by both
     ``Platform.detect`` and the systemd service backend.
     """
-    if not sys.platform.startswith("linux"):
+    if not is_linux():
         return False
-    for path in _WSL_PROC_PATHS:  # type: ignore[unreachable]
+    for path in _WSL_PROC_PATHS:
         try:
             if "microsoft" in path.read_text(encoding="utf-8", errors="replace").lower():
                 return True

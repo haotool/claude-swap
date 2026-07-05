@@ -241,6 +241,52 @@ class TestInstall:
         assert "%USERPROFILE%\\.claude" in out
         assert "%USERPROFILE%\\\\.claude" not in out
 
+    def test_wsl_install_warns_on_windows_side_config_dir(
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ):
+        # CLAUDE_CONFIG_DIR on /mnt/<drive> means the session PID files hold
+        # Windows PIDs, invisible to WSL's PID namespace — the engine would
+        # judge every Windows-side session dead. Say so once at install.
+        _force_linux(monkeypatch)
+        config_home = temp_home / ".config"
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/mnt/c/Users/dev/.claude")
+        monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
+        monkeypatch.setattr(
+            systemd_backend, "_unit_path", lambda: _unit_path(config_home)
+        )
+        monkeypatch.setattr(subprocess, "run", _stub_run())
+        monkeypatch.setattr(systemd_backend.service_spec, "is_wsl", lambda: True)
+
+        systemd_backend.SystemdBackend().install(ClaudeAccountSwitcher())
+
+        out = capsys.readouterr().out
+        assert "points at the Windows side" in out
+        assert "/mnt/c/Users/dev/.claude" in out
+
+    def test_wsl_install_stays_quiet_for_wsl_side_config_dir(
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ):
+        _force_linux(monkeypatch)
+        config_home = temp_home / ".config"
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+        monkeypatch.setattr(systemd_backend, "_pid1_is_systemd", lambda: True)
+        monkeypatch.setattr(
+            systemd_backend, "_unit_path", lambda: _unit_path(config_home)
+        )
+        monkeypatch.setattr(subprocess, "run", _stub_run())
+        monkeypatch.setattr(systemd_backend.service_spec, "is_wsl", lambda: True)
+
+        systemd_backend.SystemdBackend().install(ClaudeAccountSwitcher())
+
+        assert "points at the Windows side" not in capsys.readouterr().out
+
     def test_wsl_keepalive_command_matches_readme(self):
         # The README documents the same Task Scheduler command; keep the two
         # surfaces in lockstep so users never see conflicting guidance.
@@ -693,6 +739,34 @@ class TestHelpers:
         assert systemd_backend._systemd_escape("") == '""'
         assert systemd_backend._systemd_escape("/plain/path") == "/plain/path"
         assert systemd_backend._systemd_escape("has space") == '"has space"'
+
+    def test_escape_doubles_percent_specifiers(self):
+        # systemd expands % specifiers even inside quotes; an unescaped %h
+        # in a path would expand (or fail daemon-reload as an invalid
+        # specifier) instead of staying literal.
+        assert systemd_backend._systemd_escape("%h") == "%%h"
+        assert (
+            systemd_backend._systemd_escape("/tmp/pct%40home/bin")
+            == "/tmp/pct%%40home/bin"
+        )
+        assert systemd_backend._systemd_escape("has space %i") == '"has space %%i"'
+        assert systemd_backend._systemd_escape_value("50%") == "50%%"
+
+    def test_env_value_escape_round_trips_percent(self):
+        # Writing doubles % after the backslash pass; reading must fold %%
+        # back or a re-read value drifts from what was installed.
+        for value in ("50%", "%", "100%%", '/pct%40/"dir"\\x', "%h %i"):
+            escaped = systemd_backend._systemd_escape_value(value)
+            assert systemd_backend._unescape_env_value(escaped) == value
+
+    def test_unit_with_percent_in_env_value_is_escaped(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/data/pct%40home/.claude")
+        switcher = ClaudeAccountSwitcher()
+        unit = systemd_backend._build_unit(switcher)
+        assert "pct%%40home" in unit
+        assert "pct%40home" not in unit.replace("%%", "")
 
     def test_installed_version_none_when_unit_missing(
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch

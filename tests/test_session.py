@@ -503,6 +503,29 @@ class TestIsSessionValid:
         assert manager._is_session_valid(tmp_path, ACCOUNT_EMAIL, ORG_UUID)
         assert seen_argv["argv"][0] == resolved
 
+    def test_probe_decodes_utf8_with_replacement(
+        self, manager, tmp_path, monkeypatch, valid_payload
+    ):
+        """The probe must not decode with the locale codepage.
+
+        claude emits UTF-8 JSON; a text=True decode under a Windows ANSI
+        locale raises UnicodeDecodeError on a non-ASCII email/org name,
+        which the probe's (OSError, TimeoutExpired) handler does not catch.
+        """
+        tmp_path.mkdir(exist_ok=True)
+        seen_kwargs = {}
+
+        def capture_run(argv, *a, **k):
+            seen_kwargs.update(k)
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps(valid_payload), stderr=""
+            )
+
+        monkeypatch.setattr(session_mod.subprocess, "run", capture_run)
+        assert manager._is_session_valid(tmp_path, ACCOUNT_EMAIL, ORG_UUID)
+        assert seen_kwargs["encoding"] == "utf-8"
+        assert seen_kwargs["errors"] == "replace"
+
 
 # ---------------------------------------------------------------------------
 # sharing

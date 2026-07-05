@@ -42,13 +42,19 @@ def _task_xml_path(switcher: ServiceHost) -> Path:
 
 
 def _resolve_python_executable() -> str:
-    """Return absolute ``pythonw.exe`` when present, else ``python.exe``."""
+    """Return absolute ``pythonw.exe`` when present, else ``python.exe``.
+
+    Deliberately not ``.resolve()``d: dereferencing a venv symlink would run
+    the base interpreter without the venv's ``pyvenv.cfg`` search path, and
+    ``-m claude_swap`` then fails. launchd/systemd supervise the unresolved
+    ``sys.executable`` for the same reason.
+    """
     exe = Path(sys.executable)
     if sys.platform == "win32":
         pythonw = exe.with_name("pythonw.exe")
         if pythonw.is_file():
-            return str(pythonw.resolve())
-    return str(exe.resolve())
+            return str(pythonw)
+    return str(exe)
 
 
 def _program_arguments() -> list[str]:
@@ -85,6 +91,12 @@ def _task_name_literal() -> str:
 def _build_task_xml(switcher: ServiceHost) -> str:
     argv = _program_arguments()
     command = argv[0]
+    if " " in command:
+        # Task Scheduler does not reliably treat an unquoted spaced path
+        # ("C:\Program Files\...") as one command; quote it, matching the
+        # argv escaping launchd/systemd already apply. Windows paths cannot
+        # contain '"', so wrapping is enough.
+        command = f'"{command}"'
     arguments = " ".join(argv[1:])
 
     ET.register_namespace("", _TASK_NS)

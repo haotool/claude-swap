@@ -143,8 +143,37 @@ Release version is defined in `pyproject.toml` (currently `0.17.1+haotool.1`).
     silencing every record after it.
   - The task XML scopes its logon trigger to the installing user
     (`DOMAIN\user`), system binaries resolve under `%SystemRoot%` rather
-    than PATH, and a failed task query reports the failure instead of
-    "not installed".
+    than PATH, and a failed task query is no longer misreported as a
+    loaded task (it reads as not installed until a query succeeds).
+- **Platform hardening (Windows/Linux/WSL review follow-up):**
+  - Service-manager output on Windows (PowerShell, schtasks) is decoded
+    with the OEM codepage and `errors="replace"`, so localized console
+    output (e.g. cp850 `ausgeführt`) can no longer crash a service call
+    with `UnicodeDecodeError`; POSIX service calls tolerate stray bytes
+    the same way.
+  - `FileLock.acquire` retries when opening the lock file itself fails —
+    a transient Windows sharing violation (antivirus/indexer) now waits
+    like a held lock instead of raising — and opens in append mode so an
+    existing lock file is never truncated under another holder's handle.
+  - Windows PID liveness treats `OpenProcess` failing with
+    `ERROR_ACCESS_DENIED` as alive (an elevated Claude Code session
+    exists but is unopenable), matching the POSIX `PermissionError`
+    rule; previously such sessions read as dead and the engine idled.
+  - The Task Scheduler XML quotes a `<Command>` path containing spaces
+    and no longer `.resolve()`s the interpreter path, so a
+    `C:\Program Files` Python and a `--symlinks` venv both launch.
+  - systemd units escape `%` as `%%` in ExecStart and Environment
+    values, so paths containing `%` survive specifier expansion.
+  - `service install` under WSL warns when `CLAUDE_CONFIG_DIR` points at
+    `/mnt/<drive>`: Windows-side Claude Code sessions hold Windows PIDs
+    a WSL service cannot see.
+  - Windows color support honors a refused `SetConsoleMode`, so legacy
+    consoles get plain text instead of bare escape codes.
+  - CI: the `windows-task-scheduler` job is blocking and gains a real
+    install/start liveness smoke, a new `linux-systemd` job round-trips
+    the unit through the runner's real `systemctl --user`, the Windows
+    job probes an OEM-codepage decode under `chcp 850`, and
+    `mypy --strict --platform win32` covers the win32-only branches.
 - **macOS purge sweeps both credential backends:** account removal and
   `--purge` delete Keychain items *and* fallback `.enc` files
   unconditionally, instead of trusting the per-process capability cache to

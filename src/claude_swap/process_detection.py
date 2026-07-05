@@ -7,6 +7,7 @@ currently running. Uses the same mechanism Claude Code itself uses internally.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -59,30 +60,41 @@ def is_pid_alive(pid: int) -> bool:
 
     if sys.platform == "win32":
         return _is_pid_alive_windows(pid)
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            # EPERM means the process exists but we lack permission
+            return True
+        except OSError:
+            return False
 
-    try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        # EPERM means the process exists but we lack permission
-        return True
-    except OSError:
-        return False
+
+_ERROR_ACCESS_DENIED = 5
 
 
 def _is_pid_alive_windows(pid: int) -> bool:
     """Windows-specific PID liveness check using ctypes."""
-    try:
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if handle:
-            kernel32.CloseHandle(handle)
-            return True
-        return False
-    except Exception:
+    if sys.platform == "win32":
+        try:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            # use_last_error captures GetLastError safely (ctypes keeps a
+            # thread-local copy right after the foreign call).
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            # ACCESS_DENIED proves the process exists — OpenProcess on an
+            # elevated (or protected) process fails with it while the
+            # process is alive. Parity with the POSIX PermissionError branch.
+            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+        except Exception:
+            return False
+    else:
         return False
 
 

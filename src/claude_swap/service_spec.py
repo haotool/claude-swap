@@ -45,12 +45,27 @@ def run_service_command(
     stdout because some managers (PowerShell cmdlets) report errors there.
     """
     try:
-        proc: subprocess.CompletedProcess[str] = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=SUBPROCESS_TIMEOUT,
-        )
+        if sys.platform == "win32":
+            # Windows console tools (PowerShell, schtasks) emit the OEM
+            # codepage, while ``text=True`` decodes with the ANSI codepage —
+            # on a localized system a byte like 0x81 (cp850 'ü') is undefined
+            # in cp1252 and the strict decode raises before any rc handling.
+            # The "oem" codec only exists on Windows.
+            proc: subprocess.CompletedProcess[str] = subprocess.run(
+                argv,
+                capture_output=True,
+                encoding="oem",
+                errors="replace",
+                timeout=SUBPROCESS_TIMEOUT,
+            )
+        else:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=SUBPROCESS_TIMEOUT,
+            )
     except subprocess.TimeoutExpired:
         raise ClaudeSwitchError(
             f"{' '.join(argv)} timed out after {SUBPROCESS_TIMEOUT}s"

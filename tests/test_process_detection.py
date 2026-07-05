@@ -6,11 +6,13 @@ import json
 import os
 import time
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from claude_swap.process_detection import (
+    _is_pid_alive_windows,
     get_claude_dir,
     get_running_instances,
     is_pid_alive,
@@ -81,6 +83,56 @@ class TestIsPidAlive:
 
     def test_negative_pid(self):
         assert is_pid_alive(-1) is False
+
+
+def _fake_ctypes(open_result: int, last_error: int = 0) -> tuple[object, MagicMock]:
+    """In-memory kernel32 so the win32 branch runs on any test host."""
+    kernel32 = MagicMock()
+    kernel32.OpenProcess.return_value = open_result
+    kernel32.CloseHandle.return_value = 1
+    fake = SimpleNamespace(
+        WinDLL=MagicMock(return_value=kernel32),
+        get_last_error=lambda: last_error,
+    )
+    return fake, kernel32
+
+
+class TestIsPidAliveWindows:
+    def test_open_handle_means_alive_and_is_closed(self):
+        fake, kernel32 = _fake_ctypes(open_result=1234)
+        with patch("claude_swap.process_detection.sys.platform", "win32"), \
+             patch("claude_swap.process_detection.ctypes", fake):
+            assert _is_pid_alive_windows(4242) is True
+        kernel32.CloseHandle.assert_called_once_with(1234)
+
+    def test_access_denied_means_alive(self):
+        # OpenProcess returns 0 with ERROR_ACCESS_DENIED for an elevated
+        # process that is very much alive; treating it as dead made the
+        # engine idle forever next to an admin Claude Code session.
+        fake, _ = _fake_ctypes(open_result=0, last_error=5)
+        with patch("claude_swap.process_detection.sys.platform", "win32"), \
+             patch("claude_swap.process_detection.ctypes", fake):
+            assert _is_pid_alive_windows(4242) is True
+
+    def test_other_open_failure_means_dead(self):
+        # ERROR_INVALID_PARAMETER (87) is what a reaped PID produces.
+        fake, _ = _fake_ctypes(open_result=0, last_error=87)
+        with patch("claude_swap.process_detection.sys.platform", "win32"), \
+             patch("claude_swap.process_detection.ctypes", fake):
+            assert _is_pid_alive_windows(4242) is False
+
+    def test_kernel32_loaded_with_use_last_error(self):
+        # Without use_last_error=True, ctypes.get_last_error() reads a stale
+        # thread-local slot and the ACCESS_DENIED check is meaningless.
+        fake, _ = _fake_ctypes(open_result=1)
+        with patch("claude_swap.process_detection.sys.platform", "win32"), \
+             patch("claude_swap.process_detection.ctypes", fake):
+            _is_pid_alive_windows(4242)
+        fake.WinDLL.assert_called_once_with("kernel32", use_last_error=True)
+
+    def test_non_windows_platform_returns_false(self):
+        with patch("claude_swap.process_detection.sys.platform", "linux"):
+            assert _is_pid_alive_windows(4242) is False
 
 
 # --- list_sessions ---

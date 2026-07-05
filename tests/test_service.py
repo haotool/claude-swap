@@ -752,6 +752,76 @@ class TestServiceSpec:
 
 
 # --------------------------------------------------------------------------- #
+# run_service_command decoding                                                 #
+# --------------------------------------------------------------------------- #
+
+
+# cp850 encodes 'ü' as 0x81, a byte cp1252 leaves undefined — the exact
+# localized-Windows output that used to escape as UnicodeDecodeError.
+_OEM_OUTPUT = b"Zugriff verweigert: ausgef\x81hrt"
+
+
+def _decoding_run_stub(calls: list[dict[str, object]]) -> object:
+    """A ``subprocess.run`` stand-in that decodes like a cp1252 Windows host.
+
+    ``text=True`` decodes with the ANSI codepage (strict); an explicit
+    ``encoding`` decodes with that codec ("oem" ≙ cp850 here). This makes the
+    decode failure reproducible on any test host.
+    """
+
+    def run(argv: list[str], **kwargs: object) -> MagicMock:
+        calls.append(dict(kwargs))
+        encoding = kwargs.get("encoding")
+        errors = str(kwargs.get("errors") or "strict")
+        codec = "cp850" if encoding == "oem" else "cp1252"
+        completed = MagicMock()
+        completed.returncode = 0
+        completed.stdout = _OEM_OUTPUT.decode(codec, errors)
+        completed.stderr = ""
+        return completed
+
+    return run
+
+
+class TestRunServiceCommandDecoding:
+    def test_windows_decodes_oem_output_without_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(sys, "platform", "win32")
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(subprocess, "run", _decoding_run_stub(calls))
+
+        proc = service_spec.run_service_command(["powershell", "-Command", "x"])
+
+        assert "ausgeführt" in proc.stdout
+        assert calls[0].get("encoding") == "oem"
+        assert calls[0].get("errors") == "replace"
+
+    def test_posix_keeps_text_mode_and_never_asks_for_oem(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The "oem" codec only exists on Windows; requesting it on POSIX
+        # would raise LookupError inside subprocess.
+        _force_darwin(monkeypatch)
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(subprocess, "run", _decoding_run_stub(calls))
+
+        service_spec.run_service_command(["launchctl", "print", "x"])
+
+        assert calls[0].get("encoding") is None
+        assert calls[0].get("text") is True
+        assert calls[0].get("errors") == "replace"
+
+    def test_windows_strict_ansi_decode_reproduces_the_old_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Meta-assertion: the stub really models the failure this guards
+        # against — without the oem/replace arguments the decode raises.
+        with pytest.raises(UnicodeDecodeError):
+            _OEM_OUTPUT.decode("cp1252")
+
+
+# --------------------------------------------------------------------------- #
 # select_backend dispatch                                                      #
 # --------------------------------------------------------------------------- #
 
