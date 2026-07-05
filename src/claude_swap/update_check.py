@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -17,7 +18,21 @@ PYPI_URL = "https://pypi.org/pypi/claude-swap/json"
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
-    return tuple(int(x) for x in v.split("."))
+    # Compare numeric release segments only, tolerating PEP 440 pre-release /
+    # local suffixes ("0.16.0b1", "0.17.1+patched.1"). Betas ship to PyPI, and
+    # int("0b1") raised ValueError into the blanket except in
+    # check_for_update, so beta/local installs never saw an update notice.
+    # A pre-release compares equal to its final release — close enough for a
+    # notification heuristic without pulling in the packaging dependency.
+    parts: list[int] = []
+    for seg in v.split("+", 1)[0].split("."):
+        m = re.match(r"\d+", seg)
+        if m is None:
+            break
+        parts.append(int(m.group()))
+        if m.end() < len(seg):  # trailing pre-release marker like "0b1"
+            break
+    return tuple(parts)
 
 
 def _detect_install_method() -> str | None:

@@ -103,6 +103,48 @@ class TestCheckForUpdate:
         assert result is not None
         assert "0.4.0" in result
 
+    @patch("claude_swap.update_check.urllib.request.urlopen")
+    def test_prerelease_current_version_still_notifies(
+        self, mock_urlopen, tmp_path, monkeypatch
+    ):
+        # Betas ship to PyPI (0.16.0b1, 0.15.0b1, ...); int("0b1") raised
+        # ValueError, the blanket except swallowed it, and beta installs
+        # never saw another update notice.
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        mock_urlopen.return_value = _make_pypi_response("0.17.0")
+
+        result = check_for_update("0.16.0b1")
+
+        assert result is not None
+        assert "0.17.0" in result
+
+    @patch("claude_swap.update_check.urllib.request.urlopen")
+    def test_local_version_current_still_notifies(
+        self, mock_urlopen, tmp_path, monkeypatch
+    ):
+        # PEP 440 local labels (pip install of a patched checkout) crashed
+        # the parser the same way.
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        mock_urlopen.return_value = _make_pypi_response("0.18.0")
+
+        result = check_for_update("0.17.1+patched.1")
+
+        assert result is not None
+        assert "0.18.0" in result
+
+    @patch("claude_swap.update_check.urllib.request.urlopen")
+    def test_prerelease_latest_is_not_newer_than_same_final(
+        self, mock_urlopen, tmp_path, monkeypatch
+    ):
+        # A pre-release of the same version must not be advertised as an
+        # upgrade over the final release.
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        mock_urlopen.return_value = _make_pypi_response("0.16.0b1")
+
+        result = check_for_update("0.16.0")
+
+        assert result is None
+
 
 class TestDetectInstallMethod:
     def _set_prefix(self, monkeypatch, prefix: str) -> None:
