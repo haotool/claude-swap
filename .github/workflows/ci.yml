@@ -108,9 +108,14 @@ jobs:
         # Under an OEM console codepage (cp850 here), PowerShell emits bytes
         # like 0x81 ('ü') that the ANSI codepage leaves undefined — the
         # strict-decode crash this run_service_command path guards against.
-        # The probe must decode localized stderr without UnicodeDecodeError.
+        # errors="replace" makes UnicodeDecodeError impossible by
+        # construction, so what this proves is that the "oem" codec resolves
+        # on a real Windows and the rc/stderr pipeline survives such bytes:
+        # the content assertion accepts 'ü' (0x81 under cp437/cp850) or
+        # U+FFFD (an OEM codepage where 0x81 is undefined), and anything
+        # else — like an empty stderr — fails the step.
         shell: cmd
-        run: chcp 850 & python -c "from claude_swap.service_spec import run_service_command; p = run_service_command(['powershell', '-NoProfile', '-Command', '[Console]::Error.WriteLine([char]252); exit 3'], check=False); assert p.returncode == 3, (p.returncode, p.stdout, p.stderr); print('decoded stderr:', repr(p.stderr))"
+        run: chcp 850 & python -c "from claude_swap.service_spec import run_service_command; p = run_service_command(['powershell', '-NoProfile', '-Command', '[Console]::Error.WriteLine([char]252); exit 3'], check=False); assert p.returncode == 3, (p.returncode, p.stdout, p.stderr); assert '\u00fc' in p.stderr or '\ufffd' in p.stderr, repr(p.stderr); print('decoded stderr:', repr(p.stderr))"
 
   windows-task-scheduler:
     runs-on: windows-latest
