@@ -95,7 +95,7 @@ wheels = [
 
 [[package]]
 name = "claude-swap"
-version = "0.17.1+haotool.1"
+version = "0.18.0+haotool.1"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },
