@@ -19,6 +19,18 @@ class _LazyDirRotatingFileHandler(RotatingFileHandler):
         Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
         return super()._open()
 
+    def doRollover(self) -> None:
+        # `cswap auto` runs long-lived and concurrent CLI invocations open
+        # the same log file; on Windows, renaming a file another process
+        # holds open raises a sharing violation, and letting it escape drops
+        # the record — and every record after it, silencing the log for
+        # good. Keep appending past the size cap instead (emit reopens the
+        # stream); the rollover succeeds once a single holder remains.
+        try:
+            super().doRollover()
+        except OSError:
+            pass
+
 
 def setup_logging(log_dir: Path, debug: bool = False) -> logging.Logger:
     """Setup logging with file and optional console output.
