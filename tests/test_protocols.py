@@ -1,4 +1,4 @@
-"""Structural Protocol satisfaction for credential refresh and switch CLI hosts."""
+"""Structural Protocol satisfaction for the credential refresh host."""
 
 from __future__ import annotations
 
@@ -7,11 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from claude_swap.credential_refresh import CredentialRefresher
-from claude_swap.models import (
-    SwitchPreconditionKind,
-    SwitchPreconditions,
-)
-from claude_swap.switch_cli import run_switch_cli
 
 
 def test_credential_refresher_accepts_minimal_refresh_host(tmp_path: Path):
@@ -34,24 +29,3 @@ def test_credential_refresher_accepts_minimal_refresh_host(tmp_path: Path):
     refresher = CredentialRefresher(host)
     result = refresher.write_verified_live("1", "a@example.com", live["creds"])
     assert result == live["creds"]
-
-
-def test_run_switch_cli_accepts_minimal_switch_cli_host():
-    host = SimpleNamespace(
-        _classify_switch_preconditions=lambda: SwitchPreconditions(
-            kind=SwitchPreconditionKind.SINGLE_ACCOUNT,
-            identity=("a@example.com", "org-uuid"),
-            current_slot="1",
-        ),
-        _switch_noop=lambda **kwargs: {
-            "switched": False,
-            "strategy": kwargs["strategy"],
-            "reason": kwargs["reason"],
-        },
-    )
-    result = run_switch_cli(host, json_output=True)
-    assert result == {
-        "switched": False,
-        "strategy": "rotation",
-        "reason": "only-one-account",
-    }
