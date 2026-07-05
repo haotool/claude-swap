@@ -612,8 +612,14 @@ class TestAdaptiveScheduler:
         from datetime import datetime, timezone
 
         h = self._harness(temp_home, monkeypatch)
-        reset_iso = "2026-07-05T12:00:00Z"
-        reset_ts = datetime(2026, 7, 5, 12, tzinfo=timezone.utc).timestamp()
+        # Clock-relative: FakeClock starts at the real time.time(), so a
+        # hardcoded reset would silently fall into the past.
+        reset_ts = h.clock.now + 6 * 3600.0
+        reset_iso = (
+            datetime.fromtimestamp(reset_ts, tz=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         usage = {"1": _usage(50), "2": _usage(100, reset_iso), "3": _usage(20)}
         counts: dict[str, int] = {}
         for _ in range(3):
