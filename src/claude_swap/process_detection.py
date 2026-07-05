@@ -7,6 +7,7 @@ currently running. Uses the same mechanism Claude Code itself uses internally.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
@@ -17,6 +18,8 @@ from pathlib import Path
 from claude_swap.paths import get_claude_config_home
 
 logger = logging.getLogger(__name__)
+
+_ERROR_ACCESS_DENIED = 5
 
 
 @dataclass
@@ -72,17 +75,61 @@ def is_pid_alive(pid: int) -> bool:
 
 def _is_pid_alive_windows(pid: int) -> bool:
     """Windows-specific PID liveness check using ctypes."""
-    try:
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if handle:
-            kernel32.CloseHandle(handle)
-            return True
+    if sys.platform == "win32":
+        try:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            # use_last_error captures GetLastError safely (ctypes keeps a
+            # thread-local copy right after the foreign call).
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            if ctypes.get_last_error() != _ERROR_ACCESS_DENIED:
+                return False
+            # ACCESS_DENIED is how OpenProcess refuses an elevated (or
+            # protected) live process — but on Windows 11 it also comes back
+            # for many dead and never-existing PIDs (giampaolo/psutil#2359),
+            # so it only proves liveness when the PID is also in the system
+            # PID list. psutil 6.0 does the same two-step confirmation
+            # (giampaolo/psutil#2394).
+            return _pid_in_system_pids(pid)
+        except Exception:
+            return False
+    else:
         return False
-    except Exception:
+
+
+def _pid_in_system_pids(pid: int) -> bool:
+    """Confirm a PID against the system PID list (psapi EnumProcesses).
+
+    EnumProcesses gives no "buffer too small" error: it fills the array and
+    reports the bytes written, so a result that saturates the array means
+    "retry with a larger one" (MS Learn, EnumProcesses). If the call itself
+    fails there is no verdict either way; assume alive so a transient psapi
+    failure never lets cswap treat a possibly-live session as dead
+    (fail-closed, matching the elevated ACCESS_DENIED motivation above).
+    """
+    if sys.platform == "win32":
+        try:
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            size = 1024
+            while True:
+                pid_array = (ctypes.c_ulong * size)()
+                byte_count = ctypes.c_ulong(0)
+                if not psapi.EnumProcesses(
+                    pid_array, ctypes.sizeof(pid_array), ctypes.byref(byte_count)
+                ):
+                    return True
+                if byte_count.value < ctypes.sizeof(pid_array):
+                    count = byte_count.value // ctypes.sizeof(ctypes.c_ulong)
+                    return pid in pid_array[:count]
+                size *= 2
+        except Exception:
+            return True
+    else:
         return False
 
 
