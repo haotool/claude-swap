@@ -20,6 +20,7 @@ from pathlib import Path
 
 from claude_swap import service_spec
 from claude_swap.exceptions import ClaudeSwitchError
+from claude_swap.paths import get_claude_config_home
 from claude_swap.printer import bolded, dimmed, muted, warning
 from claude_swap.protocols import ServiceHost, ServiceState
 
@@ -207,6 +208,17 @@ def _print_wsl_guidance() -> None:
     print(
         f"  {dimmed('WSL ~/.claude and Windows %USERPROFILE%\\.claude are separate; install cswap in the same environment as Claude Code.')}"
     )
+    config_home = get_claude_config_home()
+    if re.match(r"^/mnt/[a-zA-Z]/", str(config_home)):
+        # Windows-side session PID files hold Windows PIDs, which WSL's PID
+        # namespace cannot see — the engine would read every session as dead
+        # (or, worse, alive by PID collision).
+        warning(
+            f"CLAUDE_CONFIG_DIR points at the Windows side ({config_home}). "
+            "Windows Claude Code sessions are invisible to this WSL service; "
+            "it can only watch Claude Code running inside WSL. Install cswap "
+            "on the side where Claude Code actually runs."
+        )
 
 
 class SystemdBackend:
