@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -353,6 +354,54 @@ class TestCLI:
         assert excinfo.value.code == 0
         upgrade_fn.assert_called_once_with()
         switcher_cls.assert_not_called()
+
+
+class TestRedirectedStreamEncoding:
+    """Redirected Windows streams must not crash on the --list glyphs."""
+
+    def test_win32_redirected_stdout_survives_list_glyphs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # `cswap --list > file` on Windows encodes stdout with the locale
+        # ANSI code page (cp1252) under errors=strict; the tree connectors
+        # and bullets below (from the account listing) raised
+        # UnicodeEncodeError.
+        buffer = io.BytesIO()
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            sys, "stdout", io.TextIOWrapper(buffer, encoding="cp1252")
+        )
+        monkeypatch.setattr(
+            sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        )
+
+        cli._relax_redirected_stream_encoding()
+        print("└ ├ • ●", file=sys.stdout)
+        sys.stdout.flush()
+
+        assert b"?" in buffer.getvalue()
+
+    def test_posix_streams_left_strict(self, monkeypatch: pytest.MonkeyPatch):
+        redirected = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(sys, "stdout", redirected)
+
+        cli._relax_redirected_stream_encoding()
+
+        assert redirected.errors == "strict"
+
+    def test_replaced_stdout_without_reconfigure_is_tolerated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # sys.stdout may be swapped for a bare text sink (tests, wrappers);
+        # anything without reconfigure() must be skipped, not crash main().
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(sys, "stdout", io.StringIO())
+        monkeypatch.setattr(
+            sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        )
+
+        cli._relax_redirected_stream_encoding()
 
 
 class TestCLICommands:

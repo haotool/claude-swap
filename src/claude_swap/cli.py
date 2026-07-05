@@ -499,9 +499,30 @@ def _use_native_tls() -> None:
         pass
 
 
+def _relax_redirected_stream_encoding() -> None:
+    """Keep redirected Windows output from crashing on non-ANSI glyphs.
+
+    Redirected/piped stdout on Windows encodes with the locale ANSI code page
+    (e.g. cp1252) under ``errors=strict``, so the tree connectors and bullets
+    in ``--list`` made ``cswap --list > file`` raise ``UnicodeEncodeError``.
+    Interactive consoles go through the wide-char API and are unaffected —
+    only non-tty streams are degraded. ``hasattr`` guards a replaced
+    ``sys.stdout`` that is not a ``TextIOWrapper``.
+    """
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if (
+                stream is not None
+                and hasattr(stream, "reconfigure")
+                and not stream.isatty()
+            ):
+                stream.reconfigure(errors="replace")
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     _use_native_tls()
+    _relax_redirected_stream_encoding()
     argv = sys.argv[1:]
 
     # `run` and `auto` keep their dedicated pre-dispatch parsers.
