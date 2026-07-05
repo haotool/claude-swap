@@ -478,11 +478,15 @@ class SessionManager:
         # "failed validation". shutil.which finds the shim.
         claude_bin = shutil.which("claude") or "claude"
         try:
+            # claude emits UTF-8 JSON regardless of locale; text=True would
+            # decode with the ANSI codepage on Windows, where a non-ASCII
+            # email/org name raises UnicodeDecodeError past the handler below.
             result = subprocess.run(
                 [claude_bin, "auth", "status", "--json"],
                 env=_probe_env(session_dir),
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=_AUTH_STATUS_TIMEOUT,
             )
         except (OSError, subprocess.TimeoutExpired):
