@@ -146,7 +146,13 @@ class TestFileLock:
         lock_path.write_text("existing content")
 
         with FileLock(lock_path):
-            assert lock_path.read_text() == "existing content"
+            if sys.platform == "win32":
+                # msvcrt.locking denies even reads through a second handle
+                # while held, so probe for truncation via metadata instead.
+                assert lock_path.stat().st_size == len("existing content")
+            else:
+                assert lock_path.read_text() == "existing content"
+        assert lock_path.read_text() == "existing content"
 
     def test_lock_error_carries_last_os_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
