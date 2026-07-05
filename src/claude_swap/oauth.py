@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, cast
 
+# Cycle-safe only because __init__ binds __version__ before importing
+# switcher, whose import chain loads this module; keep that order.
 from claude_swap import __version__, usage_policy
 from claude_swap.printer import warning as print_warning
 
