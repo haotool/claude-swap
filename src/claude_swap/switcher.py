@@ -22,8 +22,8 @@ from claude_swap.exceptions import (
 )
 from claude_swap.claude_locks import claude_config_lock, claude_credentials_lock
 from claude_swap.json_output import (
-    _slot_for_identity,
     account_ref,
+    slot_for_identity,
     switch_noop,
     switch_result_from_op,
 )
@@ -338,7 +338,7 @@ class ClaudeAccountSwitcher:
     def _find_account_slot(
         data: dict[str, Any], email: str, organization_uuid: str
     ) -> str | None:
-        return _slot_for_identity(data.get("accounts", {}), email, organization_uuid)
+        return slot_for_identity(data.get("accounts", {}), email, organization_uuid)
 
     def _delete_account_files(self, account_num: str, email: str) -> None:
         """Delete all backup files for an account (credentials + config).
@@ -737,7 +737,7 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data()
         if not data:
             return
-        slot = _slot_for_identity(data.get("accounts", {}), email, "")
+        slot = slot_for_identity(data.get("accounts", {}), email, "")
         if slot is None:
             return
         existing_kind = self._account_kind(slot)

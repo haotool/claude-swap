@@ -44,7 +44,7 @@ _KNOWN_USAGE_SENTINELS = frozenset({
 })
 
 
-def _slot_for_identity(
+def slot_for_identity(
     accounts: dict[str, Any],
     email: str,
     org_uuid: str,

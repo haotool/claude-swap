@@ -31,9 +31,9 @@ from claude_swap.json_output import (
     USAGE_KEYCHAIN_UNAVAILABLE,
     USAGE_NO_CREDENTIALS,
     USAGE_TOKEN_EXPIRED,
-    _slot_for_identity,
     empty_list_payload,
     list_payload,
+    slot_for_identity,
     status_payload,
 )
 from claude_swap.exceptions import LockError
@@ -247,7 +247,7 @@ class ListReporter:
             active_num = None
             if current_identity is not None:
                 ce, ou = current_identity
-                active_num = _slot_for_identity(data.get("accounts", {}), ce, ou)
+                active_num = slot_for_identity(data.get("accounts", {}), ce, ou)
             accounts_info, _ = self.collect_accounts_info(data, active_num)
             entries = self.collect_usage_entries(accounts_info, fetch=fetch)
             return self.build_list_payload(accounts_info, entries)
@@ -261,7 +261,7 @@ class ListReporter:
         active_num = None
         if current_identity is not None:
             current_email, current_org_uuid = current_identity
-            active_num = _slot_for_identity(
+            active_num = slot_for_identity(
                 data.get("accounts", {}), current_email, current_org_uuid,
             )
 
