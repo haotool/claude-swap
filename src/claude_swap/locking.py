@@ -38,11 +38,17 @@ class FileLock:
         if timeout is None:
             timeout = self.timeout
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock_file = open(self.lock_path, "w")
 
         start = time.monotonic()
         while True:
             try:
+                # Opened inside the retry loop: on Windows a transient
+                # sharing violation (antivirus/indexer holding the file)
+                # raises PermissionError from open() itself, which must be
+                # retried like a held lock instead of escaping. "a" avoids
+                # truncating a file another handle may hold a lock on.
+                if self._lock_file is None:
+                    self._lock_file = open(self.lock_path, "a")
                 if sys.platform == "win32":
                     # Windows: use msvcrt for file locking
                     msvcrt.locking(self._lock_file.fileno(), msvcrt.LK_NBLCK, 1)
@@ -53,8 +59,9 @@ class FileLock:
                 return True
             except (BlockingIOError, OSError):
                 if time.monotonic() - start > timeout:
-                    self._lock_file.close()
-                    self._lock_file = None
+                    if self._lock_file is not None:
+                        self._lock_file.close()
+                        self._lock_file = None
                     return False
                 time.sleep(0.1)
 

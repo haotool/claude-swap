@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import multiprocessing
 import time
 from pathlib import Path
@@ -90,6 +91,58 @@ class TestFileLock:
         lock.acquire(timeout=1.0)
         lock.release()
         lock.release()  # Should not raise
+
+    def test_transient_open_failure_is_retried(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A sharing violation from open() itself is retried, not raised.
+
+        On Windows an antivirus/indexer can hold the lock file briefly and
+        open() raises PermissionError; that must behave like a held lock
+        (retry until timeout) instead of escaping acquire().
+        """
+        lock_path = tmp_path / ".lock"
+        real_open = builtins.open
+        failures = {"left": 2}
+
+        def flaky_open(file, *args, **kwargs):
+            if str(file) == str(lock_path) and failures["left"] > 0:
+                failures["left"] -= 1
+                raise PermissionError("sharing violation")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", flaky_open)
+
+        lock = FileLock(lock_path)
+        assert lock.acquire(timeout=5.0) is True
+        assert failures["left"] == 0
+        lock.release()
+
+    def test_open_failure_until_timeout_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A persistent open() failure degrades to the normal timeout path."""
+        lock_path = tmp_path / ".lock"
+        real_open = builtins.open
+
+        def denied_open(file, *args, **kwargs):
+            if str(file) == str(lock_path):
+                raise PermissionError("sharing violation")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", denied_open)
+
+        lock = FileLock(lock_path)
+        assert lock.acquire(timeout=0.3) is False
+        assert lock._lock_file is None
+
+    def test_acquire_does_not_truncate_existing_lock_file(self, tmp_path: Path):
+        """Append mode keeps bytes another holder's handle may rely on."""
+        lock_path = tmp_path / ".lock"
+        lock_path.write_text("existing content")
+
+        with FileLock(lock_path):
+            assert lock_path.read_text() == "existing content"
 
 
 def _hold_lock_process(lock_path: str, duration: float, ready_event, done_event):
