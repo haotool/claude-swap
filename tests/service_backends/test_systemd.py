@@ -694,6 +694,27 @@ class TestHelpers:
         assert systemd_backend._systemd_escape("/plain/path") == "/plain/path"
         assert systemd_backend._systemd_escape("has space") == '"has space"'
 
+    def test_escape_doubles_percent_specifiers(self):
+        # systemd expands % specifiers even inside quotes; an unescaped %h
+        # in a path would expand (or fail daemon-reload as an invalid
+        # specifier) instead of staying literal.
+        assert systemd_backend._systemd_escape("%h") == "%%h"
+        assert (
+            systemd_backend._systemd_escape("/tmp/pct%40home/bin")
+            == "/tmp/pct%%40home/bin"
+        )
+        assert systemd_backend._systemd_escape("has space %i") == '"has space %%i"'
+        assert systemd_backend._systemd_escape_value("50%") == "50%%"
+
+    def test_unit_with_percent_in_env_value_is_escaped(
+        self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/data/pct%40home/.claude")
+        switcher = ClaudeAccountSwitcher()
+        unit = systemd_backend._build_unit(switcher)
+        assert "pct%%40home" in unit
+        assert "pct%40home" not in unit.replace("%%", "")
+
     def test_installed_version_none_when_unit_missing(
         self, temp_home: Path, monkeypatch: pytest.MonkeyPatch
     ):

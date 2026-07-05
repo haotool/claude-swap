@@ -120,15 +120,18 @@ def _build_unit(switcher: ServiceHost) -> str:
 
 
 def _systemd_escape(arg: str) -> str:
+    # systemd expands % specifiers everywhere in a unit — inside quotes too —
+    # so a literal % must always be doubled, before the quoting decision.
     if not arg:
         return '""'
-    if re.fullmatch(r"[A-Za-z0-9_/@:.,+-]+", arg):
+    arg = arg.replace("%", "%%")
+    if re.fullmatch(r"[A-Za-z0-9_/@:.,+%-]+", arg):
         return arg
     return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _systemd_escape_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
 
 
 def _unescape_env_value(value: str) -> str:
