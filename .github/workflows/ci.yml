@@ -187,6 +187,36 @@ jobs:
             exit 1
           }
 
+      - name: Spaced-path venv install + start smoke
+        # The conditional <Command> quoting in _build_task_xml only executes
+        # when the interpreter path contains a space, and the runner's stock
+        # Python never does — this venv under "C:\spaced dir" is the only
+        # behavioral coverage of that branch (test matrix W-3). Same
+        # skeleton as the smoke above: install through the spaced venv,
+        # pin the registered <Command> to the quoted form, then assert Task
+        # Scheduler saw the engine launch (2147942402 = file not found is
+        # exactly how an unquoted spaced path fails).
+        shell: pwsh
+        run: |
+          python -m venv "C:\spaced dir\venv"
+          & "C:\spaced dir\venv\Scripts\python.exe" -m pip install -e .
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "C:\spaced dir\venv\Scripts\cswap.exe" service install
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $xml = Export-ScheduledTask -TaskName "cswap-monitor" | Out-String
+          $command = ([xml]$xml).Task.Actions.Exec.Command
+          if ($command -ne '"C:\spaced dir\venv\Scripts\pythonw.exe"') {
+            Write-Error "unquoted or unexpected Command: $command"
+            exit 1
+          }
+          Start-Sleep -Seconds 15
+          $result = (Get-ScheduledTaskInfo -TaskName "cswap-monitor").LastTaskResult
+          & "C:\spaced dir\venv\Scripts\cswap.exe" service uninstall
+          if ($result -notin 0, 267009) {
+            Write-Error "engine did not run cleanly from the spaced venv: LastTaskResult=$result"
+            exit 1
+          }
+
       - name: Sweep any leftover CI task
         # Backstop for a crashed pytest process; the test's own try/finally
         # covers ordinary assertion failures.

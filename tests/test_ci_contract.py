@@ -32,6 +32,15 @@ def test_ci_windows_task_scheduler_job_is_blocking() -> None:
     assert "Start-Sleep" in job.group(0)
 
 
+def test_ci_task_scheduler_covers_spaced_interpreter_path() -> None:
+    # The <Command> quoting branch in _build_task_xml only runs when the
+    # interpreter path has a space; the stock runner Python never does, so
+    # the spaced-venv smoke is its only behavioral coverage.
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "C:\\spaced dir\\venv" in workflow
+
+
 def test_ci_has_linux_systemd_round_trip() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
