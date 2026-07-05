@@ -36,6 +36,7 @@ from claude_swap.credentials import (
 from claude_swap.locking import FileLock
 from claude_swap.logging_config import setup_logging
 from claude_swap.models import (
+    _ONLY_ONE_ACCOUNT_MSG,
     ManualSwitchIntent,
     Platform,
     SwitchIntent,
@@ -44,6 +45,7 @@ from claude_swap.models import (
     SwitchTransaction,
     get_timestamp,
 )
+from claude_swap.switch_cli import run_switch_cli
 from claude_swap.printer import (
     accent,
     dimmed,
@@ -77,12 +79,6 @@ KEYRING_SERVICE = "claude-code"
 # Setup-tokens are inference-only server-side; wider scopes trigger 403s
 # on profile endpoints. Matches Claude Code's CLAUDE_CODE_OAUTH_TOKEN path.
 SETUP_TOKEN_SCOPES = ("user:inference",)
-
-# Shared by the interactive switch() path and the JSON/strategy CLI path so the
-# single-account no-op reads the same everywhere.
-_ONLY_ONE_ACCOUNT_MSG = (
-    "Only one account is managed. Add more accounts to switch between."
-)
 
 def _sweep_legacy_keyring(usernames: list[str], removed_items: list[str]) -> None:
     """Best-effort purge of legacy ``KEYRING_SERVICE`` entries via ``keyring``.
@@ -1738,7 +1734,6 @@ class ClaudeAccountSwitcher:
           * ``CliSwitchIntent(...)`` — CLI ``--switch`` (strategy / JSON)
         """
         if strategy is not None or json_output:
-            from claude_swap.switch_cli import run_switch_cli
             return run_switch_cli(
                 self, strategy=strategy, json_output=json_output,
             )

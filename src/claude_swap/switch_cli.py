@@ -13,9 +13,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 from claude_swap.json_output import account_ref
-from claude_swap.models import CliSwitchIntent, SwitchPreconditionKind, SwitchPreconditions
+from claude_swap.models import (
+    _ONLY_ONE_ACCOUNT_MSG,
+    CliSwitchIntent,
+    SwitchPreconditionKind,
+    SwitchPreconditions,
+)
 from claude_swap.printer import accent, dimmed, warning
-from claude_swap.switcher import _ONLY_ONE_ACCOUNT_MSG
 
 if TYPE_CHECKING:
     from claude_swap.protocols import SwitchCliHost
