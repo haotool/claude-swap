@@ -429,9 +429,9 @@ class TestRefreshTargetBeforeActivation:
         """force=True refreshes even when the token has not expired yet.
 
         This is the production-grade seamless-handoff path used by the
-        background auto-switch monitor: after activation, Claude Code's first
-        API call against the new account must use a freshly-issued token, not
-        a backup token that could be minutes from expiry.
+        auto-switch engine: after activation, Claude Code's first API call
+        against the new account must use a freshly-issued token, not a
+        backup token that could be minutes from expiry.
         """
         s = ClaudeAccountSwitcher()
         s._setup_directories()

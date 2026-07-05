@@ -111,7 +111,7 @@ What the script does:
 
 1. `git fetch upstream`
 2. Creates a dated backup branch: `backup/pre-clean-rewrite-YYYYMMDD` from `SOURCE`
-3. Resets `TARGET` to `upstream/main`, squash-merges `SOURCE`, then commits files in grouped chunks (monitor, service, tests, docs, …)
+3. Resets `TARGET` to `upstream/main`, squash-merges `SOURCE`, then commits files in grouped chunks (engine, service, tests, docs, …)
 4. Prints `git log upstream/main..HEAD --oneline` for review
 
 After review, force-push the rewritten branch (e.g. `git push --force-with-lease haotool publish/clean`). Keep the backup branch until the push is verified.

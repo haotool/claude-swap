@@ -52,10 +52,10 @@ def test_blocked_rollover_keeps_logging(
     """A rollover the OS refuses must not lose records.
 
     On Windows, os.rename raises a sharing violation while another process
-    (the monitor holds the log open; concurrent CLIs open the same file) has
-    the log open, so every rollover attempt failed and each record after it
-    was dropped — the decision log went silently dark. The handler must
-    swallow the failure and keep appending past the size cap.
+    (the installed service holds the log open; concurrent CLIs open the same
+    file) has the log open, so every rollover attempt failed and each record
+    after it was dropped — the decision log went silently dark. The handler
+    must swallow the failure and keep appending past the size cap.
     """
 
     def fail_rename(src: str, dst: str) -> None:
