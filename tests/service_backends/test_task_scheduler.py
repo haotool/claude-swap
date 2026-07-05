@@ -48,7 +48,7 @@ class TestResolvePythonExecutable:
         pythonw_exe.write_text("", encoding="utf-8")
         monkeypatch.setattr(sys, "executable", str(python_exe))
 
-        assert ts_backend._resolve_python_executable() == str(pythonw_exe.resolve())
+        assert ts_backend._resolve_python_executable() == str(pythonw_exe)
 
     def test_falls_back_to_python_when_no_pythonw(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -60,13 +60,40 @@ class TestResolvePythonExecutable:
         python_exe.write_text("", encoding="utf-8")
         monkeypatch.setattr(sys, "executable", str(python_exe))
 
-        assert ts_backend._resolve_python_executable() == str(python_exe.resolve())
+        assert ts_backend._resolve_python_executable() == str(python_exe)
 
     def test_non_windows_uses_sys_executable(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(sys, "platform", "darwin")
-        assert ts_backend._resolve_python_executable() == str(
-            Path(sys.executable).resolve()
-        )
+        assert ts_backend._resolve_python_executable() == sys.executable
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="symlink creation may need privilege; the string handling "
+        "under test is platform-independent",
+    )
+    def test_venv_symlink_is_not_dereferenced(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        # A --symlinks venv points pythonw.exe at the base interpreter;
+        # .resolve() made the task run that base interpreter, whose module
+        # search path has no pyvenv.cfg — the engine died with
+        # ModuleNotFoundError every five minutes, silently.
+        base = tmp_path / "base" / "pythonw.exe"
+        base.parent.mkdir(parents=True)
+        base.write_text("", encoding="utf-8")
+        venv_dir = tmp_path / "venv" / "Scripts"
+        venv_dir.mkdir(parents=True)
+        python_exe = venv_dir / "python.exe"
+        python_exe.write_text("", encoding="utf-8")
+        pythonw_link = venv_dir / "pythonw.exe"
+        pythonw_link.symlink_to(base)
+        monkeypatch.setattr(sys, "executable", str(python_exe))
+        _force_win32(monkeypatch)
+
+        resolved = ts_backend._resolve_python_executable()
+
+        assert resolved == str(pythonw_link)
+        assert str(base) not in resolved
 
 
 class TestBuildTaskXml:

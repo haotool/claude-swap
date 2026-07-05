@@ -42,13 +42,19 @@ def _task_xml_path(switcher: ServiceHost) -> Path:
 
 
 def _resolve_python_executable() -> str:
-    """Return absolute ``pythonw.exe`` when present, else ``python.exe``."""
+    """Return absolute ``pythonw.exe`` when present, else ``python.exe``.
+
+    Deliberately not ``.resolve()``d: dereferencing a venv symlink would run
+    the base interpreter without the venv's ``pyvenv.cfg`` search path, and
+    ``-m claude_swap`` then fails. launchd/systemd supervise the unresolved
+    ``sys.executable`` for the same reason.
+    """
     exe = Path(sys.executable)
     if sys.platform == "win32":
         pythonw = exe.with_name("pythonw.exe")
         if pythonw.is_file():
-            return str(pythonw.resolve())
-    return str(exe.resolve())
+            return str(pythonw)
+    return str(exe)
 
 
 def _program_arguments() -> list[str]:
