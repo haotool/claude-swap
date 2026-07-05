@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import builtins
 import multiprocessing
+import os
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
+from claude_swap import locking as locking_mod
 from claude_swap.exceptions import LockError
 from claude_swap.locking import FileLock
 
@@ -93,6 +97,117 @@ class TestFileLock:
         lock.acquire(timeout=1.0)
         lock.release()
         lock.release()  # Should not raise
+
+    def test_transient_open_failure_is_retried(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A sharing violation from open() itself is retried, not raised.
+
+        On Windows an antivirus/indexer can hold the lock file briefly and
+        open() raises PermissionError; that must behave like a held lock
+        (retry until timeout) instead of escaping acquire().
+        """
+        lock_path = tmp_path / ".lock"
+        real_open = builtins.open
+        failures = {"left": 2}
+
+        def flaky_open(file, *args, **kwargs):
+            if str(file) == str(lock_path) and failures["left"] > 0:
+                failures["left"] -= 1
+                raise PermissionError("sharing violation")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", flaky_open)
+
+        lock = FileLock(lock_path)
+        assert lock.acquire(timeout=5.0) is True
+        assert failures["left"] == 0
+        lock.release()
+
+    def test_open_failure_until_timeout_returns_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A persistent open() failure degrades to the normal timeout path."""
+        lock_path = tmp_path / ".lock"
+        real_open = builtins.open
+
+        def denied_open(file, *args, **kwargs):
+            if str(file) == str(lock_path):
+                raise PermissionError("sharing violation")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", denied_open)
+
+        lock = FileLock(lock_path)
+        assert lock.acquire(timeout=0.3) is False
+        assert lock._lock_file is None
+
+    def test_acquire_does_not_truncate_existing_lock_file(self, tmp_path: Path):
+        """Append mode keeps bytes another holder's handle may rely on."""
+        lock_path = tmp_path / ".lock"
+        lock_path.write_text("existing content")
+
+        with FileLock(lock_path):
+            if sys.platform == "win32":
+                # msvcrt.locking denies even reads through a second handle
+                # while held, so probe for truncation via metadata instead.
+                assert lock_path.stat().st_size == len("existing content")
+            else:
+                assert lock_path.read_text() == "existing content"
+        assert lock_path.read_text() == "existing content"
+
+    def test_lock_error_carries_last_os_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A persistent failure must surface in the LockError message.
+
+        A held lock and broken ACLs on the lock directory time out
+        identically; without the last OS error the message misdiagnoses
+        both as "another instance may be running".
+        """
+        lock_path = tmp_path / ".lock"
+        real_open = builtins.open
+
+        def denied_open(file, *args, **kwargs):
+            if str(file) == str(lock_path):
+                raise PermissionError("lock dir ACL broken")
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", denied_open)
+
+        with pytest.raises(LockError, match="lock dir ACL broken") as excinfo:
+            with FileLock(lock_path, timeout=0.2):
+                pass
+        assert str(lock_path) in str(excinfo.value)
+
+    def test_windows_lock_anchors_byte_at_file_start(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """msvcrt locks at the current position and "a" opens at EOF.
+
+        The locked byte must be anchored at offset 0, or two processes
+        opening a non-empty lock file at different sizes would lock
+        different bytes and mutual exclusion would silently fail.
+        """
+        lock_path = tmp_path / ".lock"
+        lock_path.write_text("stale debris")
+        offsets: dict[int, int] = {}
+
+        class FakeMsvcrt:
+            LK_NBLCK = 2
+            LK_UNLCK = 0
+
+            @staticmethod
+            def locking(fd: int, mode: int, nbytes: int) -> None:
+                offsets[mode] = os.lseek(fd, 0, os.SEEK_CUR)
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(locking_mod, "msvcrt", FakeMsvcrt, raising=False)
+
+        lock = FileLock(lock_path)
+        assert lock.acquire(timeout=1.0) is True
+        lock.release()
+        assert offsets[FakeMsvcrt.LK_NBLCK] == 0
 
 
 def _hold_lock_process(lock_path: str, duration: float, ready_event, done_event):
