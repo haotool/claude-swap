@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import multiprocessing
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -208,6 +209,61 @@ def _hold_lock_process(lock_path: str, duration: float, ready_event, done_event)
         time.sleep(duration)
         lock.release()
     done_event.set()
+
+
+# Runs in a fresh interpreter (subprocess, not multiprocessing): the holder
+# and the contender must reach the real OS lock (msvcrt on Windows, flock on
+# POSIX) from fully separate processes, which is what CI's windows-latest /
+# ubuntu runners are meant to prove. Prints "HELD" once the lock is taken so
+# the parent can synchronize without guessing at startup latency.
+_HOLDER_SCRIPT = """
+import sys, time
+from pathlib import Path
+from claude_swap.locking import FileLock
+
+lock = FileLock(Path(sys.argv[1]))
+assert lock.acquire(timeout=5.0), "holder could not take the lock"
+print("HELD", flush=True)
+time.sleep(float(sys.argv[2]))
+lock.release()
+"""
+
+
+class TestFileLockRealProcesses:
+    """Real-OS contention: two interpreters race for the same lock file."""
+
+    def test_contender_times_out_then_wins_after_release(self, tmp_path: Path):
+        """B fails against a held lock (1s) and wins once A releases (10s).
+
+        The in-process and multiprocessing tests above share the parent's
+        Python state; this one exercises the actual OS advisory lock across
+        unrelated processes — the shape of `cswap auto` vs a concurrent CLI.
+        """
+        lock_path = tmp_path / ".lock"
+        src_dir = str(Path(__file__).resolve().parent.parent / "src")
+        env = {**os.environ}
+        env["PYTHONPATH"] = src_dir + os.pathsep + env.get("PYTHONPATH", "")
+        holder = subprocess.Popen(
+            [sys.executable, "-c", _HOLDER_SCRIPT, str(lock_path), "3.0"],
+            stdout=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            assert holder.stdout is not None
+            assert holder.stdout.readline().strip() == "HELD"
+
+            contender = FileLock(lock_path)
+            assert contender.acquire(timeout=1.0) is False
+
+            # The holder sleeps 3s from HELD; a 10s budget covers release
+            # plus scheduling noise without stretching the test on success.
+            assert contender.acquire(timeout=10.0) is True
+            contender.release()
+        finally:
+            if holder.stdout is not None:
+                holder.stdout.close()
+            holder.wait(timeout=10.0)
 
 
 class TestFileLockConcurrency:
