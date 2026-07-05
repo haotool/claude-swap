@@ -67,6 +67,12 @@ cswap switch 2
 cswap switch user@example.com
 ```
 
+Not sure which one? `cswap list` is the dashboard — every account's 5-hour and 7-day usage and reset times at a glance:
+
+```bash
+cswap list
+```
+
 Or let claude-swap auto-pick by remaining quota — `cswap switch --strategy best` (most quota left) or `--strategy next-available` (skip rate-limited accounts).
 
 **Note:** You usually don't need to restart — on Linux/Windows the new account is picked up automatically, and on macOS after the Keychain cache expires. To apply it instantly, restart Claude Code or reopen the VS Code extension tab. See [Tips](#tips) for the per-platform details.
@@ -85,13 +91,11 @@ cswap auto --dry-run           # log what it would do, never switch
 <details>
 <summary>How it behaves & advanced usage</summary>
 
-- Switches cooperate with Claude Code's own credential locks, so a swap can never collide with a token refresh mid-session.
-- A cooldown (default 5 min) and a hysteresis margin keep it from flip-flopping between accounts near the line; when every account is exhausted it sleeps until the earliest quota reset.
-- Usage polling is adaptive: each check polls the active account plus one alternate (whichever has the stalest data), and only refreshes everything when a switch is actually near — so API traffic stays flat no matter how many accounts you manage. An alternate whose usage is moving (in use on another machine or in session mode) gets watched more closely, an unchanging one backs off, and an exhausted one isn't polled again until its window resets.
-- A failed usage fetch doesn't blind it: the last-known usage keeps being trusted while retries back off (honoring the server's `Retry-After`), for up to an hour under sustained failure, so a network blip or a rate-limited spell can't trigger a spurious failover.
-- If the active account's token expires while Claude Code sits idle (typical after the PC wakes from sleep), auto holds and slows down instead of failing over — Claude Code refreshes the token itself on your next message, and nothing consumes quota in the meantime.
-- An account whose refresh token has died is quarantined — taken out of rotation and reported — until you log in with it and re-run `cswap add --slot N`.
-- API-key accounts are never rotated onto unless you pass `--include-api-key-accounts` (they bill per token).
+- Runs safely alongside Claude Code: switches take the same credential locks Claude Code uses, so a swap never collides with a token refresh.
+- A cooldown (default 5 min) and a hysteresis margin stop it flip-flopping near the threshold; when every account is exhausted it sleeps until the earliest reset.
+- Usage polling is adaptive — a couple of accounts per check, busy alternates watched more closely, exhausted ones left alone until they reset — so API traffic stays flat no matter how many accounts you manage.
+- It fails safe: if a usage check errors it keeps trusting the last-known numbers while retries back off, and an expired token on an idle machine makes it hold rather than fail over (Claude Code refreshes the token on your next message).
+- An account whose refresh token has died is quarantined and reported until you log in with it and re-run `cswap add --slot N`. API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
 
 For cron/systemd timers, `--once` reports the outcome in its exit code (`0` switched, `1` error, `2` nothing to do, `3` blocked — no viable target), and `--json` emits one JSON event per line:
 
@@ -99,11 +103,7 @@ For cron/systemd timers, `--once` reports the outcome in its exit code (`0` swit
 */5 * * * * cswap auto --once --json >> ~/.cswap-auto.log 2>&1
 ```
 
-Defaults are configurable with `cswap config` (see [Configuration](#configuration)) — flags override them:
-
-```bash
-cswap config set autoswitch.threshold 80
-```
+Defaults like the threshold and cooldown are configurable with `cswap config set autoswitch.threshold 80` — flags override them (see [Configuration](#configuration)).
 
 </details>
 
