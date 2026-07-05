@@ -161,9 +161,11 @@ Release version is defined in `pyproject.toml` (currently `0.17.1+haotool.1`).
     like a held lock instead of raising — and opens in append mode so an
     existing lock file is never truncated under another holder's handle.
   - Windows PID liveness treats `OpenProcess` failing with
-    `ERROR_ACCESS_DENIED` as alive (an elevated Claude Code session
-    exists but is unopenable), matching the POSIX `PermissionError`
-    rule; previously such sessions read as dead and the engine idled.
+    `ERROR_ACCESS_DENIED` as alive only after the PID is confirmed
+    against the system PID list (psapi `EnumProcesses`) — an elevated
+    Claude Code session exists but is unopenable — matching the POSIX
+    `PermissionError` rule; previously such sessions read as dead and
+    the engine idled.
   - The Task Scheduler XML quotes a `<Command>` path containing spaces
     and no longer `.resolve()`s the interpreter path, so a
     `C:\Program Files` Python and a `--symlinks` venv both launch.
@@ -172,6 +174,10 @@ Release version is defined in `pyproject.toml` (currently `0.17.1+haotool.1`).
   - `service install` under WSL warns when `CLAUDE_CONFIG_DIR` points at
     `/mnt/<drive>`: Windows-side Claude Code sessions hold Windows PIDs
     a WSL service cannot see.
+  - `service install` under WSL also warns when the backup dir sits on
+    a `/mnt/<drive>` mount: 9p does not implement file locking, so
+    every lock acquire there fails — keep `XDG_DATA_HOME` on the Linux
+    filesystem.
   - Windows color support honors a refused `SetConsoleMode`, so legacy
     consoles get plain text instead of bare escape codes.
   - CI: the `windows-task-scheduler` job is blocking and gains a real

@@ -287,6 +287,51 @@ class TestInstall:
 
         assert "points at the Windows side" not in capsys.readouterr().out
 
+    # The backup-dir cases call _print_wsl_guidance() directly: driving them
+    # through install() would point the real backup dir (and its mkdir/chmod)
+    # at /mnt on the test host.
+
+    def test_wsl_guidance_warns_on_windows_mount_backup_dir(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ):
+        # Every FileLock in cswap lives under the backup dir; /mnt drive
+        # mounts go through 9p, which does not support file locks
+        # (microsoft/WSL#5762), so locking there can only fail. Say so at
+        # install instead of leaving a 10s LockError to diagnose.
+        _force_linux(monkeypatch)
+        monkeypatch.setattr(
+            systemd_backend,
+            "get_backup_root",
+            lambda: Path("/mnt/c/tmp/xdg/claude-swap"),
+        )
+
+        systemd_backend._print_wsl_guidance()
+
+        out = capsys.readouterr().out
+        assert "does not support" in out
+        assert "file locks" in out
+        assert "/mnt/c/tmp/xdg/claude-swap" in out
+        assert "XDG_DATA_HOME" in out
+
+    def test_wsl_guidance_stays_quiet_for_linux_side_backup_dir(
+        self,
+        temp_home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ):
+        _force_linux(monkeypatch)
+        monkeypatch.setattr(
+            systemd_backend,
+            "get_backup_root",
+            lambda: temp_home / ".local" / "share" / "claude-swap",
+        )
+
+        systemd_backend._print_wsl_guidance()
+
+        assert "file locks" not in capsys.readouterr().out
+
     def test_wsl_keepalive_command_matches_readme(self):
         # The README documents the same Task Scheduler command; keep the two
         # surfaces in lockstep so users never see conflicting guidance.

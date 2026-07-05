@@ -88,12 +88,48 @@ def _is_pid_alive_windows(pid: int) -> bool:
             if handle:
                 kernel32.CloseHandle(handle)
                 return True
-            # ACCESS_DENIED proves the process exists — OpenProcess on an
-            # elevated (or protected) process fails with it while the
-            # process is alive. Parity with the POSIX PermissionError branch.
-            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
+            if ctypes.get_last_error() != _ERROR_ACCESS_DENIED:
+                return False
+            # ACCESS_DENIED is how OpenProcess refuses an elevated (or
+            # protected) live process — but on Windows 11 it also comes back
+            # for many dead and never-existing PIDs (giampaolo/psutil#2359),
+            # so it only proves liveness when the PID is also in the system
+            # PID list. psutil 6.0 does the same two-step confirmation
+            # (giampaolo/psutil#2394).
+            return _pid_in_system_pids(pid)
         except Exception:
             return False
+    else:
+        return False
+
+
+def _pid_in_system_pids(pid: int) -> bool:
+    """Confirm a PID against the system PID list (psapi EnumProcesses).
+
+    EnumProcesses gives no "buffer too small" error: it fills the array and
+    reports the bytes written, so a result that saturates the array means
+    "retry with a larger one" (MS Learn, EnumProcesses). If the call itself
+    fails there is no verdict either way; assume alive so a transient psapi
+    failure never lets cswap treat a possibly-live session as dead
+    (fail-closed, matching the elevated ACCESS_DENIED motivation above).
+    """
+    if sys.platform == "win32":
+        try:
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            size = 1024
+            while True:
+                pid_array = (ctypes.c_ulong * size)()
+                byte_count = ctypes.c_ulong(0)
+                if not psapi.EnumProcesses(
+                    pid_array, ctypes.sizeof(pid_array), ctypes.byref(byte_count)
+                ):
+                    return True
+                if byte_count.value < ctypes.sizeof(pid_array):
+                    count = byte_count.value // ctypes.sizeof(ctypes.c_ulong)
+                    return pid in pid_array[:count]
+                size *= 2
+        except Exception:
+            return True
     else:
         return False
 

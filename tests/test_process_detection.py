@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import time
@@ -85,14 +86,45 @@ class TestIsPidAlive:
         assert is_pid_alive(-1) is False
 
 
-def _fake_ctypes(open_result: int, last_error: int = 0) -> tuple[object, MagicMock]:
-    """In-memory kernel32 so the win32 branch runs on any test host."""
+def _fake_ctypes(
+    open_result: int,
+    last_error: int = 0,
+    system_pids: tuple[int, ...] = (),
+    enum_fails: bool = False,
+) -> tuple[SimpleNamespace, MagicMock]:
+    """In-memory kernel32/psapi so the win32 branch runs on any test host."""
     kernel32 = MagicMock()
     kernel32.OpenProcess.return_value = open_result
     kernel32.CloseHandle.return_value = 1
+
+    psapi = MagicMock()
+
+    def enum_processes(array, cb, needed):
+        if enum_fails:
+            return 0
+        capacity = cb // ctypes.sizeof(ctypes.c_ulong)
+        filled = min(len(system_pids), capacity)
+        for i in range(filled):
+            array[i] = system_pids[i]
+        # A saturated array (bytes returned == cb) is the documented
+        # "buffer may be too small, retry larger" signal.
+        needed.value = filled * ctypes.sizeof(ctypes.c_ulong)
+        return 1
+
+    psapi.EnumProcesses.side_effect = enum_processes
+
+    def win_dll(name, **kwargs):
+        return psapi if name == "psapi" else kernel32
+
     fake = SimpleNamespace(
-        WinDLL=MagicMock(return_value=kernel32),
+        WinDLL=MagicMock(side_effect=win_dll),
         get_last_error=lambda: last_error,
+        c_ulong=ctypes.c_ulong,
+        sizeof=ctypes.sizeof,
+        # The fake EnumProcesses writes .value on its third argument
+        # directly, so byref degrades to identity.
+        byref=lambda obj: obj,
+        psapi=psapi,
     )
     return fake, kernel32
 
@@ -105,14 +137,49 @@ class TestIsPidAliveWindows:
             assert _is_pid_alive_windows(4242) is True
         kernel32.CloseHandle.assert_called_once_with(1234)
 
-    def test_access_denied_means_alive(self):
+    def test_access_denied_with_pid_in_system_list_means_alive(self):
         # OpenProcess returns 0 with ERROR_ACCESS_DENIED for an elevated
         # process that is very much alive; treating it as dead made the
         # engine idle forever next to an admin Claude Code session.
-        fake, _ = _fake_ctypes(open_result=0, last_error=5)
+        fake, _ = _fake_ctypes(
+            open_result=0, last_error=5, system_pids=(4, 4242, 9001)
+        )
         with patch("claude_swap.process_detection.sys.platform", "win32"), \
              patch("claude_swap.process_detection.ctypes", fake):
             assert _is_pid_alive_windows(4242) is True
+
+    def test_access_denied_with_pid_not_in_system_list_means_dead(self):
+        # Windows 11 hands out ERROR_ACCESS_DENIED for many dead and
+        # never-existing PIDs too (giampaolo/psutil#2359); without the
+        # EnumProcesses cross-check every stale session file reads alive.
+        fake, _ = _fake_ctypes(
+            open_result=0, last_error=5, system_pids=(4, 9001)
+        )
+        with patch("claude_swap.process_detection.sys.platform", "win32"), \
+             patch("claude_swap.process_detection.ctypes", fake):
+            assert _is_pid_alive_windows(4242) is False
+
+    def test_access_denied_with_enum_failure_stays_alive(self):
+        # If EnumProcesses itself fails there is no verdict; stay fail-closed
+        # (alive) so a transient psapi failure never lets cswap treat a
+        # possibly-live elevated session as dead and refresh under it.
+        fake, _ = _fake_ctypes(open_result=0, last_error=5, enum_fails=True)
+        with patch("claude_swap.process_detection.sys.platform", "win32"), \
+             patch("claude_swap.process_detection.ctypes", fake):
+            assert _is_pid_alive_windows(4242) is True
+
+    def test_access_denied_grows_array_until_pid_list_fits(self):
+        # EnumProcesses signals "array full" only via bytes-returned == array
+        # size; the helper must retry with a larger array, not truncate.
+        fake, _ = _fake_ctypes(
+            open_result=0,
+            last_error=5,
+            system_pids=tuple(range(1, 1025)) + (4242,),
+        )
+        with patch("claude_swap.process_detection.sys.platform", "win32"), \
+             patch("claude_swap.process_detection.ctypes", fake):
+            assert _is_pid_alive_windows(4242) is True
+        assert fake.psapi.EnumProcesses.call_count == 2
 
     def test_other_open_failure_means_dead(self):
         # ERROR_INVALID_PARAMETER (87) is what a reaped PID produces.

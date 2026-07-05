@@ -20,7 +20,7 @@ from pathlib import Path
 from claude_swap import service_spec
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.models import is_linux
-from claude_swap.paths import get_claude_config_home
+from claude_swap.paths import get_backup_root, get_claude_config_home
 from claude_swap.printer import bolded, dimmed, muted, warning
 from claude_swap.protocols import ServiceHost, ServiceState
 
@@ -28,6 +28,7 @@ UNIT_NAME = "cswap-monitor.service"
 _SYSTEMCTL = "systemctl"
 _LOGinctl = "loginctl"
 _ENV_LINE = re.compile(r"^Environment=(.+)$", re.MULTILINE)
+_WINDOWS_MOUNT_RE = re.compile(r"^/mnt/[a-zA-Z]/")
 
 
 def _config_home() -> Path:
@@ -214,7 +215,7 @@ def _print_wsl_guidance() -> None:
         f"  {dimmed('WSL ~/.claude and Windows %USERPROFILE%\\.claude are separate; install cswap in the same environment as Claude Code.')}"
     )
     config_home = get_claude_config_home()
-    if re.match(r"^/mnt/[a-zA-Z]/", str(config_home)):
+    if _WINDOWS_MOUNT_RE.match(str(config_home)):
         # Windows-side session PID files hold Windows PIDs, which WSL's PID
         # namespace cannot see — the engine would read every session as dead
         # (or, worse, alive by PID collision).
@@ -223,6 +224,17 @@ def _print_wsl_guidance() -> None:
             "Windows Claude Code sessions are invisible to this WSL service; "
             "it can only watch Claude Code running inside WSL. Install cswap "
             "on the side where Claude Code actually runs."
+        )
+    backup_root = get_backup_root()
+    if _WINDOWS_MOUNT_RE.match(str(backup_root)):
+        # /mnt drive mounts go through 9p, which does not implement file
+        # locking (microsoft/WSL#5762) — every FileLock acquire under the
+        # backup dir fails and surfaces as a misleading lock timeout.
+        warning(
+            f"The cswap backup directory sits on a Windows drive mount "
+            f"({backup_root}). The 9p filesystem behind /mnt does not support "
+            "file locks, so lock operations there will fail. Keep "
+            "XDG_DATA_HOME on the Linux filesystem (ext4) instead."
         )
 
 
