@@ -522,14 +522,20 @@ def _use_native_tls() -> None:
 
 
 def _relax_redirected_stream_encoding() -> None:
-    """Keep redirected Windows output from crashing on non-ANSI glyphs.
+    """Emit UTF-8 on redirected Windows streams instead of the ANSI code page.
 
     Redirected/piped stdout on Windows encodes with the locale ANSI code page
-    (e.g. cp1252) under ``errors=strict``, so the tree connectors and bullets
-    in ``--list`` made ``cswap --list > file`` raise ``UnicodeEncodeError``.
-    Interactive consoles go through the wide-char API and are unaffected —
-    only non-tty streams are degraded. ``hasattr`` guards a replaced
-    ``sys.stdout`` that is not a ``TextIOWrapper``.
+    under ``errors=strict``, which fails both ways: glyphs the page can't
+    encode (the ``--list`` tree connectors under cp1252) raised
+    ``UnicodeEncodeError``, and glyphs it *can* encode (the em dash under
+    cp950) came out as multi-byte ANSI sequences that UTF-8 consumers —
+    editors, CI logs, terminal multiplexers — render as ``�`` mojibake.
+    Reconfiguring to UTF-8 fixes both: every glyph is encodable, and modern
+    pipe consumers decode it correctly. ``errors="replace"`` still guards
+    lone surrogates smuggled in via ``surrogateescape``. Interactive consoles
+    go through the wide-char API and are unaffected — only non-tty streams
+    are reconfigured. ``hasattr`` guards a replaced ``sys.stdout`` that is
+    not a ``TextIOWrapper``.
     """
     if sys.platform == "win32":
         for stream in (sys.stdout, sys.stderr):
@@ -538,7 +544,7 @@ def _relax_redirected_stream_encoding() -> None:
                 and hasattr(stream, "reconfigure")
                 and not stream.isatty()
             ):
-                stream.reconfigure(errors="replace")
+                stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def _service_command(argv: list[str]) -> None:

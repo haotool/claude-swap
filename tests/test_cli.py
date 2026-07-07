@@ -406,14 +406,16 @@ class TestCLI:
 
 
 class TestRedirectedStreamEncoding:
-    """Redirected Windows streams must not crash on the --list glyphs."""
+    """Redirected Windows streams must carry the --list glyphs as UTF-8."""
 
-    def test_win32_redirected_stdout_survives_list_glyphs(
+    def test_win32_redirected_stdout_emits_utf8_glyphs(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         # `cswap --list > file` on Windows encodes stdout with the locale
-        # ANSI code page (cp1252) under errors=strict; the tree connectors
-        # and bullets below (from list_reporter) raised UnicodeEncodeError.
+        # ANSI code page under errors=strict: cp1252 crashed on the tree
+        # connectors, and cp950 emitted ANSI multi-byte sequences that UTF-8
+        # consumers render as mojibake. Redirected streams are reconfigured
+        # to UTF-8, so every glyph round-trips.
         buffer = io.BytesIO()
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr(
@@ -424,10 +426,11 @@ class TestRedirectedStreamEncoding:
         )
 
         cli._relax_redirected_stream_encoding()
-        print("└ ├ • ●", file=sys.stdout)
+        print("└ ├ • ● —", file=sys.stdout)
         sys.stdout.flush()
 
-        assert b"?" in buffer.getvalue()
+        assert "└ ├ • ● —".encode("utf-8") in buffer.getvalue()
+        assert b"?" not in buffer.getvalue()
 
     def test_posix_streams_left_strict(self, monkeypatch: pytest.MonkeyPatch):
         redirected = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")

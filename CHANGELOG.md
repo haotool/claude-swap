@@ -120,6 +120,13 @@ Release version is defined in `pyproject.toml` (currently `0.17.1+haotool.1`).
 
 ### Fixed
 
+- **Redirected Windows output is UTF-8, not the ANSI code page:** piped or
+  redirected `cswap` output previously encoded with the locale ANSI code page
+  (e.g. cp950), so glyphs like the em dash came out as ANSI multi-byte
+  sequences that UTF-8 consumers (editors, CI logs, terminal harnesses)
+  render as `�`, and glyphs the page couldn't encode degraded to `?`.
+  Redirected streams now emit UTF-8; interactive consoles were and remain
+  unaffected (wide-char API).
 - **`CLAUDE_CONFIG_DIR` is used verbatim, mirroring Claude Code:** cswap no
   longer tilde-expands the value. Claude Code performs no expansion, so the
   old behavior made cswap manage `$HOME/x` while a self-started Claude Code
