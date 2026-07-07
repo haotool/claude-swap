@@ -207,6 +207,14 @@ wsl.exe -d <distro> -u <user> --exec sleep infinity
 
 `sleep infinity` never exits, which is what keeps the instance from idle-terminating (a command that exits immediately would not), and it ships with coreutils on every distro. Replace `<distro>` with `echo $WSL_DISTRO_NAME` inside WSL and `<user>` with your Linux username. `cswap service install` prints this guidance on WSL.
 
+Register it in one shot from Windows PowerShell (no admin needed):
+
+```powershell
+Register-ScheduledTask -TaskName 'cswap-wsl-keepalive' -Action (New-ScheduledTaskAction -Execute 'wsl.exe' -Argument '-d <distro> -u <user> --exec sleep infinity') -Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME") -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries) -Force
+```
+
+Two Task Scheduler defaults matter here: an `AtLogOn` trigger not scoped to a user is denied without elevation (`0x80070005`), and the GUI default **execution time limit (3 days)** silently kills the keepalive after 72 hours — stopping the engine with it. The command above scopes the trigger to your user and disables the limit (`[TimeSpan]::Zero`). To remove it later: `Unregister-ScheduledTask -TaskName 'cswap-wsl-keepalive' -Confirm:$false`.
+
 **Windows (native).** The scheduled task runs at logon under your user account (`RunLevel` limited — no elevation). Engine events go to the structured log; use `cswap service logs` to inspect it.
 
 #### Failure modes
