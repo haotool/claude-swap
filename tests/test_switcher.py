@@ -1345,6 +1345,38 @@ class TestPerformSwitchPostDisplay:
         )
         assert backup_oauth["accessToken"] == "sk-rotated-1"
 
+    def test_switch_refuses_to_overwrite_backup_with_empty_current_creds(
+        self,
+        temp_home: Path,
+        mock_claude_config: Path,
+        sample_sequence_data: dict,
+    ):
+        """A Keychain read that times out returns "" (not None); the switch must
+        refuse to back up that empty credential over the departing account's
+        good backup and fail instead — otherwise a transient Keychain hiccup
+        destroys the stored credential. Regression for empty-backup cred loss."""
+        switcher, creds_store, configs_store = self._setup_two_accounts(
+            temp_home, sample_sequence_data,
+        )
+        good_backup = json.dumps({
+            "claudeAiOauth": {"accessToken": "sk-good-1", "refreshToken": "rt-good-1"},
+        })
+        creds_store[("1", "test@example.com")] = good_backup
+        # Live read returns empty, exactly as a `security find-generic-password`
+        # timeout does (Keychain fail → falls through to an absent file → "").
+        live_state = {"creds": ""}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state,
+        )
+        try:
+            with pytest.raises(CredentialReadError):
+                switcher._perform_switch("2")
+        finally:
+            for p in patches:
+                p.stop()
+        # The departing account's good backup is untouched (not wiped to empty).
+        assert creds_store[("1", "test@example.com")] == good_backup
+
     def test_switch_survives_post_display_failure(
         self,
         temp_home: Path,
