@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from claude_swap import macos_keychain
 from claude_swap.credentials import (
     CLAUDE_CODE_KEYCHAIN_SERVICE,
     SECURITY_SERVICE,
+    _KEYCHAIN_REPROBE_INTERVAL,
     ActiveCredentials,
 )
 from claude_swap.exceptions import (
@@ -232,6 +234,52 @@ class TestMacosKeychainFallback:
         monkeypatch.setattr(macos_keychain, "get_password", lambda *a, **k: "ok")
         s._store._kc_call(macos_keychain.get_password, "svc", "acct")
         assert s._store._use_keychain() is False
+
+    def test_capability_cache_reprobes_after_cooldown(
+        self, temp_home: Path, monkeypatch
+    ):
+        """One transient failure must not pin a long-running process (`cswap
+        auto` under `service install`) to file mode for its whole lifetime:
+        after the cooldown the next op re-probes, and a success restores
+        Keychain routing."""
+        s = self._macos_switcher()
+        monkeypatch.setattr(macos_keychain, "get_password", _raise_locked)
+        with pytest.raises(KeychainError):
+            s._store._kc_call(macos_keychain.get_password, "svc", "acct")
+        assert s._store._use_keychain() is False  # sticky inside the window
+
+        base = time.monotonic()
+        monkeypatch.setattr(
+            "claude_swap.credentials.time.monotonic",
+            lambda: base + _KEYCHAIN_REPROBE_INTERVAL + 1,
+        )
+        assert s._store._use_keychain() is True  # cooldown elapsed: re-probe
+
+        monkeypatch.setattr(macos_keychain, "get_password", lambda *a, **k: "ok")
+        s._store._kc_call(macos_keychain.get_password, "svc", "acct")
+        assert s._store._use_keychain() is True  # success restores routing
+
+    def test_reprobe_failure_restamps_the_cooldown(
+        self, temp_home: Path, monkeypatch
+    ):
+        """A failed re-probe pins file mode again for a fresh full window."""
+        s = self._macos_switcher()
+        monkeypatch.setattr(macos_keychain, "get_password", _raise_locked)
+        with pytest.raises(KeychainError):
+            s._store._kc_call(macos_keychain.get_password, "svc", "acct")
+
+        now = {"t": time.monotonic() + _KEYCHAIN_REPROBE_INTERVAL + 1}
+        monkeypatch.setattr(
+            "claude_swap.credentials.time.monotonic", lambda: now["t"]
+        )
+        assert s._store._use_keychain() is True  # first window elapsed
+
+        with pytest.raises(KeychainError):
+            s._store._kc_call(macos_keychain.get_password, "svc", "acct")
+        assert s._store._use_keychain() is False  # re-pinned, fresh stamp
+
+        now["t"] += _KEYCHAIN_REPROBE_INTERVAL + 1
+        assert s._store._use_keychain() is True  # second window elapsed
 
     def test_item_exists_is_capability_neutral(
         self, temp_home: Path, block_real_keychain

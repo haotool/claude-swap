@@ -10,8 +10,9 @@ path helpers (``macos_keychain``, ``paths``) and never imports ``switcher``. It
 reads its live configuration (``platform``, ``_logger``, ``credentials_dir``)
 from a host *view* — a small data-only window onto the switcher that constructs
 it — and must never call a switcher *method* through that host, or storage and
-orchestration would re-couple. The store owns only its two pieces of state:
-``_keychain_usable_cache`` (sticky, process-local) and
+orchestration would re-couple. The store owns only its own state:
+``_keychain_usable_cache`` (process-local, sticky within a re-probe cooldown),
+``_keychain_disabled_at`` (when the cache pinned to file mode), and
 ``_last_active_credentials_backend`` (for the post-switch follow-up message).
 """
 
@@ -60,6 +61,12 @@ CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE = "Claude Code"
 # a sleep papering over an internal race.
 _ACTIVE_READ_ATTEMPTS = 2
 _ACTIVE_READ_RETRY_DELAY = 0.3  # seconds between attempts
+
+# How long the capability cache stays pinned to file mode after a Keychain
+# failure before the next op may re-probe. Short CLI invocations finish inside
+# the window (no backend split-brain); a long-running `cswap auto` recovers
+# instead of staying locked to file mode until restarted.
+_KEYCHAIN_REPROBE_INTERVAL = 300.0  # seconds
 
 
 _T = TypeVar("_T")
@@ -154,6 +161,7 @@ class CredentialStore:
         # most recent active-credential write landed ("keychain" | "file"), for the
         # post-switch follow-up message.
         self._keychain_usable_cache: bool | None = None
+        self._keychain_disabled_at: float | None = None
         self._last_active_credentials_backend: str | None = None
 
     def _kc_call(self, fn: Callable[..., _T], *args: object) -> _T:
@@ -174,6 +182,7 @@ class CredentialStore:
             result = fn(*args)
         except macos_keychain.KEYCHAIN_ERRORS:
             self._keychain_usable_cache = False
+            self._keychain_disabled_at = time.monotonic()
             raise
         if self._keychain_usable_cache is None:
             self._keychain_usable_cache = True
@@ -182,13 +191,25 @@ class CredentialStore:
     def _use_keychain(self) -> bool:
         """Whether credential *writes* should target the macOS Keychain this run.
 
-        ``False`` off macOS. On macOS, ``True`` until a Keychain op has failed this
-        process (the cache flips to ``False`` and sticks). Unknown (``None``) is
-        optimistic — the first real op tries the Keychain and records the outcome.
+        ``False`` off macOS. On macOS, ``True`` until a Keychain op has failed
+        (the cache flips to ``False`` and sticks for
+        ``_KEYCHAIN_REPROBE_INTERVAL``, after which the next op re-probes).
+        Unknown (``None``) is optimistic — the first real op tries the
+        Keychain and records the outcome.
         """
         if self._host.platform != Platform.MACOS:
             return False
-        return self._keychain_usable_cache is not False
+        if self._keychain_usable_cache is False:
+            if (
+                self._keychain_disabled_at is not None
+                and time.monotonic() - self._keychain_disabled_at
+                >= _KEYCHAIN_REPROBE_INTERVAL
+            ):
+                self._keychain_usable_cache = None
+                self._keychain_disabled_at = None
+                return True
+            return False
+        return True
 
     def _read_credentials(self) -> str | None:
         """Read Claude Code's active credential — OAuth *or* managed API key (value).

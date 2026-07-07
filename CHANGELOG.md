@@ -120,6 +120,12 @@ Release version is defined in `pyproject.toml` (currently `0.17.1+haotool.1`).
 
 ### Fixed
 
+- **The Keychain capability cache re-probes after a 5-minute cooldown.** One
+  transient `security` failure used to pin the whole process to file mode for
+  its lifetime — harmless for a short CLI call, fatal for the supervised
+  `cswap auto` loop: on a Keychain-only Mac every live read then returned
+  empty until the daemon restarted. Short invocations still cannot flip
+  backends mid-run.
 - **A failed switch can no longer clobber the current slot's backup.** When
   the live credential store is unreadable, the switch now fails fast before
   the backup step, and the backup verifier both refuses an empty payload and
