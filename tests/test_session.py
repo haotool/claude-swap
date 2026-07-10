@@ -240,6 +240,8 @@ class TestSessionIdentity:
         assert read_session_identity(tmp_path / "nope") is None  # no dir
         (tmp_path / ".claude.json").write_text("{not json")
         assert read_session_identity(tmp_path) is None  # invalid json
+        (tmp_path / ".claude.json").write_bytes(b"\xff\xfe{}")
+        assert read_session_identity(tmp_path) is None  # undecodable bytes
         (tmp_path / ".claude.json").write_text(json.dumps({"oauthAccount": {}}))
         assert read_session_identity(tmp_path) is None  # no email
 
@@ -264,6 +266,8 @@ class TestSessionIdentity:
 
     def test_unreadable_identity_is_not_drift(self, tmp_path):
         assert not session_identity_drifted(tmp_path / "nope", "a@x.com", "org-A")
+        (tmp_path / ".claude.json").write_bytes(b"\xff\xfe{}")
+        assert not session_identity_drifted(tmp_path, "a@x.com", "org-A")
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1236,15 @@ class TestReadSessionCredentials:
             '{"claudeAiOauth": {"accessToken": "sk-file"}}'
         )
         assert "sk-file" in session_mod.read_session_credentials(session_dir)
+
+    def test_byte_corrupt_file_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            Platform, "detect", classmethod(lambda cls: Platform.LINUX)
+        )
+        session_dir = tmp_path / "sess"
+        session_dir.mkdir()
+        (session_dir / ".credentials.json").write_bytes(b"\xff\xfe\x00corrupt")
+        assert session_mod.read_session_credentials(session_dir) is None
 
     def test_keychain_shadows_plaintext_on_macos(
         self, tmp_path, macos_platform, block_real_keychain

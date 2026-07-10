@@ -207,8 +207,10 @@ def read_session_credentials(session_dir: Path) -> str | None:
         except KeychainError:
             pass  # locked/denied/timeout — the plaintext seed is the next-best truth
     try:
-        return (session_dir / ".credentials.json").read_text()
-    except OSError:
+        return (session_dir / ".credentials.json").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError: a byte-corrupt file is "no
+        # readable credential material", not an error to propagate.
         return None
 
 
@@ -223,8 +225,12 @@ def read_session_identity(session_dir: Path) -> tuple[str, str] | None:
     when no identity is readable (missing dir/file/field).
     """
     try:
-        config = json.loads((session_dir / ".claude.json").read_text())
-    except (OSError, json.JSONDecodeError):
+        text = (session_dir / ".claude.json").read_text(encoding="utf-8")
+        config = json.loads(text)
+    except (OSError, ValueError):
+        # ValueError covers JSONDecodeError and UnicodeDecodeError alike: a
+        # byte-corrupt file is an unreadable identity, and the usage-fetch
+        # path this feeds must never raise.
         return None
     if not isinstance(config, dict):
         return None
