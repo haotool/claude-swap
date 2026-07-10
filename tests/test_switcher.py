@@ -3667,6 +3667,56 @@ class TestUsageAwareSwitch:
         assert "Skipping" not in out
         assert s._get_sequence_data()["activeAccountNumber"] == 2
 
+    def test_best_noop_json_keeps_inert_model_warning(self, temp_home: Path):
+        """The typo warning must survive into the JSON payload even when
+        `best` decides to stay (already-best / exhausted no-ops)."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        self._make_live(temp_home, "a@example.com", 1)
+
+        # Current already best → already-best no-op.
+        usage = {"1": self._model_usage(0, 10), "2": self._model_usage(50, 10)}
+        with patch.object(s, "_usage_by_account", return_value=usage):
+            payload = s.switch(
+                strategy="best", json_output=True,
+                models=("Fabel",), model_source="cli",
+            )
+        assert payload["switched"] is False
+        assert payload["reason"] == "already-best"
+        assert any("Fabel" in w for w in payload["warnings"])
+
+        # Everything exhausted → candidates-exhausted no-op.
+        usage = {"1": self._model_usage(100, 10), "2": self._model_usage(100, 10)}
+        with patch.object(s, "_usage_by_account", return_value=usage):
+            payload = s.switch(
+                strategy="best", json_output=True,
+                models=("Fabel",), model_source="cli",
+            )
+        assert payload["reason"] == "candidates-exhausted"
+        assert any("Fabel" in w for w in payload["warnings"])
+
+    def test_manual_strategies_warn_on_inert_model_name(
+        self, temp_home: Path, capsys
+    ):
+        """A --model name no account reports must not fail silently."""
+        s = self._setup(temp_home)
+        self._seed(s, 1, "a@example.com")
+        self._seed(s, 2, "b@example.com")
+        self._make_live(temp_home, "a@example.com", 1)
+
+        usage = {"1": self._model_usage(0, 10), "2": self._model_usage(5, 10)}
+        with patch.object(s, "_usage_by_account", return_value=usage), \
+             patch.object(s, "list_accounts"):
+            s.switch(strategy="next-available", models=("Fabel",),
+                     model_source="cli")
+        assert "Fabel" in capsys.readouterr().out
+        # ...but a matching name stays quiet.
+        with patch.object(s, "_usage_by_account", return_value=usage), \
+             patch.object(s, "list_accounts"):
+            s.switch(strategy="best", models=("Fable",), model_source="cli")
+        assert "typo" not in capsys.readouterr().out
+
     def test_best_with_models_folds_scoped_into_the_comparison(
         self, temp_home: Path, capsys
     ):

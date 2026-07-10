@@ -25,7 +25,7 @@ from textual.widgets import Footer, RichLog, Static
 
 from claude_swap.autoswitch import AutoSwitchEngine, AutoSwitchEvent, binding_pct
 from claude_swap.models import AccountsSnapshot
-from claude_swap.settings import load_settings
+from claude_swap.settings import load_settings, parse_model_names
 from claude_swap.tui import data
 from claude_swap.tui.modals import ConfirmModal
 from claude_swap.tui.theme import (
@@ -190,12 +190,15 @@ class AutoScreen(Screen):
         self, snap: AccountsSnapshot, active_number: str | None
     ) -> Text:
         """Switch targets ranked by remaining headroom (best first)."""
+        # Same window set as the engine (autoswitch.model included), so the
+        # displayed ranking can never disagree with the account it picks.
+        models = parse_model_names(self._settings.model) if self._settings else ()
         ranked: list[tuple[float, str]] = []  # (sort key: pct used, number)
         lines: dict[str, Text] = {}
         for acc in snap.accounts:
             if acc.number == active_number or not acc.switchable:
                 continue
-            pct = binding_pct(acc.usage.last_good)
+            pct = binding_pct(acc.usage.last_good, models)
             entry = Text()
             entry.append(f"\n  {acc.number:>2}  ", style=FOREGROUND)
             entry.append(acc.email, style=FOREGROUND)

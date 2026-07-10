@@ -1111,20 +1111,39 @@ class TestEventsShape:
         assert "#2: 5h 10% · 7d 0%" in line
         assert "#3: ?" in line
 
-    def test_poll_event_windows_include_scoped_and_reach_json(self, harness):
-        harness.tick_with_usage({
+    def test_poll_event_windows_match_the_decision_set(self, temp_home):
+        # Scoped windows appear only when configured: rendering an ignored
+        # Fable 100% next to a switch onto that account would read as a bug.
+        usage = {
             "1": _usage(42),
             "2": {
                 "five_hour": {"pct": 3.0},
                 "seven_day": {"pct": 89.0},
                 "scoped": [{"name": "Fable", "pct": 21.0}],
             },
-            "3": _usage(10),
-        })
-        poll = next(e for e in harness.events if isinstance(e, PollEvent))
+        }
+
+        def build(**kw):
+            h = EngineHarness(temp_home, **kw)
+            h.seed(1, "a@example.com")
+            h.seed(2, "b@example.com")
+            h.make_live("a@example.com", 1)
+            return h
+
+        plain = build()
+        plain.tick_with_usage(usage)
+        poll = next(e for e in plain.events if isinstance(e, PollEvent))
+        assert "#2: 5h 3% · 7d 89%" in poll.human()
+        assert "Fable" not in poll.human()
+        assert poll.to_json()["windowsPct"]["2"] == {"5h": 3.0, "7d": 89.0}
+
+        modeled = build(model="Fable")
+        modeled.tick_with_usage(usage)
+        poll = next(e for e in modeled.events if isinstance(e, PollEvent))
         assert "#2: 5h 3% · 7d 89% · Fable 21%" in poll.human()
-        payload = poll.to_json()
-        assert payload["windowsPct"]["2"] == {"5h": 3.0, "7d": 89.0, "Fable": 21.0}
+        assert poll.to_json()["windowsPct"]["2"] == {
+            "5h": 3.0, "7d": 89.0, "Fable": 21.0,
+        }
 
 
 class TestRunLoop:
@@ -1544,6 +1563,30 @@ class TestModelAwareSwitch:
         assert outcome is TickOutcome.BLOCKED
         exhausted = next(e for e in h.events if isinstance(e, AllExhaustedEvent))
         assert exhausted.earliest_reset_at == fable_reset
+
+    def test_unknown_recovery_falls_back_instead_of_oversleeping(self, temp_home):
+        # #2 is exhausted with NO reset timestamp — it could recover any
+        # moment. Sleeping toward #3's known 20:00 reset would suppress
+        # checks for hours, so the wake time must be unprovable (bounded
+        # blocked-cadence fallback instead of a reset sleep).
+        h = self._seed(temp_home, model="Fable")
+        outcome = h.tick_with_usage({
+            "1": _model_usage(95, 10),
+            "2": {
+                "five_hour": {"pct": 0.0},
+                "seven_day": {"pct": 0.0},
+                "scoped": [{"name": "Fable", "pct": 100.0}],  # no resets_at
+            },
+            "3": {
+                "five_hour": {"pct": 100.0, "resets_at": "2026-07-05T20:00:00Z"},
+                "seven_day": {"pct": 0.0},
+            },
+        })
+        assert outcome is TickOutcome.BLOCKED
+        exhausted = next(e for e in h.events if isinstance(e, AllExhaustedEvent))
+        assert exhausted.earliest_reset_at is None
+        assert h.engine._sleep_until_ts is None
+        assert h.engine._next_delay(outcome) == NO_RESET_FALLBACK_S
 
     def test_scoped_only_exhaustion_drives_the_wake_time(self, temp_home):
         # Candidates blocked ONLY by Fable: the wake must come from the scoped

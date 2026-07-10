@@ -514,6 +514,11 @@ def run(switcher) -> int:
                     rumps.notification("claude-swap", "Account quarantined", ev.human())
                 elif ev.kind == "all-exhausted":
                     rumps.notification("claude-swap", "All accounts exhausted", ev.human())
+                elif ev.kind == "config-warning":
+                    # e.g. an autoswitch.model name no account reports — the
+                    # engine emits it once per run; dropping it would leave a
+                    # menu-bar user with a silently inert filter.
+                    rumps.notification("claude-swap", "Configuration warning", ev.human())
 
         def _threshold(self) -> int:
             """Current auto-switch threshold from core settings (for the menu)."""

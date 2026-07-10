@@ -354,25 +354,19 @@ def binding_pct(usage: dict | None, models: tuple[str, ...] = ()) -> float | Non
     return None if headroom is None else 100.0 - headroom
 
 
-def _window_pcts(usage: dict | None) -> dict[str, float]:
-    """Ordered window label → pct: "5h", "7d", then scoped display names."""
-    if not isinstance(usage, dict):
-        return {}
-    out: dict[str, float] = {}
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        window = usage.get(key)
-        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
-            out[label] = float(window["pct"])
-    scoped = usage.get("scoped")
-    if isinstance(scoped, list):
-        for entry in scoped:
-            if (
-                isinstance(entry, dict)
-                and isinstance(entry.get("name"), str)
-                and isinstance(entry.get("pct"), (int, float))
-            ):
-                out[entry["name"]] = float(entry["pct"])
-    return out
+def _window_pcts(
+    usage: dict | None, models: tuple[str, ...] = ()
+) -> dict[str, float]:
+    """Ordered window label → pct: "5h", "7d", then configured scoped names.
+
+    Deliberately restricted to the windows the *decision* reads (same
+    ``models`` filter): showing an unconfigured scoped window at 100% next
+    to a switch onto that account would look like a bug, when the engine
+    correctly ignored it. Full per-model usage lives in ``cswap list``.
+    """
+    return {
+        name: pct for name, pct, _ in oauth.relevant_windows(usage, models)
+    }
 
 
 def _limiting_reset_ts(
@@ -717,7 +711,9 @@ class AutoSwitchEngine:
                 windows={
                     num: pcts
                     for num, value in usage.items()
-                    if (pcts := _window_pcts(value if isinstance(value, dict) else None))
+                    if (pcts := _window_pcts(
+                        value if isinstance(value, dict) else None, self._models
+                    ))
                 },
             )
         )
@@ -1196,21 +1192,33 @@ class AutoSwitchEngine:
     def _earliest_recovery(
         self, usage: dict[str, dict | str | None]
     ) -> datetime | None:
-        """Earliest moment any account becomes usable again (UTC).
+        """Earliest moment any account becomes usable again (UTC), or None
+        when that moment can't be proven.
 
         Per account that's the *latest* reset among its ≥100% relevant
         windows — an account blocked on both 5h and a scoped weekly limit
         isn't usable when the 5h rolls over — then the minimum across
         accounts, the active one included (its recovery also ends the
-        blocked state). Accounts whose exhausted windows carry no reset
-        time contribute nothing: never assume early recovery; the bounded
-        blocked-cadence fallback re-checks instead."""
+        blocked state). A blocked account whose exhausted windows carry no
+        reset time at all could recover at any moment, so it makes the whole
+        answer unprovable: return None and let the bounded blocked-cadence
+        fallback re-check, rather than sleeping toward another account's
+        later known reset."""
         earliest: float | None = None
         for value in usage.values():
-            usable_at = _limiting_reset_ts(
-                value if isinstance(value, dict) else None, self._models
-            )
-            if usable_at is not None and (earliest is None or usable_at < earliest):
+            if not isinstance(value, dict):
+                continue
+            blocked = [
+                resets_at
+                for _, pct, resets_at in oauth.relevant_windows(value, self._models)
+                if pct >= 100.0
+            ]
+            if not blocked:
+                continue  # not exhausted — doesn't gate the blocked state
+            usable_at = _limiting_reset_ts(value, self._models)
+            if usable_at is None:
+                return None  # blocked with unprovable recovery — don't oversleep
+            if earliest is None or usable_at < earliest:
                 earliest = usable_at
         if earliest is None:
             return None

@@ -94,7 +94,7 @@ cswap auto --dry-run           # log what it would do, never switch
 <summary>How it behaves & advanced usage</summary>
 
 - Runs safely alongside Claude Code: switches take the same credential locks Claude Code uses, so a swap never collides with a token refresh.
-- A cooldown (default 5 min) and a hysteresis margin stop it flip-flopping near the threshold: a proactive switch only lands on an account that's below the threshold *and* better than the current one by the margin — a strictly better account is always taken, but two accounts hovering at the line never ping-pong. When every account is exhausted it sleeps until the first one becomes usable again.
+- A cooldown (default 5 min) and a hysteresis margin stop it flip-flopping near the threshold: a proactive switch only lands on an account that's below the threshold *and* better than the current one by the margin — a candidate that clears the margin is always taken, but two accounts hovering at the line never ping-pong. When every account is exhausted it sleeps until the first one becomes usable again.
 - Usage polling is adaptive — a couple of accounts per check, busy alternates watched more closely, exhausted ones left alone until they reset — so API traffic stays flat no matter how many accounts you manage.
 - It fails safe: if a usage check errors it keeps trusting the last-known numbers while retries back off, and an expired token on an idle machine makes it hold rather than fail over (Claude Code refreshes the token on your next message).
 - An account whose refresh token has died is quarantined and reported until you log in with it and re-run `cswap add --slot N`. API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.

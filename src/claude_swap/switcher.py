@@ -1896,8 +1896,46 @@ class ClaudeAccountSwitcher:
         entries = self._collect_usage_entries(accounts_info)
         return {num: entry.decision_value() for num, entry in entries.items()}
 
+    def _warn_inert_models(
+        self,
+        usage: dict,
+        models: tuple[str, ...],
+        json_output: bool,
+        warnings: list[str],
+    ) -> None:
+        """One-shot typo guard for --model on the manual strategies.
+
+        A configured name that no account reports gates nothing while looking
+        active. Only claimed when every account's usage is readable (an
+        unreadable account could be the one carrying the window)."""
+        wanted = {m.lower(): m for m in models if m.lower() != "all"}
+        if not wanted or not usage:
+            return
+        if any(not isinstance(v, dict) for v in usage.values()):
+            return
+        seen = {
+            s["name"].lower()
+            for v in usage.values()
+            for s in (v.get("scoped") or [])
+            if isinstance(s, dict) and isinstance(s.get("name"), str)
+        }
+        missing = [name for low, name in wanted.items() if low not in seen]
+        if not missing:
+            return
+        msg = (
+            f"model(s) {', '.join(missing)} match no account's usage windows "
+            "(typo?)"
+        )
+        if json_output:
+            warnings.append(msg)
+        else:
+            warning(msg)
+
     def _select_best_switchable(
-        self, current_num: str | None, models: tuple[str, ...] = ()
+        self,
+        current_num: str | None,
+        models: tuple[str, ...] = (),
+        usage: dict | None = None,
     ) -> tuple[str | None, str]:
         """Decide the ``best`` strategy target relative to the current account.
 
@@ -1933,7 +1971,8 @@ class ClaudeAccountSwitcher:
         if not others:
             return None, "none"
 
-        usage = self._usage_by_account()
+        if usage is None:
+            usage = self._usage_by_account()
         current_headroom = oauth.account_headroom(usage.get(str(current_num)), models)
         if current_headroom is None:
             # Can't measure where the user is → can't prove any target is
@@ -2538,7 +2577,11 @@ class ClaudeAccountSwitcher:
         # account is provably better; otherwise stays put (never moves onto a
         # worse or unverifiable account). Bare `cswap --switch` rotates anyway.
         if strategy == "best":
-            target, note = self._select_best_switchable(current_num, models)
+            best_usage = self._usage_by_account()
+            self._warn_inert_models(best_usage, models, json_output, warnings)
+            target, note = self._select_best_switchable(
+                current_num, models, best_usage
+            )
             if target is not None:
                 op = self._perform_switch(target, emit_output=not json_output)
                 return (
@@ -2549,7 +2592,7 @@ class ClaudeAccountSwitcher:
                 if json_output:
                     return self._switch_noop(
                         strategy=strategy_label, reason="usage-unavailable",
-                        to_ref=current_ref,
+                        to_ref=current_ref, warnings=warnings,
                         message=(
                             f"Current account usage is unavailable — staying on "
                             f"Account-{current_num}."
@@ -2564,7 +2607,7 @@ class ClaudeAccountSwitcher:
                 if json_output:
                     return self._switch_noop(
                         strategy=strategy_label, reason="usage-unavailable",
-                        to_ref=current_ref,
+                        to_ref=current_ref, warnings=warnings,
                         message=(
                             f"No other account has usage data to compare — staying "
                             f"on Account-{current_num}."
@@ -2579,7 +2622,7 @@ class ClaudeAccountSwitcher:
                 if json_output:
                     return self._switch_noop(
                         strategy=strategy_label, reason="usage-unavailable",
-                        to_ref=current_ref,
+                        to_ref=current_ref, warnings=warnings,
                         message=(
                             f"No account with known usage has more remaining quota; "
                             f"some usage is unavailable — staying on Account-{current_num}."
@@ -2594,7 +2637,7 @@ class ClaudeAccountSwitcher:
                 if json_output:
                     return self._switch_noop(
                         strategy=strategy_label, reason="already-best",
-                        to_ref=current_ref,
+                        to_ref=current_ref, warnings=warnings,
                         message=(
                             f"Already on the account with the most remaining quota "
                             f"(Account-{current_num})."
@@ -2606,17 +2649,19 @@ class ClaudeAccountSwitcher:
                 )
                 return None
             if note == "exhausted":
+                # With model limits in play the binding window may be scoped.
+                limits_label = "usage limits" if models else "5h/7d limit"
                 if json_output:
                     return self._switch_noop(
                         strategy=strategy_label, reason="candidates-exhausted",
-                        to_ref=current_ref,
+                        to_ref=current_ref, warnings=warnings,
                         message=(
-                            f"All accounts are at their 5h/7d limit — staying on "
+                            f"All accounts are at their {limits_label} — staying on "
                             f"Account-{current_num}."
                         ),
                     )
                 warning(
-                    f"All accounts are at their 5h/7d limit — staying on "
+                    f"All accounts are at their {limits_label} — staying on "
                     f"Account-{current_num}."
                 )
                 return None
@@ -2643,6 +2688,8 @@ class ClaudeAccountSwitcher:
         # Only fetch usage when needed; an empty map means the headroom check
         # below is always None (skipped), preserving the non-usage-aware path.
         usage = self._usage_by_account() if strategy == "next-available" else {}
+        if strategy == "next-available":
+            self._warn_inert_models(usage, models, json_output, warnings)
 
         next_account: str | None = None
         skipped_exhausted: list[str] = []
