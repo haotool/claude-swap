@@ -765,7 +765,6 @@ class AutoSwitchEngine:
             self._emit(NoSwitchEvent(reason="no-candidates"))
             return TickOutcome.BLOCKED
 
-        hysteresis_bar = settings.threshold - settings.hysteresis_pct
         qualifying: list[tuple[float, str]] = []
         any_known = False
         for num in oauth_candidates:
@@ -775,15 +774,19 @@ class AutoSwitchEngine:
             any_known = True
             if h <= 0:
                 continue  # itself at its limit — never a target
-            if trigger == "proactive":
+            if trigger == "proactive" and active_headroom is not None:
                 # Hysteresis guards only the proactive case: two accounts
-                # hovering at the line must not ping-pong. At-limit and
-                # failover are escapes — any account with real headroom
-                # beats a blocked or dead one (and you can't flap back onto
-                # an account at 100%).
-                if (100.0 - h) > hysteresis_bar:
+                # hovering at the line must not ping-pong. The gate is
+                # relative — the candidate must beat the active account by
+                # the full margin (a one-way move like 99%→89% qualifies;
+                # near-line pairs can't flap back) — and the landing must be
+                # healthy: an account at/over the threshold would re-trigger
+                # on the very next tick. At-limit and failover are escapes —
+                # any account with real headroom beats a blocked or dead one
+                # (and you can't flap back onto an account at 100%).
+                if (100.0 - h) >= settings.threshold:
                     continue
-                if active_headroom is not None and h <= active_headroom:
+                if h - active_headroom < settings.hysteresis_pct:
                     continue  # not provably better than where we are
             qualifying.append((h, num))
         # Best headroom first; list order (sequence order) breaks ties.
@@ -805,7 +808,7 @@ class AutoSwitchEngine:
             # "All exhausted" (and its hours-long reset sleep) only when it's
             # literally true: every candidate's usage is known and at its
             # limit. A candidate that merely failed the proactive hysteresis
-            # bar, or one whose usage is unreadable this tick, can become
+            # gate, or one whose usage is unreadable this tick, can become
             # viable at any moment — and the active account can hit 100% and
             # need the at-limit escape — so those keep the normal cadence.
             candidate_headrooms = [headroom.get(n) for n in oauth_candidates]
@@ -817,8 +820,9 @@ class AutoSwitchEngine:
                     NoSwitchEvent(
                         reason="no-qualifying-candidate",
                         detail=(
-                            "candidates are too close to the line or their "
-                            "usage is unreadable this tick"
+                            "no candidate is below the threshold and better "
+                            "than the active account by the hysteresis "
+                            "margin, or usage is unreadable this tick"
                         ),
                     )
                 )

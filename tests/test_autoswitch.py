@@ -185,13 +185,14 @@ class TestDecisionTable:
             "no-active-account"
         ]
 
-    def test_hysteresis_bar_blocks_marginal_candidates(self, harness):
-        # threshold 90, hysteresis 10 → candidates must sit at <= 80% used.
-        # Failing the bar is NOT exhaustion: no all-exhausted event, no
+    def test_hysteresis_margin_blocks_marginal_candidates(self, harness):
+        # threshold 90, hysteresis 10 → a candidate must beat the active
+        # account's utilization by >= 10 points; 95→86 is only 9 better.
+        # Failing the margin is NOT exhaustion: no all-exhausted event, no
         # reset-sleep — the next tick must stay at normal cadence so the
         # at-limit escape isn't missed when the active account tops out.
         outcome = harness.tick_with_usage({
-            "1": _usage(95), "2": _usage(85), "3": _usage(88),
+            "1": _usage(95), "2": _usage(86), "3": _usage(88),
         })
         assert outcome is TickOutcome.BLOCKED
         assert harness.active_number() == 1
@@ -201,6 +202,54 @@ class TestDecisionTable:
         assert harness.engine._sleep_until_ts is None
         delay = harness.engine._next_delay(outcome)
         assert delay <= 1.1 * harness.settings.interval_seconds
+
+    def test_issue_115_strictly_better_candidate_switches(self, harness):
+        # Regression for #115: active bound by 5h (99%), candidate bound by
+        # 7d (89%). The old absolute bar (<= 80% used) vetoed the candidate;
+        # the relative gate takes it: 89 < 90 and 99 - 89 >= 10.
+        outcome = harness.tick_with_usage({
+            "1": {"five_hour": {"pct": 99.0}, "seven_day": {"pct": 24.0}},
+            "2": {"five_hour": {"pct": 3.0}, "seven_day": {"pct": 89.0}},
+            "3": {"five_hour": {"pct": 95.0}, "seven_day": {"pct": 10.0}},
+        })
+        assert outcome is TickOutcome.SWITCHED
+        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "proactive"
+        assert harness.active_number() == 2
+
+    def test_proactive_never_lands_at_or_over_threshold(self, temp_home):
+        # threshold 80, hysteresis 5: the candidate at 85% is five points
+        # better than the active 90%, but it already sits over the threshold
+        # and would re-trigger on the very next tick — blocked.
+        h = EngineHarness(temp_home, threshold=80.0, hysteresis_pct=5.0)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+        outcome = h.tick_with_usage({"1": _usage(90), "2": _usage(85)})
+        assert outcome is TickOutcome.BLOCKED
+        assert h.active_number() == 1
+        reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert reasons == ["no-qualifying-candidate"]
+
+    def test_stable_landing_does_not_switch_back(self, temp_home):
+        # Cooldown disabled so only the gate itself prevents flapping: after
+        # 99→89 the roles reverse, and the old account (99%) can never beat
+        # the new active (89%) — the move is one-way.
+        h = EngineHarness(temp_home, cooldown_seconds=0.0)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.make_live("a@example.com", 1)
+        usage = {
+            "1": {"five_hour": {"pct": 99.0}, "seven_day": {"pct": 24.0}},
+            "2": {"five_hour": {"pct": 3.0}, "seven_day": {"pct": 89.0}},
+        }
+        assert h.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        h.clock.advance(60)
+        assert h.tick_with_usage(usage) is TickOutcome.NO_ACTION
+        assert h.active_number() == 2
+        reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert reasons == ["below-threshold"]
 
     def test_mixed_unknown_and_exhausted_is_not_all_exhausted(self, harness):
         # One candidate at its limit, the other unreadable this tick: usage
