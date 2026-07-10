@@ -7,7 +7,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -455,15 +455,21 @@ def build_usage_result(data: dict) -> dict | None:
     return result if result else None
 
 
-def account_headroom(usage: dict | None) -> float | None:
+def account_headroom(
+    usage: dict | None, models: Sequence[str] = ()
+) -> float | None:
     """Remaining percentage before this account hits a rate-limit window.
 
-    Considers only the 5-hour and 7-day utilization windows — the two that
-    actually gate requests. ``spend`` (pay-as-you-go extra-usage credits) is a
-    separate axis and is deliberately ignored. Returns the headroom of the
-    *binding* window (``100 - max(pct)``), so ``<= 0`` means the account is at
-    or over a limit. Returns ``None`` when usage is unavailable or carries no
-    window data, which callers treat as "unknown" (never auto-skipped).
+    Considers the 5-hour and 7-day utilization windows — the two that always
+    gate requests. When ``models`` is non-empty, each named per-model weekly
+    ``scoped`` window (matched case-insensitively on ``display_name``, e.g.
+    "Fable") is folded in too: a model maxed at 100% blocks that model's work
+    even with 5h/7d headroom, so for someone pinned to that model it binds
+    just as hard. ``spend`` (pay-as-you-go extra-usage credits) is a separate
+    axis and is deliberately ignored. Returns the headroom of the *binding*
+    window (``100 - max(pct)``), so ``<= 0`` means the account is at or over a
+    limit. Returns ``None`` when usage is unavailable or carries no window
+    data, which callers treat as "unknown" (never auto-skipped).
     """
     if not isinstance(usage, dict):
         return None
@@ -472,6 +478,18 @@ def account_headroom(usage: dict | None) -> float | None:
         for window in (usage.get("five_hour"), usage.get("seven_day"))
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float))
     ]
+    if models:
+        wanted = {m.lower() for m in models}
+        scoped = usage.get("scoped")
+        if isinstance(scoped, list):
+            pcts += [
+                s["pct"]
+                for s in scoped
+                if isinstance(s, dict)
+                and isinstance(s.get("pct"), (int, float))
+                and isinstance(s.get("name"), str)
+                and s["name"].lower() in wanted
+            ]
     if not pcts:
         return None
     return 100.0 - max(pcts)

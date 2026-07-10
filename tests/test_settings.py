@@ -145,6 +145,23 @@ class TestSetUnsetSetting:
         with pytest.raises(ConfigError, match="unknown setting"):
             set_setting(tmp_path, "autoswitch.bogus", "1")
 
+    def test_set_string_kind_round_trips(self, tmp_path: Path):
+        assert set_setting(tmp_path, "autoswitch.model", "Fable") == "Fable"
+        raw = json.loads(settings_path(tmp_path).read_text())
+        assert raw["autoswitch"]["model"] == "Fable"
+        assert load_settings(tmp_path).model == "Fable"
+
+    def test_set_string_kind_rejects_empty(self, tmp_path: Path):
+        with pytest.raises(ConfigError, match="unset"):
+            set_setting(tmp_path, "autoswitch.model", "   ")
+        assert not settings_path(tmp_path).exists()
+
+    def test_garbage_model_value_falls_back_to_none(self, tmp_path: Path):
+        settings_path(tmp_path).write_text(
+            json.dumps({"autoswitch": {"model": 123}})
+        )
+        assert load_settings(tmp_path).model is None
+
     def test_set_rejects_bool_words_strictly(self, tmp_path: Path):
         assert set_setting(tmp_path, "autoswitch.includeApiKeyAccounts", "FALSE") is False
         with pytest.raises(ConfigError, match="true or false"):
@@ -209,3 +226,7 @@ class TestMergedWithCli:
             AutoSwitchSettings(), _args(include_api_key_accounts=True)
         )
         assert merged.include_api_key_accounts is True
+
+    def test_model_override(self):
+        merged = merged_with_cli(AutoSwitchSettings(), _args(model="Fable"))
+        assert merged.model == "Fable"

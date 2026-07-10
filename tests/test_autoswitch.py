@@ -1422,3 +1422,84 @@ class TestTokenIdentity:
         assert harness.switcher.read_account_credentials(
             "2", "b@example.com"
         ) == fresh
+
+
+def _model_usage(five_h: float, fable: float) -> dict:
+    """Usage with a low 5h/7d but a per-model (Fable) weekly window."""
+    return {
+        "five_hour": {"pct": five_h},
+        "seven_day": {"pct": 0.0},
+        "scoped": [{"name": "Fable", "pct": fable}],
+    }
+
+
+class TestModelAwareSwitch:
+    """`autoswitch.model` folds a per-model weekly limit into the decision."""
+
+    def _seed(self, temp_home: Path, **kw) -> EngineHarness:
+        h = EngineHarness(temp_home, **kw)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.seed(3, "c@example.com")
+        h.make_live("a@example.com", 1)
+        return h
+
+    def test_model_maxed_switches_despite_session_headroom(self, temp_home):
+        # Active #1: 5h only 5% used, but Fable is maxed → must leave.
+        h = self._seed(temp_home, model="Fable")
+        outcome = h.tick_with_usage({
+            "1": _model_usage(5, 100),
+            "2": _model_usage(5, 30),
+            "3": _model_usage(5, 60),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2  # most Fable headroom
+        switch = next(e for e in h.events if isinstance(e, SwitchEvent))
+        assert switch.to_ref == {"number": 2, "email": "b@example.com"}
+
+    def test_without_model_setting_the_same_usage_holds(self, temp_home):
+        # Default engine ignores scoped windows → #1 reads 5% used, no switch.
+        h = self._seed(temp_home)
+        outcome = h.tick_with_usage({
+            "1": _model_usage(5, 100),
+            "2": _model_usage(5, 30),
+            "3": _model_usage(5, 60),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert reasons == ["below-threshold"]
+
+    def test_model_headroom_still_gated_by_session_window(self, temp_home):
+        # Fable has room on every account, but #1's 5h is maxed → still leaves.
+        h = self._seed(temp_home, model="Fable")
+        outcome = h.tick_with_usage({
+            "1": _model_usage(100, 40),
+            "2": _model_usage(10, 40),
+            "3": _model_usage(20, 40),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2  # lowest binding (max of 5h, Fable)
+
+    def test_comma_separated_models_switch_on_any(self, temp_home):
+        # Configured for "Fable,Opus"; active #1 is fine on Fable but maxed on
+        # Opus → must leave. Candidate scoped windows carry both models.
+        h = self._seed(temp_home, model="Fable,Opus")
+
+        def usage(five_h, fable, opus):
+            return {
+                "five_hour": {"pct": five_h},
+                "seven_day": {"pct": 0.0},
+                "scoped": [
+                    {"name": "Fable", "pct": fable},
+                    {"name": "Opus", "pct": opus},
+                ],
+            }
+
+        outcome = h.tick_with_usage({
+            "1": usage(5, 20, 100),   # Opus maxed
+            "2": usage(5, 20, 30),    # most headroom
+            "3": usage(5, 20, 70),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2

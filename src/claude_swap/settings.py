@@ -49,6 +49,12 @@ class AutoSwitchSettings:
     strategy: str = "best"  # reserved for future strategies; only "best" in v1
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
+    # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus").
+    # Each named model's per-model weekly limit is folded into the binding
+    # window, so the engine switches off an account whose model quota is
+    # exhausted even while its 5h/7d windows still have headroom. None =
+    # account-wide 5h/7d only (default).
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +117,10 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "autoswitch", "unhealthyTicks", "unhealthy_ticks", "int", 1, 100,
             help="Consecutive failed polls before an account is unhealthy",
         ),
+        SettingSpec(
+            "autoswitch", "model", "model", "string",
+            help="Also switch on these models' weekly limits (e.g. Fable or Fable,Opus)",
+        ),
     )
 }
 
@@ -139,6 +149,10 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
             kwargs[spec.field] = int(clamped) if spec.kind == "int" else clamped
         elif spec.kind == "bool":
             kwargs[spec.field] = bool(value)
+        elif spec.kind == "string":
+            # A non-empty string keeps as-is; anything else reverts to default
+            # (None) so a null/garbage settings.json value disables the filter.
+            kwargs[spec.field] = value if isinstance(value, str) and value else spec.default
         else:  # choice
             if value not in spec.choices:
                 _logger.warning(
@@ -234,6 +248,14 @@ def parse_setting_value(spec: SettingSpec, raw_value: str):
                 f"{spec.dotted} must be one of: {', '.join(spec.choices)}"
             )
         return raw_value
+    if spec.kind == "string":
+        value = raw_value.strip()
+        if not value:
+            raise ConfigError(
+                f"{spec.dotted} expects a non-empty value; use "
+                f"'cswap config unset {spec.dotted}' to clear it"
+            )
+        return value
     try:
         value = int(raw_value) if spec.kind == "int" else float(raw_value)
     except ValueError:
@@ -251,6 +273,8 @@ def parse_setting_value(spec: SettingSpec, raw_value: str):
 
 def format_setting_value(value) -> str:
     """Render a settings value the way settings.json writes it."""
+    if value is None:
+        return "(none)"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float) and value.is_integer():
@@ -349,6 +373,7 @@ def merged_with_cli(settings: AutoSwitchSettings, args) -> AutoSwitchSettings:
         ("interval", "interval_seconds"),
         ("cooldown", "cooldown_seconds"),
         ("include_api_key_accounts", "include_api_key_accounts"),
+        ("model", "model"),
     ):
         value = getattr(args, attr, None)
         if value is not None:
