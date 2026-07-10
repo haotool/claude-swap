@@ -22,7 +22,9 @@ from claude_swap.session import (
     _probe_env,
     keychain_service_name,
     live_sessions_for,
+    read_session_identity,
     session_dir_for,
+    session_identity_drifted,
     slugify_email,
 )
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -214,6 +216,54 @@ class TestHelpers:
     def test_live_sessions_for_own_pid(self, tmp_path):
         make_live(tmp_path)
         assert [s.pid for s in live_sessions_for(tmp_path)] == [os.getpid()]
+
+
+class TestSessionIdentity:
+    """read_session_identity / session_identity_drifted: an in-session /login
+    can re-point a profile at a different account than its slot."""
+
+    def _write_identity(self, session_dir, email, org_uuid=None):
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {"emailAddress": email, "organizationUuid": org_uuid}
+        }))
+
+    def test_reads_email_and_org(self, tmp_path):
+        self._write_identity(tmp_path, "a@x.com", "org-A")
+        assert read_session_identity(tmp_path) == ("a@x.com", "org-A")
+
+    def test_missing_org_reads_as_empty(self, tmp_path):
+        self._write_identity(tmp_path, "a@x.com", None)
+        assert read_session_identity(tmp_path) == ("a@x.com", "")
+
+    def test_unreadable_variants_return_none(self, tmp_path):
+        assert read_session_identity(tmp_path / "nope") is None  # no dir
+        (tmp_path / ".claude.json").write_text("{not json")
+        assert read_session_identity(tmp_path) is None  # invalid json
+        (tmp_path / ".claude.json").write_text(json.dumps({"oauthAccount": {}}))
+        assert read_session_identity(tmp_path) is None  # no email
+
+    def test_different_email_is_drift(self, tmp_path):
+        self._write_identity(tmp_path, "other@x.com", "org-A")
+        assert session_identity_drifted(tmp_path, "a@x.com", "org-A")
+
+    def test_same_email_different_org_is_drift(self, tmp_path):
+        # The j@ck.gg case: one email, two orgs — two distinct subscriptions.
+        self._write_identity(tmp_path, "a@x.com", "org-B")
+        assert session_identity_drifted(tmp_path, "a@x.com", "org-A")
+
+    def test_matching_identity_is_not_drift(self, tmp_path):
+        self._write_identity(tmp_path, "a@x.com", "org-A")
+        assert not session_identity_drifted(tmp_path, "a@x.com", "org-A")
+
+    def test_org_check_is_lenient_when_either_side_empty(self, tmp_path):
+        self._write_identity(tmp_path, "a@x.com", None)
+        assert not session_identity_drifted(tmp_path, "a@x.com", "org-A")
+        self._write_identity(tmp_path, "a@x.com", "org-B")
+        assert not session_identity_drifted(tmp_path, "a@x.com", "")
+
+    def test_unreadable_identity_is_not_drift(self, tmp_path):
+        assert not session_identity_drifted(tmp_path / "nope", "a@x.com", "org-A")
 
 
 # ---------------------------------------------------------------------------

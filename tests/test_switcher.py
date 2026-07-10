@@ -625,6 +625,96 @@ class TestFetchAccountUsageSessionProfile:
         assert kwargs.get("is_active") is False
         assert kwargs.get("persist_credentials") is not None
 
+    def _write_profile_identity(self, switcher, email: str, org_uuid) -> None:
+        session_dir = switcher._session_dir("2", "test@example.com")
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ".claude.json").write_text(json.dumps({
+            "oauthAccount": {"emailAddress": email, "organizationUuid": org_uuid}
+        }))
+
+    def test_drifted_profile_email_falls_back_to_backup(self, temp_home: Path):
+        """An in-session /login as another account must not feed that account's
+        usage into this slot: the fetch ignores the drifted profile credential
+        and uses the backup — refreshable, since the live session no longer
+        holds this slot's token family."""
+        switcher = ClaudeAccountSwitcher()
+        backup = _oauth_creds("sk-backup", 7200)
+        session = _oauth_creds("sk-session", 7200)
+        self._write_profile_identity(switcher, "other@example.com", "org-other")
+
+        with patch.object(switcher, "_live_session_pids", return_value=[123]), \
+             patch("claude_swap.session.read_session_credentials",
+                   return_value=session), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome({"five_hour": {"pct": 9}})) as mock_fetch:
+            record = switcher._fetch_account_usage(self._info(backup))
+
+        assert record.usage == {"five_hour": {"pct": 9}}
+        args, kwargs = mock_fetch.call_args
+        assert args[2] == backup
+        assert kwargs.get("is_active") is False
+        assert kwargs.get("persist_credentials") is not None
+
+    def test_drifted_profile_org_same_email_falls_back(self, temp_home: Path):
+        """Same email, different org (the j@ck.gg merge-artifact shape) is a
+        different subscription — still drift."""
+        switcher = ClaudeAccountSwitcher()
+        backup = _oauth_creds("sk-backup", 7200)
+        session = _oauth_creds("sk-session", 7200)
+        self._write_profile_identity(switcher, "test@example.com", "org-uuid-other")
+
+        with patch.object(switcher, "_live_session_pids", return_value=[123]), \
+             patch("claude_swap.session.read_session_credentials",
+                   return_value=session), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome({"five_hour": {"pct": 9}})) as mock_fetch:
+            switcher._fetch_account_usage(self._info(backup))
+
+        args, _kwargs = mock_fetch.call_args
+        assert args[2] == backup
+
+    def test_matching_profile_identity_uses_session_credentials(self, temp_home: Path):
+        """The guard must not regress the normal case: matching identity keeps
+        the profile-credential fast path (read-only)."""
+        switcher = ClaudeAccountSwitcher()
+        backup = _oauth_creds("sk-backup", -3600)
+        session = _oauth_creds("sk-session", 7200)
+        self._write_profile_identity(switcher, "test@example.com", "org-uuid")
+
+        with patch.object(switcher, "_live_session_pids", return_value=[123]), \
+             patch("claude_swap.session.read_session_credentials",
+                   return_value=session), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome({"five_hour": {"pct": 5}})) as mock_fetch:
+            record = switcher._fetch_account_usage(self._info(backup))
+
+        assert record.usage == {"five_hour": {"pct": 5}}
+        args, kwargs = mock_fetch.call_args
+        assert args[2] == session
+        assert kwargs.get("is_active") is True
+
+    def test_unreadable_profile_identity_trusts_session_credentials(
+        self, temp_home: Path
+    ):
+        """A profile dir without a readable .claude.json is not treated as
+        drift — the profile's token family stays the credential truth."""
+        switcher = ClaudeAccountSwitcher()
+        backup = _oauth_creds("sk-backup", -3600)
+        session = _oauth_creds("sk-session", 7200)
+        switcher._session_dir("2", "test@example.com").mkdir(parents=True)
+
+        with patch.object(switcher, "_live_session_pids", return_value=[123]), \
+             patch("claude_swap.session.read_session_credentials",
+                   return_value=session), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome({"five_hour": {"pct": 5}})) as mock_fetch:
+            record = switcher._fetch_account_usage(self._info(backup))
+
+        assert record.usage == {"five_hour": {"pct": 5}}
+        args, kwargs = mock_fetch.call_args
+        assert args[2] == session
+        assert kwargs.get("is_active") is True
+
 
 class TestListAccountsUsage:
     """Test list_accounts shows usage info."""

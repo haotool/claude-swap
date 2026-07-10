@@ -1729,7 +1729,7 @@ class ClaudeAccountSwitcher:
         self, account_info: tuple[int, str, str, str, bool, str]
     ) -> FetchRecord:
         """One network fetch for one account. Never raises."""
-        num, email, _, _, is_active, creds = account_info
+        num, email, _, org_uuid, is_active, creds = account_info
 
         # The active/default account owns the live credential — route it through
         # the owner-aware path that refreshes only when no Claude Code/session is
@@ -1741,7 +1741,10 @@ class ClaudeAccountSwitcher:
             with FileLock(self.lock_file):
                 self._write_account_credentials(acct_num, acct_email, new_creds)
 
-        from claude_swap.session import read_session_credentials
+        from claude_swap.session import (
+            read_session_credentials,
+            session_identity_drifted,
+        )
 
         has_live_session = bool(self._live_session_pids(str(num), email))
 
@@ -1753,7 +1756,21 @@ class ClaudeAccountSwitcher:
         # Fetch with the profile's newest credential, strictly read-only
         # (is_active=True: no refresh, no persist): rotating the profile's
         # family here would log the next `cswap run` out the same way.
-        session_creds = read_session_credentials(self._session_dir(str(num), email))
+        session_dir = self._session_dir(str(num), email)
+        session_creds = read_session_credentials(session_dir)
+        if session_creds and session_identity_drifted(session_dir, email, org_uuid):
+            # An in-session /login re-pointed the profile at a different
+            # account; fetching with its credential would record THAT
+            # account's usage under this slot's label. The profile no longer
+            # holds this slot's token family, so the backup below is both the
+            # right identity and safe to refresh — treat the slot as not
+            # session-owned for this fetch.
+            self._logger.debug(
+                f"Session profile for account {num} is logged in as a "
+                f"different account; fetching usage from the backup credential"
+            )
+            session_creds = None
+            has_live_session = False
         if session_creds:
             session_oauth = oauth.extract_oauth_data(session_creds)
             if session_oauth and session_oauth.get("accessToken"):
