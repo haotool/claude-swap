@@ -133,7 +133,7 @@ jobs:
         # traceback (test matrix W-4).
         shell: cmd
         run: |
-          chcp 950 & cswap --list > out.txt 2>&1
+          chcp 950 & uv run cswap --list > out.txt 2>&1
           if %errorlevel% neq 0 exit /b 1
           type out.txt
           findstr /C:"UnicodeEncodeError" out.txt && exit /b 1
