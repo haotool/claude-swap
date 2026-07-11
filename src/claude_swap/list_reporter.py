@@ -39,7 +39,10 @@ from claude_swap.json_output import (
 )
 from claude_swap.exceptions import LockError
 from claude_swap.locking import FileLock
-from claude_swap.session import read_session_credentials
+from claude_swap.session import (
+    read_session_credentials,
+    session_identity_drifted,
+)
 from claude_swap.printer import (
     abbreviate_path,
     accent,
@@ -50,6 +53,7 @@ from claude_swap.printer import (
     format_age,
     ide_short_name,
     muted,
+    warning,
 )
 from claude_swap.process_detection import get_running_instances
 from claude_swap.usage_store import FetchRecord, UsageEntry, with_sentinel
@@ -292,6 +296,18 @@ class ListReporter:
             show_health=show_health,
             show_token_status=show_token_status,
         )
+        # Safety copies (unclaimed credentials) are deliberately NOT surfaced
+        # here: users can't act on them (recovery is always /login + cswap
+        # add), and with no GC a one-time event would nag forever. They stay
+        # in the JSON payload and logs for diagnostics.
+        dup_warnings = self.duplicate_account_warnings(accounts_info)
+        lockstep_warnings = self.lockstep_usage_warnings(accounts_info, entries)
+        if dup_warnings or lockstep_warnings:
+            print()
+            for msg in dup_warnings:
+                warning(msg)
+            for msg in lockstep_warnings:
+                warning(msg)
         self.print_running_instances()
         return None
 
@@ -554,7 +570,7 @@ class ListReporter:
         self, account_info: tuple[int, str, str, str, bool, str],
     ) -> FetchRecord:
         """One network fetch for one account. Never raises."""
-        num, email, _, _, is_active, creds = account_info
+        num, email, _, org_uuid, is_active, creds = account_info
         if is_active:
             return self.fetch_active_usage(
                 str(num), email, creds, degraded=self._active_degraded,
@@ -634,9 +650,21 @@ class ListReporter:
         # Fetch with the profile's newest credential, strictly read-only
         # (is_active=True: no refresh, no persist): rotating the profile's
         # family here would log the next `cswap run` out the same way.
-        session_creds = read_session_credentials(
-            self._host._session_dir(str(num), email)
-        )
+        session_dir = self._host._session_dir(str(num), email)
+        session_creds = read_session_credentials(session_dir)
+        if session_creds and session_identity_drifted(session_dir, email, org_uuid):
+            # An in-session /login re-pointed the profile at a different
+            # account; fetching with its credential would record THAT
+            # account's usage under this slot's label. The profile no longer
+            # holds this slot's token family, so the backup below is both the
+            # right identity and safe to refresh — treat the slot as not
+            # session-owned for this fetch.
+            self._logger.debug(
+                f"Session profile for account {num} is logged in as a "
+                f"different account; fetching usage from the backup credential"
+            )
+            session_creds = None
+            has_live_session = False
         if session_creds:
             session_oauth = oauth.extract_oauth_data(session_creds)
             if session_oauth and session_oauth.get("accessToken"):
@@ -688,7 +716,30 @@ class ListReporter:
         owned = degraded or self._active_cc_running() or bool(
             self._host._live_session_pids(account_num, email)
         )
-        if owned:
+
+        # Provenance guard (issue #117): the no-owner path below rotates the
+        # live credential and writes it into this slot's backup — the same
+        # config-chose-the-slot / bytes-came-from-the-store split the switch
+        # guard closes. Only a lineage match against the slot's stored backup
+        # proves the live bytes are actually this slot's. On mismatch, don't
+        # consume a generation of a credential we can't attribute: read usage
+        # with the token as-is and leave reconciliation to the switch-time
+        # guard (which can resolve identity, or back up pre-fix style).
+        unattributed = False
+        if not owned:
+            backup = self._host._read_account_credentials(account_num, email)
+            unattributed = creds != backup and (
+                oauth.credential_fingerprint(creds)
+                != oauth.credential_fingerprint(backup)
+            )
+            if unattributed:
+                self._logger.warning(
+                    "Active credential does not match Account-%s's stored "
+                    "backup; skipping its refresh (provenance unknown).",
+                    account_num,
+                )
+
+        if owned or unattributed:
             if oauth.is_oauth_token_expired(oauth_data.get("expiresAt")):
                 # The request would just 401 (an owned credential may not be
                 # refreshed), so skip it — Claude Code's own /usage does the
@@ -813,7 +864,125 @@ class ListReporter:
         accounts_info: list[tuple[int, str, str, str, bool, str]],
         entries: dict[str, UsageEntry],
     ) -> dict[str, Any]:
-        return list_payload(accounts_info, entries)
+        payload = list_payload(accounts_info, entries)
+        # Additive fields (absent when clean) — never printed warnings; the
+        # JSON contract keeps stdout a single machine-readable object.
+        dup_warnings = self.duplicate_account_warnings(accounts_info)
+        if dup_warnings:
+            payload["duplicateAccountWarnings"] = dup_warnings
+        lockstep_warnings = self.lockstep_usage_warnings(accounts_info, entries)
+        if lockstep_warnings:
+            payload["lockstepUsageWarnings"] = lockstep_warnings
+        unclaimed = self._host.list_unclaimed_credentials()
+        if unclaimed:
+            payload["unclaimedCredentials"] = sorted(unclaimed)
+        return payload
+
+    def duplicate_account_warnings(
+        self, accounts_info: list[tuple[int, str, str, str, bool, str]]
+    ) -> list[str]:
+        """Slots that provably authenticate as the same account.
+
+        Impossible by construction, so a collision means one slot's credential
+        was overwritten with another's (issue #117's end state) or the same
+        account was registered twice. Two offline signals:
+
+        - identical credential fingerprint (same refresh-token lineage or
+          identical raw token) across two slots;
+        - the same non-empty ``uuid`` + org recorded for two slots (empty
+          uuids — add-token placeholders — never match each other).
+
+        Limitation: two *different generations* of the same account (the
+        poisoned end state a pre-guard switch could produce) carry different
+        fingerprints and untouched sequence.json identities, so they are not
+        offline-detectable here — ``lockstep_usage_warnings`` covers that
+        case heuristically. The switch-time guard prevents new occurrences
+        whenever the identity oracle answers.
+        """
+        data = self._host._get_sequence_data() or {}
+        by_fp: dict[str, str] = {}
+        by_identity: dict[tuple[str, str], str] = {}
+        out: list[str] = []
+        for num, email, _org_name, org_uuid, _is_active, creds in accounts_info:
+            snum = str(num)
+            fp = oauth.credential_fingerprint(creds) if creds else None
+            if fp:
+                other = by_fp.get(fp)
+                if other:
+                    out.append(
+                        f"Account-{other} and Account-{snum} hold the same "
+                        f"credential ({email}) — one slot's backup was "
+                        "overwritten. Log in with the missing account and "
+                        "re-add it: cswap add --slot N"
+                    )
+                else:
+                    by_fp[fp] = snum
+            uuid = (data.get("accounts", {}).get(snum, {}).get("uuid") or "").strip()
+            if uuid:
+                key = (uuid, org_uuid or "")
+                other = by_identity.get(key)
+                if other and other != snum:
+                    out.append(
+                        f"Account-{other} and Account-{snum} both authenticate "
+                        f"as {email} — remove or re-login one of them."
+                    )
+                elif not other:
+                    by_identity[key] = snum
+        return out
+
+    def lockstep_usage_warnings(
+        self,
+        accounts_info: list[tuple[int, str, str, str, bool, str]],
+        entries: dict[str, UsageEntry],
+    ) -> list[str]:
+        """Heuristic: slots whose usage moves in perfect lockstep.
+
+        Two different *generations* of the same account (the poisoned end
+        state a pre-guard switch could produce — issue #117) carry different
+        fingerprints and untouched sequence.json identities, so
+        ``duplicate_account_warnings`` cannot see them. But both tokens
+        report the same account's usage: identical 5h *and* 7d percentages
+        with identical reset timestamps — the exact signal the issue's
+        reporter had to reverse-engineer by hand, automated here from data
+        ``list``/watch already fetched.
+
+        Heuristic, not proof: it goes quiet once the older generation dies
+        and stops producing comparable usage, and only rows where both
+        windows carry a non-null ``resets_at`` are compared (two idle
+        accounts at 0% with nothing scheduled are indistinguishable, never
+        flagged; API-key slots have sentinel usage and never reach the
+        comparison). A session profile that drifted to another account is
+        excluded upstream by the #119 drift guard.
+        """
+        seen: dict[tuple[Any, ...], str] = {}
+        out: list[str] = []
+        for num, _email, _org_name, _org_uuid, _is_active, _creds in accounts_info:
+            snum = str(num)
+            entry = entries.get(snum)
+            usage = entry.decision_value() if entry else None
+            if not isinstance(usage, dict):
+                continue
+            h5 = usage.get("five_hour")
+            d7 = usage.get("seven_day")
+            if not isinstance(h5, dict) or not isinstance(d7, dict):
+                continue
+            key = (
+                h5.get("pct"), h5.get("resets_at"),
+                d7.get("pct"), d7.get("resets_at"),
+            )
+            if key[1] is None or key[3] is None or key[0] is None or key[2] is None:
+                continue
+            other = seen.get(key)
+            if other:
+                out.append(
+                    f"Account-{other} and Account-{snum} report identical "
+                    "usage and reset times — they may be the same account "
+                    "(issue #117). If it persists, log in with the missing "
+                    "account and re-add it: cswap add --slot N"
+                )
+            else:
+                seen[key] = snum
+        return out
 
     def build_status_payload(self) -> dict[str, Any]:
         identity = self._host._get_current_account()

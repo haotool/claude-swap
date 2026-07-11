@@ -878,6 +878,9 @@ class TestActiveAccountRefresh:
             return oauth.UsageOutcome(usage_result)
 
         with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(
+                 switcher, "_read_account_credentials", return_value=self._EXPIRED
+             ), \
              patch(
                  "claude_swap.list_reporter.ListReporter._active_cc_running",
                  return_value=False,
@@ -992,6 +995,9 @@ class TestActiveAccountRefresh:
 
         with (
             patch.object(switcher, "_read_credentials", return_value=self._EXPIRED),
+            patch.object(
+                switcher, "_read_account_credentials", return_value=self._EXPIRED
+            ),
             patch(
                 "claude_swap.list_reporter.ListReporter._active_cc_running",
                 side_effect=[False, True],
@@ -1062,6 +1068,9 @@ class TestActiveAccountRefresh:
                 return_value=ActiveCredentials(self._EXPIRED, False),
             ),
             patch.object(switcher, "_read_credentials", return_value=self._EXPIRED),
+            patch.object(
+                switcher, "_read_account_credentials", return_value=self._EXPIRED
+            ),
             patch(
                 "claude_swap.list_reporter.ListReporter._active_cc_running",
                 return_value=False,
@@ -1122,6 +1131,9 @@ class TestActiveAccountRefresh:
             return oauth.UsageOutcome({"five_hour": {"pct": 10}})
 
         with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(
+                 switcher, "_read_account_credentials", return_value=self._EXPIRED
+             ), \
              patch(
                  "claude_swap.list_reporter.ListReporter._active_cc_running",
                  return_value=False,

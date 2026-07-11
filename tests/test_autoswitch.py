@@ -1143,3 +1143,244 @@ class TestRunLoop:
     def test_sleep_cap(self, harness):
         harness.engine._sleep_until_ts = harness.clock() + 50 * 3600
         assert harness.engine._next_delay(TickOutcome.BLOCKED) == 6 * 3600
+
+
+class TestTokenIdentity:
+    """The token endpoint's free identity data: uuid backfill and the
+    identity-conflict detector (the zero-request check that catches a
+    poisoned slot the moment auto freshens it)."""
+
+    def test_uuid_backfill_from_token_account_on_freshen(self, harness):
+        data = harness.switcher._get_sequence_data()
+        data["accounts"]["2"]["uuid"] = ""
+        harness.switcher._write_json(harness.switcher.sequence_file, data)
+        # Slot 2 near expiry → freshen path runs.
+        harness.switcher._write_account_credentials(
+            "2", "b@example.com",
+            json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2", "refreshToken": "rt-2", "expiresAt": 0,
+            }}),
+        )
+        fresh = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-2f", "refreshToken": "rt-2f",
+            "expiresAt": 99_999_999_999_000,
+        }})
+        with patch(
+            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            return_value=oauth.RefreshOutcome(
+                fresh, None,
+                {"uuid": "uuid-2-real", "email": "b@example.com",
+                 "organizationUuid": ""},
+            ),
+        ):
+            status = harness.engine._freshen_target("2", "b@example.com")
+        assert status == "ok"
+        assert harness.switcher._get_sequence_data()["accounts"]["2"]["uuid"] == (
+            "uuid-2-real"
+        )
+
+    def test_conflicting_token_identity_returns_identity_conflict(self, harness):
+        """A slot whose credential authenticates as a different account is not
+        a viable target — but the rotated generation is still persisted (the
+        grant consumed its predecessor)."""
+        harness.switcher._write_account_credentials(
+            "2", "b@example.com",
+            json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2", "refreshToken": "rt-2", "expiresAt": 0,
+            }}),
+        )
+        fresh = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-2f", "refreshToken": "rt-2f",
+            "expiresAt": 99_999_999_999_000,
+        }})
+        with patch(
+            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            return_value=oauth.RefreshOutcome(
+                fresh, None,
+                {"uuid": "uuid-somebody-else", "email": "z@example.com",
+                 "organizationUuid": ""},
+            ),
+        ):
+            status = harness.engine._freshen_target("2", "b@example.com")
+        assert status == "identity-conflict"
+        # The consumed generation's successor was persisted regardless.
+        assert harness.switcher.read_account_credentials(
+            "2", "b@example.com"
+        ) == fresh
+
+    def test_identity_conflict_quarantines_instead_of_activating(self, harness):
+        """Tick path: the conflicted slot is quarantined (wrong-account switch
+        prevented); rotation falls through to the next candidate."""
+        harness.switcher._write_account_credentials(
+            "2", "b@example.com",
+            json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2", "refreshToken": "rt-2", "expiresAt": 0,
+            }}),
+        )
+        fresh = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-2f", "refreshToken": "rt-2f",
+            "expiresAt": 99_999_999_999_000,
+        }})
+
+        def refresh(creds):
+            data = json.loads(creds)["claudeAiOauth"]
+            if data["refreshToken"] == "rt-2":
+                return oauth.RefreshOutcome(
+                    fresh, None,
+                    {"uuid": "uuid-somebody-else", "email": "z@example.com",
+                     "organizationUuid": ""},
+                )
+            return oauth.RefreshOutcome(creds, None)
+
+        with patch(
+            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            side_effect=refresh,
+        ):
+            outcome = harness.tick_with_usage({
+                "1": _usage(95), "2": _usage(10), "3": _usage(80),
+            })
+        # Account 2 had the most headroom but is conflicted → quarantined,
+        # and the switch landed elsewhere.
+        assert "account-quarantined" in harness.kinds()
+        q = harness.state().get("quarantine", {})
+        assert q.get("2", {}).get("reason") == "identity-conflict"
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+
+    def test_dead_slot_quarantined_even_with_safety_copy_present(self, harness):
+        """No automatic promotion (fail-open rework of the issue #117 guard):
+        a dead slot is quarantined outright; safety copies are forensic
+        material, and recovery is the documented /login + cswap add."""
+        harness.switcher._store._write_unclaimed_credential(
+            json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2-successor",
+                "refreshToken": "rt-2-successor",
+                "expiresAt": 99_999_999_999_000,
+            }}),
+            {"resolvedIdentity": {
+                "uuid": "uuid-2", "email": "b@example.com",
+                "organizationUuid": "",
+            }},
+        )
+        harness.switcher._write_account_credentials(
+            "2", "b@example.com",
+            json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2-dead", "refreshToken": "rt-2-dead",
+                "expiresAt": 0,
+            }}),
+        )
+
+        def refresh(creds):
+            data = json.loads(creds)["claudeAiOauth"]
+            if data["refreshToken"] == "rt-2-dead":
+                return oauth.RefreshOutcome(None, "invalid_grant")
+            return oauth.RefreshOutcome(creds, None)
+
+        with patch(
+            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            side_effect=refresh,
+        ):
+            outcome = harness.tick_with_usage({
+                "1": _usage(95), "2": _usage(10), "3": _usage(80),
+            })
+        q = harness.state().get("quarantine", {})
+        assert q.get("2", {}).get("reason") == "invalid_grant"
+        # The safety copy was not consumed, and the switch landed elsewhere.
+        assert len(harness.switcher.list_unclaimed_credentials()) == 1
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+
+    def test_same_uuid_different_org_is_identity_conflict(self, harness):
+        """Organization is part of account identity everywhere else in the
+        codebase: the same account uuid under a different org is a conflict
+        (org compared only when both sides record one)."""
+        data = harness.switcher._get_sequence_data()
+        data["accounts"]["2"]["organizationUuid"] = "org-2"
+        harness.switcher._write_json(harness.switcher.sequence_file, data)
+        harness.switcher._write_account_credentials(
+            "2", "b@example.com",
+            json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2", "refreshToken": "rt-2", "expiresAt": 0,
+            }}),
+        )
+        fresh = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-2f", "refreshToken": "rt-2f",
+            "expiresAt": 99_999_999_999_000,
+        }})
+        with patch(
+            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            return_value=oauth.RefreshOutcome(
+                fresh, None,
+                {"uuid": "uuid-2", "email": "b@example.com",
+                 "organizationUuid": "org-other"},
+            ),
+        ):
+            status = harness.engine._freshen_target("2", "b@example.com")
+        assert status == "identity-conflict"
+
+    def test_malformed_token_identity_never_breaks_freshen(self, harness):
+        """A schema change feeding a non-string uuid must be ignored, not
+        raise — by this point the refreshed credential is already persisted,
+        and a crash here would skip the persist bookkeeping and error the
+        tick."""
+        harness.switcher._write_account_credentials(
+            "2", "b@example.com",
+            json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2", "refreshToken": "rt-2", "expiresAt": 0,
+            }}),
+        )
+        fresh = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-2f", "refreshToken": "rt-2f",
+            "expiresAt": 99_999_999_999_000,
+        }})
+        with patch(
+            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            return_value=oauth.RefreshOutcome(
+                fresh, None, {"uuid": 12345, "email": ["weird"]},
+            ),
+        ):
+            status = harness.engine._freshen_target("2", "b@example.com")
+        assert status == "ok"
+        assert harness.switcher.read_account_credentials(
+            "2", "b@example.com"
+        ) == fresh
+
+    def test_blank_uuid_slot_with_org_conflict_quarantines_not_backfills(
+        self, harness,
+    ):
+        """Org conflict must be checked before the blank-uuid backfill: a
+        wrong-org credential is evidence the slot holds the wrong account,
+        and backfilling its uuid would stick a foreign identity onto the
+        slot (backfill never rewrites a non-empty uuid). Blank-uuid slots
+        with a recorded org are what accounts added by older versions look
+        like."""
+        data = harness.switcher._get_sequence_data()
+        data["accounts"]["2"]["uuid"] = ""
+        data["accounts"]["2"]["organizationUuid"] = "org-A"
+        harness.switcher._write_json(harness.switcher.sequence_file, data)
+        harness.switcher._write_account_credentials(
+            "2", "b@example.com",
+            json.dumps({"claudeAiOauth": {
+                "accessToken": "sk-2", "refreshToken": "rt-2", "expiresAt": 0,
+            }}),
+        )
+        fresh = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-2f", "refreshToken": "rt-2f",
+            "expiresAt": 99_999_999_999_000,
+        }})
+        with patch(
+            "claude_swap.autoswitch.oauth.try_refresh_oauth_credentials",
+            return_value=oauth.RefreshOutcome(
+                fresh, None,
+                {"uuid": "uuid-real", "email": "z@example.com",
+                 "organizationUuid": "org-B"},
+            ),
+        ):
+            status = harness.engine._freshen_target("2", "b@example.com")
+        assert status == "identity-conflict"
+        # The foreign uuid was NOT backfilled onto the slot.
+        assert harness.switcher._get_sequence_data()["accounts"]["2"]["uuid"] == ""
+        # The successor generation was still persisted (grant consumed it).
+        assert harness.switcher.read_account_credentials(
+            "2", "b@example.com"
+        ) == fresh

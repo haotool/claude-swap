@@ -341,8 +341,42 @@ class SwitchCliDispatcher:
             ))
             return None
 
+        # Rotation anchored on a drifted activeAccountNumber can land on the
+        # slot the user is already on — a self-switch would pointlessly rewrite
+        # the live credentials (issue #79's hazard, on the strategy path).
+        # Provenance-aware (issue #117): only a no-op when the live credential
+        # matches the slot's backup (or the divergence can't be classified —
+        # pre-fix behavior, silent); a resolved divergence falls through so
+        # _perform_switch can reconcile it.
+        provenance: dict[str, Any] | None = None
+        if next_account == current_num and current_num is not None:
+            current_email = (
+                s._get_sequence_data() or {}
+            ).get("accounts", {}).get(current_num, {}).get("email", "")
+            action, provenance = s._self_switch_action(
+                next_account, current_email
+            )
+            if action != "reconcile":
+                if json_output:
+                    return s._switch_noop(
+                        strategy=strategy_label,
+                        reason="already-active",
+                        from_ref=current_ref,
+                        to_ref=current_ref,
+                        warnings=warnings,
+                        message=(
+                            f"Already on Account-{next_account} ({current_email})"
+                        ),
+                    )
+                print(
+                    f"{accent('Already on')} Account-{next_account} "
+                    f"({current_email})"
+                )
+                return None
+
         op = s._perform_switch(
             next_account, intent=intent, emit_output=not json_output,
+            provenance=provenance,
         )
         if json_output:
             assert op is not None

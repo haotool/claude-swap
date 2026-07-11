@@ -765,6 +765,14 @@ class CredentialStore:
             self._backup_username(account_num, email),
         )
 
+    def _kc_delete_backup_prev(self, account_num: str, email: str) -> None:
+        """Delete a slot's retained ``.prev`` Keychain item. Raises on failure."""
+        self._kc_call(
+            macos_keychain.delete_password,
+            SECURITY_SERVICE,
+            self._prev_backup_username(account_num, email),
+        )
+
     def _delete_backup_keychain_quiet(self, account_num: str, email: str) -> None:
         """Best-effort backup Keychain delete (never raises)."""
         try:
@@ -774,8 +782,12 @@ class CredentialStore:
 
     def _write_backup_enc(self, account_num: str, email: str, credentials: str) -> None:
         """Atomically write a per-account backup ``.enc`` (base64) file."""
+        self._atomic_b64_write(self._backup_enc_path(account_num, email), credentials)
+
+    def _atomic_b64_write(self, target: Path, credentials: str) -> None:
+        """Atomically write a base64-encoded credential file (0600)."""
         self._host.credentials_dir.mkdir(parents=True, exist_ok=True)
-        enc_file = self._backup_enc_path(account_num, email)
+        enc_file = target
         encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
         import tempfile
         fd, tmp_path = tempfile.mkstemp(dir=str(self._host.credentials_dir), suffix=".tmp")
@@ -859,7 +871,13 @@ class CredentialStore:
 
         Raises on a file-write failure **before** returning, so the switcher wrapper
         runs ``_post_backup_write`` exactly once and only after a successful write.
+
+        Before overwriting, the current generation is retained as a ``.prev`` file
+        (one generation, best-effort): a refresh token exists in exactly one place,
+        giving a misclassified overwrite a best-effort chance of recovery without
+        a /login.
         """
+        self._retain_previous_backup(account_num, email, credentials)
         if self._use_keychain():
             try:
                 self._kc_write_backup(account_num, email, credentials)
@@ -912,5 +930,193 @@ class CredentialStore:
                 self._host._logger.warning(
                     f"Failed to delete pending rotation file: {e}"
                 )
+            prev_file = self._prev_backup_path(num, email)
+            try:
+                if prev_file.exists():
+                    prev_file.unlink()
+            except Exception as e:
+                self._host._logger.warning(f"Failed to delete .prev file: {e}")
             if self._host.platform == Platform.MACOS:
                 self._delete_backup_keychain_quiet(num, email)
+                try:
+                    self._kc_delete_backup_prev(num, email)
+                except Exception as e:
+                    self._host._logger.warning(
+                        f"Failed to delete .prev from Keychain: {e}"
+                    )
+
+    # -- previous-generation retention -------------------------------------
+    #
+    # One retained generation per slot, routed by the same rule as the backup
+    # itself: Keychain when the Keychain is in use, ``.enc.prev`` file
+    # otherwise. Retention must not *weaken* the user's storage posture — a
+    # Mac whose credentials live in the Keychain must not grow a plaintext
+    # copy just for recovery. Best-effort by design: the *primary* safety
+    # boundary is the switch-time provenance check + unclaimed stash (whose
+    # failure aborts); ``.prev`` is defense in depth for writes that were
+    # classified as safe but weren't.
+
+    def _prev_backup_path(self, account_num: str, email: str) -> Path:
+        return self._host.credentials_dir / f".creds-{account_num}-{email}.enc.prev"
+
+    def _prev_backup_username(self, account_num: str, email: str) -> str:
+        return f"{self._backup_username(account_num, email)}.prev"
+
+    def _retain_previous_backup(
+        self, account_num: str, email: str, new_credentials: str
+    ) -> None:
+        """Retain the slot's current backup as ``.prev`` before it is replaced."""
+        try:
+            current = self._read_account_credentials(account_num, email)
+        except Exception as e:  # pragma: no cover - _read swallows its own errors
+            self._host._logger.warning(f"Could not read backup for retention: {e}")
+            return
+        if not current or current == new_credentials:
+            return
+        try:
+            if self._use_keychain():
+                self._kc_call(
+                    macos_keychain.set_password,
+                    SECURITY_SERVICE,
+                    self._prev_backup_username(account_num, email),
+                    current,
+                )
+            else:
+                self._atomic_b64_write(
+                    self._prev_backup_path(account_num, email), current
+                )
+        except Exception as e:
+            self._host._logger.warning(
+                f"Failed to retain previous credential generation for "
+                f"account {account_num}: {e}"
+            )
+
+    def _read_previous_backup(self, account_num: str, email: str) -> str:
+        """Read the retained previous generation. ``""`` when absent/corrupt.
+
+        ``.enc.prev``-wins like the main backup read: a file written while the
+        Keychain was unusable beats a possibly-stale Keychain copy.
+        """
+        prev_file = self._prev_backup_path(account_num, email)
+        if prev_file.exists():
+            try:
+                encoded = prev_file.read_text(encoding="utf-8").strip()
+                decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+                if decoded:
+                    return decoded
+            except Exception as e:
+                self._host._logger.warning(f"Failed to read .prev file: {e}")
+        if self._host.platform == Platform.MACOS:
+            try:
+                return self._kc_call(
+                    macos_keychain.get_password,
+                    SECURITY_SERVICE,
+                    self._prev_backup_username(account_num, email),
+                ) or ""
+            except macos_keychain.KEYCHAIN_ERRORS as e:
+                self._host._logger.warning(f"Failed to read .prev from Keychain: {e}")
+        return ""
+
+    # -- internal safety copies (unclaimed credentials) ----------------------
+    #
+    # Write-only preservation for live credential bytes a switch positively
+    # attributed to someone other than the outgoing slot (invariant: never
+    # overwrite the live store without preserving what was in it — the bytes
+    # may be the only live copy of some account's refresh token). Entries are
+    # append-only base64 files with a JSON manifest carrying the
+    # classification evidence; nothing consumes them automatically — recovery
+    # is the documented /login + `cswap add [--slot N]`, and these files are
+    # forensic material for maintainers.
+    #
+    # Deliberately 0600 files on every platform, unlike the slot backups and
+    # ``.prev``, which route to the macOS Keychain when it is in use: a failed
+    # safety-copy write aborts the switch by design, and that abort path must
+    # not inherit the Keychain's failure modes (#101/#106 — a flaky Keychain
+    # would start blocking switches). On macOS this means these rare files
+    # sit outside the Keychain, base64-encoded with owner-only permissions.
+
+    def _stash_manifest_path(self) -> Path:
+        return self._host.credentials_dir / ".unclaimed-manifest.json"
+
+    def _stash_entry_path(self, entry_id: str) -> Path:
+        return self._host.credentials_dir / f".unclaimed-{entry_id}.enc"
+
+    def _read_stash_manifest(self) -> dict[str, Any]:
+        path = self._stash_manifest_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            entries = data.get("entries")
+            return entries if isinstance(entries, dict) else {}
+        except Exception as e:
+            self._host._logger.warning(f"Failed to read unclaimed manifest: {e}")
+            return {}
+
+    def _write_stash_manifest(self, entries: dict[str, Any]) -> None:
+        from claude_swap.settings import atomic_write_json
+
+        self._host.credentials_dir.mkdir(parents=True, exist_ok=True)
+        path = self._stash_manifest_path()
+        # A corrupt manifest read as {} must not be silently clobbered — the
+        # rows are classification evidence. Set it aside (the entry *bytes*
+        # are separate files and keep being listed as orphans either way).
+        # Failing closed instead would brick switching: a stash-write failure
+        # aborts the switch by design.
+        if path.exists():
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                aside = path.with_name(
+                    f"{path.name}.corrupt-{int(time.time())}"
+                )
+                try:
+                    path.rename(aside)
+                    self._host._logger.warning(
+                        f"Unreadable unclaimed manifest preserved as {aside.name}"
+                    )
+                except OSError as e:
+                    self._host._logger.warning(
+                        f"Could not preserve corrupt unclaimed manifest: {e}"
+                    )
+        atomic_write_json(path, {"schemaVersion": 1, "entries": entries})
+
+    def _write_unclaimed_credential(
+        self, credentials: str, context: dict[str, Any]
+    ) -> str:
+        """Stash a credential of unknown provenance. Returns the entry id.
+
+        Raises on any failure — callers use a successful stash as the license
+        to overwrite the live store, so a failed one must be loud. The entry
+        file is written before the manifest: an entry without manifest metadata
+        is recoverable; a manifest row without bytes is not.
+        """
+        import hashlib
+        import secrets
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        digest = hashlib.sha256(credentials.encode("utf-8")).hexdigest()[:12]
+        # Nonce keeps ids unique even for identical bytes preserved in the
+        # same second — append-only means no write may ever land on an
+        # existing id.
+        entry_id = f"{ts}-{digest}-{secrets.token_hex(3)}"
+        self._atomic_b64_write(self._stash_entry_path(entry_id), credentials)
+        entries = self._read_stash_manifest()
+        entries[entry_id] = {
+            "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            **context,
+        }
+        self._write_stash_manifest(entries)
+        return entry_id
+
+    def _list_unclaimed_credentials(self) -> dict[str, dict[str, Any]]:
+        """Manifest entries by id, including orphaned entry files (no metadata)."""
+        entries = dict(self._read_stash_manifest())
+        try:
+            for path in self._host.credentials_dir.glob(".unclaimed-*.enc"):
+                entry_id = path.name[len(".unclaimed-"):-len(".enc")]
+                entries.setdefault(entry_id, {"createdAt": None})
+        except OSError:
+            pass
+        return entries

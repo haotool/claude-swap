@@ -30,7 +30,6 @@ read-modify-write under a dedicated file lock.
 from __future__ import annotations
 
 import enum
-import hashlib
 import json
 import logging
 import random
@@ -315,12 +314,12 @@ class TickOutcome(enum.Enum):
     BLOCKED = 3  # wanted to switch but no viable target / all exhausted
 
 
-def _refresh_fingerprint(credentials: str) -> str | None:
-    data = oauth.extract_oauth_data(credentials)
-    token = data.get("refreshToken") if data else None
-    if not isinstance(token, str) or not token:
-        return None
-    return "sha256:" + hashlib.sha256(token.encode()).hexdigest()
+# Quarantine state persisted fingerprints from a local refresh-token-only
+# helper; oauth.credential_fingerprint is identical for refresh-token creds.
+# Setup-token quarantines stored None where the shared helper now yields a
+# full-content hash — those release once on first recheck and re-quarantine on
+# the next dead freshen (one harmless extra cycle, migration only).
+_refresh_fingerprint = oauth.credential_fingerprint
 
 
 def binding_pct(usage: dict[str, Any] | None) -> float | None:
@@ -511,9 +510,11 @@ class AutoSwitchEngine:
         refresh buffer before it gets activated.
 
         Returns ``"ok"``, ``"invalid_grant"`` (dead lineage — quarantine),
-        ``"transient"`` (network trouble — try again next tick) or
-        ``"skip-live-session"``. Only ever touches the slot's *backup* store;
-        the active credential belongs to Claude Code.
+        ``"identity-conflict"`` (alive but authenticates as a different
+        account — quarantine, do not activate), ``"transient"`` (network
+        trouble — try again next tick) or ``"skip-live-session"``. Only ever
+        touches the slot's *backup* store; the active credential belongs to
+        Claude Code.
         """
         if self.switcher.account_kind_for(number) == "api_key":
             return "ok"  # API keys don't expire/refresh
@@ -541,13 +542,64 @@ class AutoSwitchEngine:
             return "ok"
         outcome = oauth.try_refresh_oauth_credentials(creds)
         if outcome.error is None and outcome.credentials:
+            # Persist first, unconditionally: the grant consumed a generation,
+            # and not writing the successor would kill the lineage regardless
+            # of whose it turns out to be.
             self.switcher.persist_backup_credentials(
                 number, email, outcome.credentials
             )
+            if self._note_token_identity(number, outcome.token_account):
+                # The slot's stored credential authenticates as a *different*
+                # account — activating it would put the user on the wrong
+                # account with every gauge reading normal. Not a viable
+                # target; the caller quarantines it (released automatically
+                # once the credential is replaced by a re-add).
+                return "identity-conflict"
             return "ok"
         if outcome.error in ("invalid_grant", "no_refresh_token"):
             return "invalid_grant"
         return "transient"
+
+    def _note_token_identity(
+        self, number: str, token_account: dict[str, Any] | None
+    ) -> bool:
+        """Use the token endpoint's free identity to verify/backfill a slot.
+
+        The refresh grant just ran against the slot's own stored credential,
+        so ``token_account`` (when the server includes it) names who that
+        credential really is. Returns True on a *conflict*: the credential
+        authenticates under a different organization than the slot records
+        (org compared first, whenever both sides record one), or as a
+        different account uuid. An empty slot uuid (blank-uuid records from
+        older versions, add-token placeholders) is backfilled — but only
+        when no org conflict exists: a wrong-org credential is evidence the
+        slot holds the wrong account, and backfilling *its* uuid would
+        poison the slot's identity record (backfill never rewrites a
+        non-empty uuid, so that corruption would be sticky).
+
+        ``_parse_token_account`` already enforces a strict boundary, but this
+        identity is opportunistic — re-check types here so malformed data can
+        never break the freshen that carried it (the successor credential is
+        already persisted by the time this runs).
+        """
+        if not isinstance(token_account, dict):
+            return False
+        ta_uuid = token_account.get("uuid")
+        if not isinstance(ta_uuid, str) or not ta_uuid.strip():
+            return False
+        ta_uuid = ta_uuid.strip()
+        slot_identity = self.switcher.account_identity(number)
+        ta_org = token_account.get("organizationUuid")
+        slot_org = slot_identity.get("organizationUuid") or ""
+        if isinstance(ta_org, str) and ta_org and slot_org and ta_org != slot_org:
+            return True
+        if not slot_identity.get("uuid"):
+            try:
+                self.switcher.backfill_account_uuid(number, ta_uuid)
+            except Exception as e:  # never let bookkeeping break a freshen
+                _logger.debug("uuid backfill failed for account %s: %r", number, e)
+            return False
+        return bool(slot_identity["uuid"] != ta_uuid)
 
     # -- tick -----------------------------------------------------------------
 
@@ -807,6 +859,13 @@ class AutoSwitchEngine:
                 # quarantine writes — freshening is a mutation.
                 return self._perform(num, email, trigger)
             status = self._freshen_target(num, email)
+            if status == "identity-conflict":
+                # The slot's credential is alive but belongs to a different
+                # account — switching onto it would silently run the wrong
+                # account. Quarantine (auto-released once a re-add replaces
+                # the credential).
+                self._quarantine(num, email, "identity-conflict")
+                continue
             if status == "invalid_grant":
                 self._quarantine(num, email, "invalid_grant")
                 continue

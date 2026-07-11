@@ -1152,3 +1152,275 @@ class TestInvalidGrantPropagation:
                 "1", "a@b.c", self._valid_credentials(), is_active=False,
             )
         assert outcome.error == "refresh-failed"
+
+
+class TestCredentialFingerprint:
+    """Identity fingerprints for stored credentials (issue #117 guard)."""
+
+    def test_stable_across_access_token_rotation(self):
+        a = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-old", "refreshToken": "rt-1"}})
+        b = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-new", "refreshToken": "rt-1", "expiresAt": 5}})
+        assert oauth.credential_fingerprint(a) == oauth.credential_fingerprint(b)
+
+    def test_differs_across_refresh_token_rotation(self):
+        a = json.dumps({"claudeAiOauth": {"refreshToken": "rt-1"}})
+        b = json.dumps({"claudeAiOauth": {"refreshToken": "rt-2"}})
+        assert oauth.credential_fingerprint(a) != oauth.credential_fingerprint(b)
+
+    def test_full_content_fallback_for_api_keys_and_setup_tokens(self):
+        api_key = "sk-ant-api03-xyz"
+        setup = json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-abc"}})
+        assert oauth.credential_fingerprint(api_key) is not None
+        assert oauth.credential_fingerprint(setup) is not None
+        # Never None for real bytes: a None would make every "did it change?"
+        # comparison degenerate to "changed".
+        assert oauth.credential_fingerprint(api_key) != oauth.credential_fingerprint(setup)
+
+    def test_full_hash_never_collides_with_refresh_hash(self):
+        with_rt = json.dumps({"claudeAiOauth": {"refreshToken": "rt-1"}})
+        assert oauth.credential_fingerprint(with_rt).startswith("sha256:")
+        assert oauth.credential_fingerprint("raw-token").startswith("sha256-full:")
+
+    def test_empty_input_is_none(self):
+        assert oauth.credential_fingerprint("") is None
+
+
+class TestTokenAccountParsing:
+    """The token endpoint's optional account identity must not be discarded."""
+
+    _make_credentials = staticmethod(TestRefreshOAuthCredentials._make_credentials)
+
+    def _refresh_with_response(self, payload: dict) -> oauth.RefreshOutcome:
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(payload).encode()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen", return_value=mock_response
+        ):
+            return oauth.try_refresh_oauth_credentials(self._make_credentials())
+
+    def test_token_account_surfaced_when_present(self):
+        outcome = self._refresh_with_response({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+            "account": {"uuid": "acc-uuid", "email_address": "a@b.c"},
+            "organization": {"uuid": "org-uuid"},
+        })
+        assert outcome.error is None
+        assert outcome.token_account == {
+            "uuid": "acc-uuid", "email": "a@b.c", "organizationUuid": "org-uuid",
+        }
+
+    def test_token_account_absent_is_none(self):
+        outcome = self._refresh_with_response({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        })
+        assert outcome.error is None
+        assert outcome.token_account is None
+
+    # Same strict boundary as fetch_oauth_profile: identity is opportunistic
+    # and must never break the refresh that carried it — malformed or
+    # uuid-less data is None, optional fields normalize to str-or-None.
+
+    def test_token_account_without_uuid_is_none(self):
+        outcome = self._refresh_with_response({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+            "account": {"email_address": "a@b.c"},
+        })
+        assert outcome.error is None
+        assert outcome.token_account is None
+
+    def test_token_account_non_string_uuid_is_none(self):
+        outcome = self._refresh_with_response({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+            "account": {"uuid": 12345, "email_address": "a@b.c"},
+        })
+        assert outcome.error is None
+        assert outcome.token_account is None
+
+    def test_token_account_uuid_whitespace_normalized(self):
+        """Normalization happens at the boundary so padded uuids never reach
+        comparisons or sequence.json backfills."""
+        outcome = self._refresh_with_response({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+            "account": {"uuid": "  acc-uuid  ", "email_address": "a@b.c"},
+        })
+        assert outcome.token_account["uuid"] == "acc-uuid"
+
+    def test_token_account_non_string_optionals_normalized(self):
+        outcome = self._refresh_with_response({
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+            "account": {"uuid": "acc-uuid", "email_address": {"weird": 1}},
+            "organization": {"uuid": 99},
+        })
+        assert outcome.error is None
+        assert outcome.token_account == {
+            "uuid": "acc-uuid", "email": None, "organizationUuid": None,
+        }
+
+
+class TestFetchOauthProfile:
+    """Access-token → account-identity resolution (/api/oauth/profile)."""
+
+    def _profile_response(self, payload: dict):
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(payload).encode()
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        return mock_response
+
+    def test_resolves_identity(self):
+        seen = {}
+
+        def mock_urlopen(req, timeout=0):
+            seen["url"] = req.full_url
+            seen["auth"] = req.headers.get("Authorization")
+            return self._profile_response({
+                "account": {"uuid": "acc-uuid", "email": "a@b.c"},
+                "organization": {"uuid": "org-uuid"},
+            })
+
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
+            result = oauth.fetch_oauth_profile("sk-live")
+        assert result == {
+            "uuid": "acc-uuid", "email": "a@b.c", "organizationUuid": "org-uuid",
+        }
+        assert seen["url"].endswith("/api/oauth/profile")
+        assert seen["auth"] == "Bearer sk-live"
+
+    def test_uses_bounded_timeout(self):
+        """One bounded call: the profile lookup may only ever add latency,
+        never hang a switch."""
+        seen = {}
+
+        def mock_urlopen(req, timeout=0):
+            seen["timeout"] = timeout
+            return self._profile_response({
+                "account": {"uuid": "acc-uuid", "email": "a@b.c"},
+            })
+
+        with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
+            oauth.fetch_oauth_profile("sk-live")
+        assert seen["timeout"] == 5
+
+    def test_network_failure_is_unresolvable_not_error(self):
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("down"),
+        ):
+            assert oauth.fetch_oauth_profile("sk-live") is None
+
+    def test_missing_account_object_is_unresolvable(self):
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen",
+            return_value=self._profile_response({"unexpected": True}),
+        ):
+            assert oauth.fetch_oauth_profile("sk-live") is None
+
+    # Strict resolution boundary: the oracle is advisory (None keeps the
+    # switch on the fail-open path), so a response only counts as resolved
+    # with a non-empty string account.uuid — a schema change must degrade to
+    # pre-fix behavior, not to preserve-and-skip.
+
+    def test_missing_uuid_is_unresolvable(self):
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen",
+            return_value=self._profile_response({
+                "account": {"email": "a@b.c"},
+                "organization": {"uuid": "org-uuid"},
+            }),
+        ):
+            assert oauth.fetch_oauth_profile("sk-live") is None
+
+    def test_non_string_uuid_is_unresolvable(self):
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen",
+            return_value=self._profile_response({
+                "account": {"uuid": 12345, "email": "a@b.c"},
+            }),
+        ):
+            assert oauth.fetch_oauth_profile("sk-live") is None
+
+    def test_blank_uuid_is_unresolvable(self):
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen",
+            return_value=self._profile_response({
+                "account": {"uuid": "   ", "email": "a@b.c"},
+            }),
+        ):
+            assert oauth.fetch_oauth_profile("sk-live") is None
+
+    def test_malformed_json_is_unresolvable(self):
+        mock_response = MagicMock()
+        mock_response.read.return_value = b"<!doctype html><html>gateway error"
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = MagicMock(return_value=False)
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen", return_value=mock_response,
+        ):
+            assert oauth.fetch_oauth_profile("sk-live") is None
+
+    def test_uuid_whitespace_normalized_at_boundary(self):
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen",
+            return_value=self._profile_response({
+                "account": {"uuid": "  acc-uuid  ", "email": "a@b.c"},
+            }),
+        ):
+            result = oauth.fetch_oauth_profile("sk-live")
+        assert result["uuid"] == "acc-uuid"
+
+    def test_valid_uuid_with_missing_email_still_resolves(self):
+        """email/organization are optional; uuid is the identity."""
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen",
+            return_value=self._profile_response({
+                "account": {"uuid": "acc-uuid"},
+            }),
+        ):
+            result = oauth.fetch_oauth_profile("sk-live")
+        assert result == {"uuid": "acc-uuid", "email": None, "organizationUuid": None}
+
+    def test_non_string_optional_fields_are_dropped_not_fatal(self):
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen",
+            return_value=self._profile_response({
+                "account": {"uuid": "acc-uuid", "email": {"weird": True}},
+                "organization": {"uuid": 99},
+            }),
+        ):
+            result = oauth.fetch_oauth_profile("sk-live")
+        assert result == {"uuid": "acc-uuid", "email": None, "organizationUuid": None}
+
+    def test_401_is_unresolvable_with_log_file_warning(self, caplog):
+        """401 is evidence (the live token can't authenticate) but not proof —
+        fail open, and record it at warning level in the log only (the
+        console handler exists only under --debug)."""
+        import logging
+
+        err = urllib.error.HTTPError(
+            "https://api.anthropic.com/api/oauth/profile", 401,
+            "Unauthorized", {}, None,
+        )
+        with patch(
+            "claude_swap.oauth.urllib.request.urlopen", side_effect=err,
+        ), caplog.at_level(logging.WARNING, logger="claude-swap"):
+            assert oauth.fetch_oauth_profile("sk-live") is None
+        assert any(
+            "401" in r.message and "pre-fix" in r.message
+            for r in caplog.records
+        )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import urllib.error
@@ -45,6 +46,25 @@ def extract_oauth_data(credentials: str) -> dict[str, Any] | None:
     return oauth if isinstance(oauth, dict) else None
 
 
+def credential_fingerprint(credentials: str) -> str | None:
+    """Stable identity fingerprint for a stored credential.
+
+    Refresh-token hash when one exists (survives access-token rotation, so two
+    generations of the same OAuth lineage compare equal); full-content hash
+    otherwise (API keys and setup-tokens rotate never, so content identity is
+    lineage identity). None only for empty input — a caller comparing "did the
+    credential change?" must never get None for real bytes, or every
+    comparison against it would degenerate to "changed".
+    """
+    if not credentials:
+        return None
+    data = extract_oauth_data(credentials)
+    token = data.get("refreshToken") if data else None
+    if isinstance(token, str) and token:
+        return "sha256:" + hashlib.sha256(token.encode()).hexdigest()
+    return "sha256-full:" + hashlib.sha256(credentials.encode()).hexdigest()
+
+
 def is_oauth_token_expired(expires_at: object) -> bool:
     """Return whether an OAuth token is expired or about to expire."""
     if not isinstance(expires_at, (int, float)):
@@ -69,10 +89,17 @@ class RefreshOutcome:
     - ``"no_refresh_token"`` — the stored credential carries no usable refresh
       token (also permanent for retry purposes)
     - ``"transient"`` — network/server error; the token may still be valid
+
+    ``token_account`` is the account identity the token endpoint optionally
+    includes alongside a successful grant (``{"uuid", "email",
+    "organizationUuid"}``, fields possibly None) — a zero-request identity
+    source for the credential that was just refreshed. None when the server
+    omitted it or on failure; callers must treat it as opportunistic.
     """
 
     credentials: str | None
     error: str | None
+    token_account: dict[str, Any] | None = None
 
 
 def try_refresh_oauth_credentials(credentials: str) -> RefreshOutcome:
@@ -113,7 +140,9 @@ def try_refresh_oauth_credentials(credentials: str) -> RefreshOutcome:
             oauth["scopes"] = resp_data["scope"].split()
 
         data["claudeAiOauth"] = oauth
-        return RefreshOutcome(json.dumps(data), None)
+        return RefreshOutcome(
+            json.dumps(data), None, _parse_token_account(resp_data)
+        )
     except urllib.error.HTTPError as e:
         err_body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
         _logger.debug("OAuth refresh failed: %r, body: %s", e, err_body[:500])
@@ -131,9 +160,100 @@ def try_refresh_oauth_credentials(credentials: str) -> RefreshOutcome:
         return RefreshOutcome(None, "transient")
 
 
+def _parse_token_account(resp_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract the optional account identity from a token-endpoint response.
+
+    The refresh grant's response body may carry ``account`` / ``organization``
+    objects naming who the rotated token belongs to (Claude Code surfaces the
+    same fields as ``tokenAccount``). Absent in some responses — never rely on
+    it, but never discard it either. Same strict boundary as
+    ``fetch_oauth_profile``: usable identity requires a non-empty string
+    ``account.uuid`` (consumers backfill and compare by uuid), optional
+    fields are normalized to str-or-None, and anything malformed is None —
+    this identity is opportunistic and must never break the refresh that
+    carried it.
+    """
+    account = resp_data.get("account")
+    if not isinstance(account, dict):
+        return None
+    uuid = account.get("uuid")
+    if not isinstance(uuid, str) or not uuid.strip():
+        return None
+    email = account.get("email_address")
+    organization = resp_data.get("organization")
+    org_uuid = organization.get("uuid") if isinstance(organization, dict) else None
+    return {
+        "uuid": uuid.strip(),
+        "email": email if isinstance(email, str) else None,
+        "organizationUuid": org_uuid if isinstance(org_uuid, str) else None,
+    }
+
+
 def refresh_oauth_credentials(credentials: str) -> str | None:
     """Refresh an OAuth access token; None on any failure (see RefreshOutcome)."""
     return try_refresh_oauth_credentials(credentials).credentials
+
+
+def fetch_oauth_profile(access_token: str) -> dict[str, Any] | None:
+    """Resolve an OAuth access token to its account identity, or None.
+
+    ``GET /api/oauth/profile`` answers the one question the credential bytes
+    can't: *whose* token is this. Returns ``{"uuid", "email",
+    "organizationUuid"}`` or None on any failure — callers treat None as
+    "unresolvable", never as an error. The identity oracle is strictly
+    advisory (a switch proceeds pre-fix on None), so the boundary is strict
+    the other way: a response counts as resolved only when it carries a
+    non-empty string ``account.uuid`` — a response without a usable uuid,
+    including a schema change that renames it, is None, keeping that drift
+    on the fail-open path rather than silently degrading switches.
+    ``email``/``organizationUuid`` are optional (str-or-None); a uuid-only
+    response *does* resolve, and classification decides whether such partial
+    evidence is sufficient for each decision. Must not be called while any
+    credential/config lock is held (network under locks is forbidden).
+    """
+    url = "https://api.anthropic.com/api/oauth/profile"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "claude-swap/1.0",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            # Evidence, not proof: the live access token can't authenticate.
+            # A freshly rotated own-credential would carry a fresh token, but
+            # this also fires benignly (family rotated, then the access token
+            # expired on an idle machine). Log-file only — the caller falls
+            # back to pre-fix behavior and the user sees nothing.
+            _logger.warning(
+                "OAuth profile returned 401 while resolving credential "
+                "ownership; proceeding without identity (pre-fix behavior)."
+            )
+        else:
+            _logger.debug("OAuth profile fetch failed: %r", e)
+        return None
+    except Exception as e:
+        _logger.debug("OAuth profile fetch failed: %r", e)
+        return None
+    account = data.get("account") if isinstance(data, dict) else None
+    if not isinstance(account, dict):
+        _logger.debug("OAuth profile response missing account object")
+        return None
+    uuid = account.get("uuid")
+    if not isinstance(uuid, str) or not uuid.strip():
+        _logger.debug("OAuth profile response missing account.uuid")
+        return None
+    email = account.get("email")
+    organization = data.get("organization")
+    org_uuid = organization.get("uuid") if isinstance(organization, dict) else None
+    return {
+        "uuid": uuid.strip(),
+        "email": email if isinstance(email, str) else None,
+        "organizationUuid": org_uuid if isinstance(org_uuid, str) else None,
+    }
 
 
 

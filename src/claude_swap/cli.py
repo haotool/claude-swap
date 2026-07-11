@@ -12,7 +12,7 @@ from typing import Any, cast
 from claude_swap import __version__, service
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import error_envelope
-from claude_swap.printer import dimmed, error, muted
+from claude_swap.printer import dimmed, error, force_utf8_output, muted
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -976,6 +976,7 @@ def _intercept_retired_service_argv(argv: list[str]) -> None:
 
 def main() -> None:
     """Main entry point for the CLI."""
+    force_utf8_output()
     _use_native_tls()
     _relax_redirected_stream_encoding()
     _intercept_retired_service_argv(sys.argv[1:])

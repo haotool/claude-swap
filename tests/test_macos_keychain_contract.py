@@ -71,6 +71,9 @@ class TestBackupCredentialsSecurity:
         self, macos_switcher: ClaudeAccountSwitcher
     ):
         with patch("claude_swap.credentials.macos_keychain") as mock_kc:
+            # No existing backup → the .prev retention step has nothing to
+            # keep and the write stays a single Keychain call.
+            mock_kc.get_password.return_value = None
             macos_switcher._write_account_credentials(
                 "2", "alice@example.com", "secret-token"
             )
@@ -78,6 +81,28 @@ class TestBackupCredentialsSecurity:
             mock_kc.set_password.assert_called_once_with(
                 "claude-swap", "account-2-alice@example.com", "secret-token"
             )
+
+    def test_write_retains_prev_generation_in_keychain_not_a_file(
+        self, macos_switcher: ClaudeAccountSwitcher
+    ):
+        """Retention must not weaken storage posture: on a Keychain-backed
+        Mac the previous generation goes to the Keychain, never a file."""
+        with patch("claude_swap.credentials.macos_keychain") as mock_kc:
+            mock_kc.get_password.return_value = "old-generation"
+            macos_switcher._write_account_credentials(
+                "2", "alice@example.com", "secret-token"
+            )
+
+            mock_kc.set_password.assert_has_calls([
+                call("claude-swap", "account-2-alice@example.com.prev",
+                     "old-generation"),
+                call("claude-swap", "account-2-alice@example.com",
+                     "secret-token"),
+            ])
+        prev_file = macos_switcher._store._prev_backup_path(
+            "2", "alice@example.com"
+        )
+        assert not prev_file.exists()
 
     def test_delete_account_credentials_uses_security_service(
         self, macos_switcher: ClaudeAccountSwitcher
@@ -87,7 +112,9 @@ class TestBackupCredentialsSecurity:
 
             mock_kc.delete_password.assert_has_calls([
                 call("claude-swap", "account-3-bob@example.com"),
+                call("claude-swap", "account-3-bob@example.com.prev"),
                 call("claude-swap", "account-None-bob@example.com"),
+                call("claude-swap", "account-None-bob@example.com.prev"),
             ])
 
 
