@@ -2,9 +2,54 @@
 
 All notable user-facing changes to claude-swap are documented here.
 
-Release version is defined in `pyproject.toml` (currently `0.17.1+haotool.1`).
+Release version is defined in `pyproject.toml` (currently `0.19.0+haotool.1`).
 
 ## [Unreleased]
+
+### Added
+
+- **Upstream v0.19.0 merged** (Textual TUI, macOS menu bar app, per-model
+  weekly limits, and the #117 provenance guard — upstream #91–#121):
+  - **Textual TUI dashboard.** The curses menu is replaced by upstream's
+    full-screen Textual dashboard (`cswap tui`, bare `cswap`, and
+    `cswap watch` for the live monitor); the paced snapshot read path lives
+    in `snapshot_source.py` and reset countdowns are recomputed at render
+    time instead of served stale from the fetch cache.
+  - **macOS menu bar app** (`cswap --menubar`, optional `rumps` extra) with
+    per-model weekly limits and weekly-reset rollover.
+  - **Per-model weekly limits.** `cswap switch --strategy best/next-available
+    --model Fable` (or the persistent `autoswitch.model` setting) folds named
+    per-model windows into every headroom comparison; skips name the binding
+    window and an inert model name warns once instead of silently gating
+    nothing. The auto engine's polling cadence and reset scheduling are
+    model-aware too.
+  - **Switch-time provenance guard (upstream #117),** ported into the fork's
+    split switch machinery: the outgoing backup step classifies who owns the
+    live credential (own / rotated / foreign / alien / unresolved), preserves
+    unowned bytes in a write-only safety-copy store instead of poisoning the
+    slot, keeps a `.prev` retained generation per slot, and makes self-switch
+    no-ops provenance-aware. `cswap list` gains duplicate-account and
+    lockstep-usage diagnostics.
+  - **Session-aware usage fetches** (#97) read a session profile's own
+    credential (strictly read-only) and the #119 drift guard ignores a
+    profile re-logged into a different account.
+  - **Dead-token quarantine** (#106): an `invalid_grant` lineage is surfaced
+    as "re-login needed" and never fetched again until re-added.
+  - **`cswap help` leads with bare subcommands** (#98); legacy `--flags` keep
+    working but are hidden from the options list.
+
+### Changed
+
+- **Fork's Keychain re-probe cooldown replaced by upstream's** (#101): 60s
+  monotonic cooldown plus a permanent file-mode pin after a write fallback
+  (`KEYCHAIN_RECHECK_COOLDOWN_S` supersedes the fork's 300s
+  `_KEYCHAIN_REPROBE_INTERVAL`).
+- **Empty-credential switch guard converged on upstream's wording** (#99):
+  the refusal now reads "Current account credential is empty (Keychain
+  unreadable?); refusing to overwrite its backup".
+- **mypy strict carve-out for `claude_swap.menubar`:** rumps ships no type
+  stubs and the app glue subclasses its untyped `App`, so untyped defs/calls
+  are tolerated in that one module; everything else stays `--strict`.
 
 > **Upgrading with an installed background service?** Run
 > `cswap service install` once after upgrading. The old service command line

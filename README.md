@@ -8,7 +8,7 @@ Multi-account switcher for Claude Code. Easily switch between multiple Claude ac
 
 | Item | Value |
 |------|-------|
-| **Release version (SSOT)** | `pyproject.toml` → `[project].version` (currently `0.17.1+haotool.1`) |
+| **Release version (SSOT)** | `pyproject.toml` → `[project].version` (currently `0.19.0+haotool.1`) |
 | **Scheme** | [PEP 440](https://peps.python.org/pep-0440/) with a **local version label** (`+haotool.1`) to distinguish this fork from upstream |
 | **PyPI** | **Not publishable** — PyPI rejects local version segments (`+…`); this fork is installed from git/source only |
 | **Upstream PyPI** | Publishes plain semver (e.g. `0.15.1`) without the `+haotool.*` suffix |
