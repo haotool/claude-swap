@@ -2602,10 +2602,6 @@ class ClaudeAccountSwitcher:
         for i, (num, email, org_name, org_uuid, is_active, _, alias) in enumerate(accounts_info):
             tag = self._get_display_tag(email, org_name, org_uuid)
             label = f"{accent(alias)} ({email})" if alias else email
-            # NOTE: the TUI watch view (tui._watch_account_rows) parses this
-            # output to map rows to accounts for quick-switch: it relies on the
-            # uncolored ``  {num}: `` prefix and the ``(active)`` marker below.
-            # Keep them intact when tweaking this line, or update that parser.
             markers = ""
             if is_active:
                 markers += f" {bold_accent('(active)')}"
