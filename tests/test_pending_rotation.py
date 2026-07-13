@@ -105,7 +105,7 @@ def _park_via_contended_fetch(
             patch.object(sw, "_live_session_pids", return_value=[]),
         ):
             ListReporter(sw).fetch_account_usage(
-                (2, "b@example.com", "", "", False, old),
+                (2, "b@example.com", "", "", False, old, ""),
             )
     finally:
         blocker.release()

@@ -47,9 +47,11 @@ from claude_swap.models import (
     SwitchPreconditions,
     SwitchTransaction,
     get_timestamp,
+    normalize_alias,
 )
 from claude_swap.printer import (
     accent,
+    bolded,
     dimmed,
     muted,
     warning,
@@ -372,6 +374,20 @@ class ClaudeAccountSwitcher:
             config_file.unlink()
         self._delete_session_profile(account_num, email)
 
+    def _prune_mappings(self, email: str, org_uuid: str) -> None:
+        """Drop directory mappings for an identity that no longer has a slot.
+
+        Called wherever an identity leaves the account table for good
+        (remove_account, add_account/add_token slot overwrite). Slot
+        *migration* and --import --force keep the (email, org) identity that
+        mappings are keyed by, so they need no pruning.
+        """
+        from claude_swap.mappings import MappingStore
+
+        pruned = MappingStore(self.backup_dir).prune_account(email, org_uuid or "")
+        if pruned:
+            print(dimmed(f"Removed {pruned} directory mapping(s) for this account"))
+
     def _read_account_config(self, account_num: str, email: str) -> str:
         """Read account config from backup."""
         config_file = self.configs_dir / f".claude-config-{account_num}-{email}.json"
@@ -435,6 +451,126 @@ class ClaudeAccountSwitcher:
             record.get("organizationUuid", "") or "",
         )
 
+    def set_alias(self, identifier: str, alias: str) -> tuple[str, str]:
+        """Set (or rename) the alias for the account matching identifier.
+
+        ``identifier`` is a slot number, email, or existing alias (so a
+        typo'd alias can be corrected with ``cswap alias <old> <new>`` as
+        well as by number/email). Returns ``(account_num, normalized_alias)``.
+
+        Raises:
+            AccountNotFoundError: identifier doesn't match any account.
+            ValidationError: alias format is invalid.
+            ConfigError: the normalized alias is already used by another account.
+        """
+        try:
+            normalized = normalize_alias(alias)
+        except ValueError as e:
+            raise ValidationError(str(e)) from e
+
+        self._get_sequence_data_migrated()
+        account_num = self._resolve_account_identifier(identifier)
+        if not account_num:
+            raise AccountNotFoundError(
+                f"No account found with identifier: {identifier}"
+            )
+        data = self._get_sequence_data() or {}
+        record = data.get("accounts", {}).get(account_num)
+        if not record:
+            raise AccountNotFoundError(f"Account-{account_num} does not exist")
+
+        conflict = self._alias_in_use(normalized, exclude_num=account_num)
+        if conflict is not None:
+            raise ConfigError(f"Alias '{normalized}' is already used by account {conflict}")
+
+        record["alias"] = normalized
+        data["lastUpdated"] = get_timestamp()
+        self._write_json(self.sequence_file, data)
+        return account_num, normalized
+
+    def unset_alias(self, identifier: str) -> str:
+        """Clear the alias for the account matching identifier.
+
+        Returns the account number. Idempotent: clearing an already-unset
+        alias succeeds silently (no error), matching ``cswap config unset``'s
+        posture of "the end state is what you asked for".
+
+        Raises:
+            AccountNotFoundError: identifier doesn't match any account.
+        """
+        self._get_sequence_data_migrated()
+        account_num = self._resolve_account_identifier(identifier)
+        if not account_num:
+            raise AccountNotFoundError(
+                f"No account found with identifier: {identifier}"
+            )
+        data = self._get_sequence_data() or {}
+        record = data.get("accounts", {}).get(account_num)
+        if not record:
+            raise AccountNotFoundError(f"Account-{account_num} does not exist")
+
+        if "alias" in record:
+            del record["alias"]
+            data["lastUpdated"] = get_timestamp()
+            self._write_json(self.sequence_file, data)
+        return account_num
+
+    def list_aliases(self) -> list[tuple[str, str, str]]:
+        """Every set alias as ``(account_num, alias, email)``, slot-number order."""
+        data = self._get_sequence_data_migrated()
+        accounts = (data or {}).get("accounts", {})
+        rows = [
+            (num, acc.get("alias"), acc.get("email", ""))
+            for num, acc in accounts.items()
+            if acc.get("alias")
+        ]
+        return sorted(rows, key=lambda r: int(r[0]))
+
+    def slot_for_directory(self, directory: str | Path) -> tuple[str | None, str | None]:
+        """Resolve a directory to its mapped account slot, for `cswap run`.
+
+        Returns (slot, email): (None, None) when no mapping covers the
+        directory, (None, email) when a mapping exists but its account was
+        removed, and (slot, email) when the mapping resolves.
+        """
+        from claude_swap.mappings import MappingStore
+
+        match = MappingStore(self.backup_dir).resolve(directory)
+        if match is None:
+            return None, None
+        _, entry = match
+        email = entry.get("email", "")
+        seq = self._get_sequence_data_migrated() or {}
+        slot = self._find_account_slot(
+            seq, email, entry.get("organizationUuid", "") or ""
+        )
+        return slot, email
+
+    def list_mappings(self) -> None:
+        """Print all directory → account mappings (for `cswap map`)."""
+        from claude_swap.mappings import MappingStore
+
+        mappings = MappingStore(self.backup_dir).all()
+        if not mappings:
+            print(dimmed("No directory mappings yet."))
+            print(muted("Map one with: cswap map <NUM|EMAIL> [PATH]"))
+            return
+        seq = self._get_sequence_data_migrated() or {}
+        print(bolded("Directory mappings:"))
+        for path in sorted(mappings):
+            entry = mappings[path]
+            email = entry.get("email", "")
+            org_uuid = entry.get("organizationUuid", "") or ""
+            slot = self._find_account_slot(seq, email, org_uuid)
+            if slot:
+                account = seq.get("accounts", {}).get(slot, {})
+                tag = self._get_display_tag(
+                    email, account.get("organizationName", ""), org_uuid
+                )
+                print(f"  {path} {dimmed('→')} {slot}: {email} {muted(f'[{tag}]')}")
+            else:
+                print(f"  {path} {dimmed('→')} {email} {muted('(account removed)')}")
+
     def read_account_credentials(self, account_num: str, email: str) -> str:
         """Public wrapper for session bootstrap. Empty string when missing."""
         return self._read_account_credentials(account_num, email)
@@ -497,7 +633,7 @@ class ClaudeAccountSwitcher:
         entries = reporter.collect_usage_entries(accounts_info, fetch=fetch)
         active_number: str | None = None
         accounts: list[AccountSnapshot] = []
-        for num, email, org_name, org_uuid, is_active, _creds in accounts_info:
+        for num, email, org_name, org_uuid, is_active, _creds, alias in accounts_info:
             n = str(num)
             if is_active:
                 active_number = n
@@ -511,6 +647,7 @@ class ClaudeAccountSwitcher:
                     kind=self._account_kind(n),
                     switchable=self._account_is_switchable(n),
                     usage=entries[n],
+                    alias=alias,
                 )
             )
         return AccountsSnapshot(
@@ -542,6 +679,13 @@ class ClaudeAccountSwitcher:
         instead of the settings file)."""
         self._poll_inputs_override = (threshold, models)
 
+    def clear_poll_policy_inputs(self) -> None:
+        """Drop the hosted engine's pin so poll planning falls back to the
+        settings file — called when the engine's screen closes, or a TUI
+        session threshold override would keep steering cadence after the
+        engine it belonged to is gone."""
+        self._poll_inputs_override = None
+
     def _poll_policy_inputs(self) -> tuple[float, tuple[str, ...]]:
         """Threshold + configured model names for poll planning: the hosting
         engine's pinned values when present, else the settings file (reloaded
@@ -561,13 +705,96 @@ class ClaudeAccountSwitcher:
         return inputs
 
     def switchable_account_numbers(self) -> list[str]:
-        """Account numbers in rotation order that have usable stored backups."""
+        """Account numbers in rotation order eligible for automatic selection.
+
+        Excludes slots without usable stored backups and slots the user has
+        disabled (``cswap disable``). Disabled slots stay managed and remain
+        valid explicit ``cswap switch <num|email>`` targets — they are only
+        held out of automatic rotation and the usage-aware strategies.
+        """
         data = self._get_sequence_data() or {}
         return [
             str(num)
             for num in data.get("sequence", [])
             if self._account_is_switchable(str(num))
+            and not self._disabled_from_data(data, str(num))
         ]
+
+    @staticmethod
+    def _disabled_from_data(data: dict[str, Any], account_num: str) -> bool:
+        """Whether a slot is flagged out of rotation in already-loaded data."""
+        record = data.get("accounts", {}).get(str(account_num))
+        return bool(record and record.get("disabled"))
+
+    def is_account_disabled(self, account_num: str) -> bool:
+        """Whether a slot is currently held out of rotation."""
+        data = self._get_sequence_data() or {}
+        return self._disabled_from_data(data, str(account_num))
+
+    def disabled_account_numbers(self) -> list[str]:
+        """Managed slots the user has disabled, in sequence order."""
+        data = self._get_sequence_data() or {}
+        return [
+            str(num)
+            for num in data.get("sequence", [])
+            if self._disabled_from_data(data, str(num))
+        ]
+
+    def set_account_disabled(self, identifier: str, disabled: bool) -> None:
+        """Hold an account out of rotation (``disabled=True``) or return it.
+
+        Disabling only affects automatic selection — the auto-switch engine,
+        bare ``cswap switch`` rotation, and the ``best`` / ``next-available``
+        strategies all skip disabled slots. The account stays managed and is
+        still a valid explicit ``cswap switch <num|email>`` target, so you can
+        park an account without losing its stored login. Re-enabling restores
+        it to rotation in its original sequence position.
+
+        Raises:
+            ConfigError: no accounts are managed yet, or the email is ambiguous.
+            AccountNotFoundError: identifier doesn't match any account.
+        """
+        if not self.sequence_file.exists():
+            raise ConfigError("No accounts are managed yet")
+
+        # resolve_account migrates org fields and hard-errors on ambiguity.
+        account_num, email, _ = self.resolve_account(identifier)
+
+        data = self._get_sequence_data() or {}
+        record = data.get("accounts", {}).get(account_num)
+        if not record:
+            raise AccountNotFoundError(f"Account-{account_num} does not exist")
+
+        verb = "disabled" if disabled else "enabled"
+        if bool(record.get("disabled")) == disabled:
+            print(dimmed(f"Account-{account_num} ({email}) is already {verb}."))
+            return
+
+        if disabled:
+            record["disabled"] = True
+        else:
+            record.pop("disabled", None)
+        data["lastUpdated"] = get_timestamp()
+        self._write_json(self.sequence_file, data)
+        self._logger.info(f"{verb.capitalize()} account {account_num}: {email}")
+
+        print(f"{accent(verb.capitalize())} Account-{account_num} ({email}).")
+
+        if disabled:
+            active = data.get("activeAccountNumber")
+            if str(active) == account_num:
+                print(dimmed(
+                    "  It is the active account — it stays live until you switch "
+                    "away; it just won't be an automatic switch target."
+                ))
+            if not self.switchable_account_numbers():
+                warning(
+                    "  No accounts remain in rotation — auto-switch and bare "
+                    "switch have nothing to pick. Re-enable one with "
+                    "cswap enable <num|email>."
+                )
+        else:
+            print(dimmed("  It is back in the rotation."))
 
     def account_kind_for(self, account_num: str) -> str:
         """Public wrapper: ``"api_key"`` or ``"oauth"`` (setup-tokens read as oauth)."""
@@ -855,8 +1082,35 @@ class ClaudeAccountSwitcher:
         """Return display tag for an account's org context."""
         return org_name if org_name else "personal"
 
+    def _find_account_by_alias(self, alias: str) -> str | None:
+        """Return the account number whose alias matches (case-insensitive), if any.
+
+        An empty ``alias`` never matches: accounts without one store no
+        ``alias`` key, and comparing against an empty string would otherwise
+        match the first aliasless account.
+        """
+        if not alias:
+            return None
+        data = self._get_sequence_data()
+        if not data:
+            return None
+        alias_key = alias.lower()
+        for num, account in data.get("accounts", {}).items():
+            if (account.get("alias") or "").lower() == alias_key:
+                return str(num)
+        return None
+
+    def _alias_in_use(self, alias: str, *, exclude_num: str | None = None) -> str | None:
+        """Return the account number already using ``alias`` (other than ``exclude_num``), if any."""
+        num = self._find_account_by_alias(alias)
+        if num is not None and num == exclude_num:
+            return None
+        return num
+
     def _resolve_account_identifier(self, identifier: str) -> str | None:
-        """Resolve account identifier (number or email) to account number.
+        """Resolve account identifier (number, alias, or email) to account number.
+
+        Resolution precedence: number -> alias -> email.
 
         Raises:
             ConfigError: if the email matches multiple accounts (ambiguous).
@@ -867,6 +1121,10 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data()
         if not data:
             return None
+
+        alias_match = self._find_account_by_alias(identifier)
+        if alias_match is not None:
+            return alias_match
 
         matches = [
             num for num, account in data.get("accounts", {}).items()
@@ -974,15 +1232,17 @@ class ClaudeAccountSwitcher:
         org_uuid: str,
         slot: int | None,
         assume_yes: bool = False,
-    ) -> tuple[str, tuple[str, str] | None, str | None] | None:
+    ) -> tuple[str, tuple[str, str, str] | None, str | None] | None:
         """Resolve where a new/moved account should land.
 
         Returns ``(account_num, displace_slot, migrate_from)`` or ``None`` when
-        the user declines an overwrite prompt. No destructive work is done here.
-        ``assume_yes`` skips the occupied-slot overwrite prompt (callers with
-        their own confirmation UI, e.g. the TUI, confirm before calling).
+        the user declines an overwrite prompt. ``displace_slot`` carries
+        ``(num, email, org_uuid)`` so cleanup can prune directory mappings.
+        No destructive work is done here. ``assume_yes`` skips the
+        occupied-slot overwrite prompt (callers with their own confirmation
+        UI, e.g. the TUI, confirm before calling).
         """
-        displace_slot: tuple[str, str] | None = None
+        displace_slot: tuple[str, str, str] | None = None
         migrate_from: str | None = None
 
         if slot is None:
@@ -1029,23 +1289,28 @@ class ClaudeAccountSwitcher:
                     if answer not in ("y", "yes"):
                         print(dimmed("Cancelled"))
                         return None
-                displace_slot = (account_num, existing_email)
+                displace_slot = (
+                    account_num,
+                    existing_email,
+                    existing.get("organizationUuid", "") or "",
+                )
 
         return account_num, displace_slot, migrate_from
 
     def _apply_slot_displacement(
         self,
-        displace_slot: tuple[str, str] | None,
+        displace_slot: tuple[str, str, str] | None,
         migrate_from: str | None,
         slot: int | None,
     ) -> None:
         """Delete the slot(s) freed by an overwrite/move, in sequence.json."""
         if displace_slot:
-            d_num, d_email = displace_slot
+            d_num, d_email, d_org = displace_slot
             self._delete_account_files(d_num, d_email)
             self._sequence_store.save(
                 self._sequence_store.load_or_empty().remove_slot(d_num)
             )
+            self._prune_mappings(d_email, d_org)
 
         if migrate_from:
             data = self._sequence_store.load_or_empty()
@@ -1064,7 +1329,12 @@ class ClaudeAccountSwitcher:
         )
         self._sequence_store.save(data)
 
-    def add_account(self, slot: int | None = None, assume_yes: bool = False) -> None:
+    def add_account(
+        self,
+        slot: int | None = None,
+        assume_yes: bool = False,
+        alias: str | None = None,
+    ) -> None:
         """Add current account to managed accounts.
 
         Args:
@@ -1074,10 +1344,18 @@ class ClaudeAccountSwitcher:
                   is already occupied by a different account.
             assume_yes: Skip that overwrite prompt (callers with their own
                   confirmation UI, e.g. the TUI, confirm before calling).
+            alias: Optional short display alias to set on this account.
+                  When omitted, an existing alias on the slot is preserved.
         """
         self._setup_directories()
         self._init_sequence_file()
         self._migrate_org_fields()
+
+        if alias is not None:
+            try:
+                alias = normalize_alias(alias)
+            except ValueError as e:
+                raise ValidationError(str(e)) from e
 
         identity = self._get_current_account()
         if identity is None:
@@ -1086,6 +1364,19 @@ class ClaudeAccountSwitcher:
 
         # When no slot specified and account already exists, refresh credentials in place
         if slot is None and self._account_exists(current_email, current_org_uuid):
+            if alias is not None:
+                seq = self._get_sequence_data() or {}
+                conflict = self._alias_in_use(
+                    alias,
+                    exclude_num=self._find_account_slot(
+                        seq, current_email, current_org_uuid
+                    ),
+                )
+                if conflict is not None:
+                    raise ValidationError(
+                        f"Alias '{alias}' is already used by account {conflict}"
+                    )
+
             current_creds = self._read_credentials()
             if current_creds is None:
                 raise CredentialReadError("Failed to read credentials for current account")
@@ -1124,6 +1415,8 @@ class ClaudeAccountSwitcher:
                     assume_locked=True,
                 )
                 self._write_account_config(account_num, current_email, current_config)
+                if alias is not None:
+                    data.accounts[account_num].raw["alias"] = alias
                 self._sequence_store.save(data.set_active(int(account_num)))
             # A refreshed credential invalidates any dead-token quarantine on
             # this slot; otherwise the stale strike row keeps the account stuck
@@ -1131,6 +1424,7 @@ class ClaudeAccountSwitcher:
             self._usage_store.clear_dead_token(
                 [account_num], {account_num: (current_email, current_org_uuid)}
             )
+
 
             tag = self._get_display_tag(current_email, matched_org_name, current_org_uuid)
             self._logger.info(f"Updated credentials for account {account_num}: {current_email}")
@@ -1148,6 +1442,30 @@ class ClaudeAccountSwitcher:
         if resolved is None:
             return
         account_num, displace_slot, migrate_from = resolved
+        seq_raw = self._get_sequence_data() or {}
+
+        # Capture any alias to carry forward before destructive cleanup below
+        # deletes the old record (same account moving slots, or refreshing in place).
+        existing_alias = None
+        if slot is not None:
+            prior = seq_raw.get("accounts", {}).get(account_num) or {}
+            if (
+                prior.get("email") == current_email
+                and prior.get("organizationUuid", "") == current_org_uuid
+            ):
+                existing_alias = prior.get("alias")
+            if migrate_from:
+                existing_alias = (
+                    seq_raw["accounts"][migrate_from].get("alias")
+                    or existing_alias
+                )
+
+        if alias is not None:
+            conflict = self._alias_in_use(alias, exclude_num=account_num)
+            if conflict is not None:
+                raise ValidationError(
+                    f"Alias '{alias}' is already used by account {conflict}"
+                )
 
         # Read new account credentials BEFORE any destructive operations
         current_creds = self._read_credentials()
@@ -1189,17 +1507,18 @@ class ClaudeAccountSwitcher:
             )
             self._write_account_config(account_num, current_email, current_config)
 
-            # Update sequence.json
-            self._register_account_slot(
-                account_num,
-                AccountRecord.create(
-                    email=current_email,
-                    uuid=account_uuid,
-                    organization_uuid=organization_uuid,
-                    organization_name=organization_name,
-                ),
-                set_active=True,
+            # Update sequence.json (carrying any alias forward: an explicit
+            # --alias wins, else the alias the displaced/moved record held).
+            record = AccountRecord.create(
+                email=current_email,
+                uuid=account_uuid,
+                organization_uuid=organization_uuid,
+                organization_name=organization_name,
             )
+            carried_alias = alias if alias is not None else existing_alias
+            if carried_alias:
+                record.raw["alias"] = carried_alias
+            self._register_account_slot(account_num, record, set_active=True)
         # Registering a slot with a fresh credential lifts any dead-token
         # quarantine carried by that slot's prior lineage.
         self._usage_store.clear_dead_token(
@@ -1369,30 +1688,33 @@ class ClaudeAccountSwitcher:
 
         # Resolve identifier
         if not identifier.isdigit():
-            if not self._validate_email(identifier):
-                raise ValidationError(f"Invalid email format: {identifier}")
+            is_alias = self._find_account_by_alias(identifier) is not None
+            if not is_alias and not self._validate_email(identifier):
+                raise ValidationError(f"Invalid account identifier: {identifier}")
 
-            # For email identifiers, handle ambiguous matches interactively
-            data = self._get_sequence_data() or {}
-            matches = [
-                num for num, acc in data.get("accounts", {}).items()
-                if acc.get("email") == identifier
-            ]
-            if len(matches) > 1:
-                print(f"Multiple accounts found for '{identifier}':")
-                for num in matches:
-                    acc = data["accounts"][num]
-                    tag = self._get_display_tag(
-                        acc.get("email", ""),
-                        acc.get("organizationName", ""),
-                        acc.get("organizationUuid", ""),
-                    )
-                    print(f"  {num}: {identifier} {muted(f'[{tag}]')}")
-                choice = input("Enter account number to remove: ").strip()
-                if not choice.isdigit() or choice not in matches:
-                    print(dimmed("Cancelled"))
-                    return
-                identifier = choice
+            # For email identifiers, handle ambiguous matches interactively.
+            # Aliases are unique by construction, so they never hit this.
+            if not is_alias:
+                data = self._get_sequence_data() or {}
+                matches = [
+                    num for num, acc in data.get("accounts", {}).items()
+                    if acc.get("email") == identifier
+                ]
+                if len(matches) > 1:
+                    print(f"Multiple accounts found for '{identifier}':")
+                    for num in matches:
+                        acc = data["accounts"][num]
+                        tag = self._get_display_tag(
+                            acc.get("email", ""),
+                            acc.get("organizationName", ""),
+                            acc.get("organizationUuid", ""),
+                        )
+                        print(f"  {num}: {identifier} {muted(f'[{tag}]')}")
+                    choice = input("Enter account number to remove: ").strip()
+                    if not choice.isdigit() or choice not in matches:
+                        print(dimmed("Cancelled"))
+                        return
+                    identifier = choice
 
         account_num = self._resolve_account_identifier(identifier)
         if not account_num:
@@ -1440,6 +1762,7 @@ class ClaudeAccountSwitcher:
 
         self._logger.info(f"Removed account {account_num}: {email}")
         print(f"{accent('Removed')} Account-{account_num} ({email})")
+        self._prune_mappings(email, account_info.get("organizationUuid", ""))
 
     def _list_reporter(self) -> ListReporter:
         """Lazy singleton so per-run reporter state survives across calls.
@@ -1462,7 +1785,7 @@ class ClaudeAccountSwitcher:
         records: dict[str, FetchRecord],
         pre: dict[str, UsageEntry],
         post: dict[str, UsageEntry],
-        info_by_num: dict[str, tuple[int, str, str, str, bool, str]],
+        info_by_num: dict[str, tuple[int, str, str, str, bool, str, str]],
         identities: dict[str, tuple[str, str]],
     ) -> None:
         """Adapt and persist the cadence of every slot just fetched
@@ -1601,7 +1924,9 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data() or {}
         others = [
             str(n) for n in data.get("sequence", [])
-            if str(n) != str(current_num) and self._account_is_switchable(str(n))
+            if str(n) != str(current_num)
+            and self._account_is_switchable(str(n))
+            and not self._disabled_from_data(data, str(n))
         ]
         if not others:
             return None, "none"
@@ -1816,6 +2141,11 @@ class ClaudeAccountSwitcher:
         hit_limit = False
         for offset in range(1, len(sequence)):
             candidate = str(sequence[(current_index + offset) % len(sequence)])
+            if self._disabled_from_data(
+                self._get_sequence_data() or {}, candidate
+            ):
+                skip_notice(candidate, "disabled", "disabled")
+                continue
             if not self._account_is_switchable(candidate):
                 skip_notice(
                     candidate,
@@ -1867,14 +2197,16 @@ class ClaudeAccountSwitcher:
 
         # Resolve identifier
         if not identifier.isdigit():
-            if not self._validate_email(identifier):
-                raise ValidationError(f"Invalid email format: {identifier}")
+            is_alias = self._find_account_by_alias(identifier) is not None
+            if not is_alias and not self._validate_email(identifier):
+                raise ValidationError(f"Invalid account identifier: {identifier}")
 
             # For email identifiers, handle ambiguous matches interactively —
             # except in JSON mode, where we never prompt. There we fall through
             # to _resolve_account_identifier, which raises a ConfigError listing
             # the matching slots (+ org labels) → structured error envelope.
-            if not json_output:
+            # Aliases are unique by construction, so they never hit this.
+            if not json_output and not is_alias:
                 data = self._get_sequence_data() or {}
                 matches = [
                     num for num, acc in data.get("accounts", {}).items()

@@ -79,7 +79,7 @@ def usage_bar(
     stale: bool = False,
     threshold: float | None = None,
 ) -> Text:
-    """One full bar line: ``5h ━━━━╸────┃──  47%  resets 2h 13m``."""
+    """One full bar line: ``5h ━━━━╸────┃──  47%  resets 2h 13m · 20:39``."""
     text = Text()
     text.append(f"{label} ", style=MUTED)
     text.append(bar_cells(pct, width, stale=stale, threshold=threshold))
@@ -93,36 +93,59 @@ def usage_bar(
     return text
 
 
+def _reset_parts(
+    window: dict[str, Any], now: float
+) -> tuple[str | None, str | None]:
+    """Countdown suffix and its clock-extended variant for one window.
+
+    ``("resets 2h 13m", "resets 2h 13m · 20:39")`` — the second form is what
+    a row shows when it has the width for it. Equal when no clock is known.
+    """
+    reset = data.reset_text(window, now)
+    if not reset:
+        return None, None
+    clock = data.reset_clock(window, now)
+    return reset, f"{reset} · {clock}" if clock else reset
+
+
 def usage_rows(
     last_good: dict[str, Any] | None, now: float
-) -> list[tuple[str, float, str]]:
-    """(label, pct, suffix) rows mirroring the CLI's ``_format_usage_lines``.
+) -> list[tuple[str, float, str, str]]:
+    """(label, pct, suffix, suffix_full) rows mirroring the CLI's
+    ``_format_usage_lines``.
 
-    Only windows the account actually has produce a row — an annual plan
-    without a 7-day window simply has no 7d line. Order matches the CLI:
-    spend, 5h, 7d, then per-model scoped windows (e.g. "Fable"), the latter
-    marked ``(!)`` at/over their limit.
+    ``suffix_full`` extends the reset countdown with the absolute clock time
+    (``resets 2h 13m · 20:39``) for rows that have room; otherwise it equals
+    ``suffix``. Only windows the account actually has produce a row — an
+    annual plan without a 7-day window simply has no 7d line. Order matches
+    the CLI: spend, 5h, 7d, then per-model scoped windows (e.g. "Fable"),
+    the latter marked ``(!)`` at/over their limit.
     """
     if not isinstance(last_good, dict):
         return []
-    rows: list[tuple[str, float, str]] = []
+    rows: list[tuple[str, float, str, str]] = []
     spend = last_good.get("spend")
     if spend:
-        suffix_parts = [f"${spend['used']:,.2f} / ${spend['limit']:,.2f}"]
-        reset = data.reset_text(spend, now)
-        if reset:
-            suffix_parts.insert(0, reset)
-        rows.append(("$$", float(spend["pct"]), "  ".join(suffix_parts)))
+        amounts = f"${spend['used']:,.2f} / ${spend['limit']:,.2f}"
+        reset, reset_full = _reset_parts(spend, now)
+        suffix = f"{reset}  {amounts}" if reset else amounts
+        suffix_full = f"{reset_full}  {amounts}" if reset_full else amounts
+        rows.append(("$$", float(spend["pct"]), suffix, suffix_full))
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
         window = last_good.get(key)
         if window:
-            rows.append((label, float(window["pct"]), data.reset_text(window, now) or ""))
+            w_reset, w_reset_full = _reset_parts(window, now)
+            rows.append(
+                (label, float(window["pct"]), w_reset or "", w_reset_full or "")
+            )
     for window in last_good.get("scoped") or []:
         pct = float(window["pct"])
-        suffix = data.reset_text(window, now) or ""
+        s_reset, s_reset_full = _reset_parts(window, now)
+        suffix, suffix_full = s_reset or "", s_reset_full or ""
         if pct >= 100:
             suffix = f"{suffix}  (!)" if suffix else "(!)"
-        rows.append((window["name"], pct, suffix))
+            suffix_full = f"{suffix_full}  (!)" if suffix_full else "(!)"
+        rows.append((window["name"], pct, suffix, suffix_full))
     return rows
 
 
@@ -138,7 +161,11 @@ def account_card_text(
 
     text = Text()
     text.append(f"{acc.number:>2}  ", style=f"bold {FOREGROUND}")
-    text.append(acc.email, style=FOREGROUND)
+    if acc.alias:
+        text.append(acc.alias, style=f"bold {ACCENT}")
+        text.append(f" ({acc.email})", style=FOREGROUND)
+    else:
+        text.append(acc.email, style=FOREGROUND)
     text.append(f"  [{acc.display_tag}]", style=MUTED)
     if acc.is_active:
         text.append("   ● active", style=f"bold {ACCENT}")
@@ -171,9 +198,15 @@ def account_card_text(
         return text
 
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
-    label_width = max(len(label) for label, _pct, _suffix in rows)
+    label_width = max(len(label) for label, _pct, _suffix, _full in rows)
     bar_width = max(12, min(30, width - 42 - label_width))
-    for label, pct, suffix in rows:
+    # everything on a row except the suffix: indent, label, bar, " NNN%", gap
+    row_overhead = 4 + label_width + 1 + bar_width + 5 + 2
+    for label, pct, suffix, suffix_full in rows:
+        # per-row: show the absolute clock only where it fits, so a long
+        # spend row degrading doesn't cost the 5h/7d rows their clocks
+        if suffix_full != suffix and row_overhead + len(suffix_full) <= width:
+            suffix = suffix_full
         text.append("\n    ")
         text.append(
             usage_bar(
@@ -198,7 +231,11 @@ def mini_account_text(acc: AccountSnapshot, now: float) -> Text:
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{acc.number:>2}  ", style=f"bold {MUTED}")
-    text.append(acc.email, style=FOREGROUND)
+    if acc.alias:
+        text.append(acc.alias, style=f"bold {ACCENT}")
+        text.append(f" ({acc.email})", style=FOREGROUND)
+    else:
+        text.append(acc.email, style=FOREGROUND)
     text.append(f"  [{acc.display_tag}]", style=MUTED)
     text.append("   ")
 

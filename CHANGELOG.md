@@ -2,11 +2,21 @@
 
 All notable user-facing changes to claude-swap are documented here.
 
-Release version is defined in `pyproject.toml` (currently `0.20.0+haotool.1`).
+Release version is defined in `pyproject.toml` (currently `0.21.0b1+haotool.1`).
 
 ## [Unreleased]
 
 ### Added
+
+- **Upstream 0.21.0b1 merged** (upstream `1e2515a`): directory→account
+  mappings (`cswap map`/`unmap`, mapping-aware `cswap run` — upstream #71),
+  per-account aliases (`cswap alias`, `add --alias`, alias accepted anywhere
+  a number/email is — upstream #129), `cswap disable`/`enable` to hold slots
+  out of auto rotation (upstream #130), menubar per-model weekly limits
+  (upstream #126), TUI session-only threshold adjustment and absolute reset
+  clocks on usage rows. Fork seams updated: accounts-info rows carry the
+  alias, `list`/`status` JSON add additive `alias`/`disabled` fields, and
+  rotation skips disabled slots via the shared `skip_notice` path.
 
 - **Upstream v0.20.0 merged** (adaptive per-token `/usage` polling — upstream
   `245f5ba`/`9be9cba`): poll cadence, reset math, and the serve TTL move to

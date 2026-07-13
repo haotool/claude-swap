@@ -369,13 +369,13 @@ class ListReporter:
 
     def collect_accounts_info(
         self, data: dict[str, Any], active_num: str | None,
-    ) -> tuple[list[tuple[int, str, str, str, bool, str]], dict[str, list[str]]]:
+    ) -> tuple[list[tuple[int, str, str, str, bool, str, str]], dict[str, list[str]]]:
         """Build per-account rows, syncing the live account and refreshing
         inactive backups. Returns (accounts_info, health_notes)."""
         accounts_info = self.build_accounts_info(data, active_num)
         health_notes: dict[str, list[str]] = {}
-        updated: list[tuple[int, str, str, str, bool, str]] = []
-        for num, email, org_name, org_uuid, is_active, creds in accounts_info:
+        updated: list[tuple[int, str, str, str, bool, str, str]] = []
+        for num, email, org_name, org_uuid, is_active, creds, alias in accounts_info:
             if is_active:
                 # A degraded active read (Keychain failed, a leftover file
                 # covered it) may belong to another account; syncing it would
@@ -395,14 +395,16 @@ class ListReporter:
                 )
                 if refresh_note:
                     health_notes.setdefault(str(num), []).append(refresh_note)
-            updated.append((num, email, org_name, org_uuid, is_active, creds))
+            updated.append(
+                (num, email, org_name, org_uuid, is_active, creds, alias)
+            )
         return updated, health_notes
 
     def build_accounts_info(
         self,
         data: dict[str, Any] | None = None,
         active_num: str | None = None,
-    ) -> list[tuple[int, str, str, str, bool, str]]:
+    ) -> list[tuple[int, str, str, str, bool, str, str]]:
         """Build per-account (num, email, org_name, org_uuid, is_active, creds)."""
         if data is None:
             data = self._host._get_sequence_data_migrated() or {}
@@ -414,7 +416,7 @@ class ListReporter:
                     data, current_email, current_org_uuid,
                 )
 
-        accounts_info: list[tuple[int, str, str, str, bool, str]] = []
+        accounts_info: list[tuple[int, str, str, str, bool, str, str]] = []
         self._active_keychain_unavailable = False
         self._active_degraded = False
         for num in data.get("sequence", []):
@@ -422,6 +424,7 @@ class ListReporter:
             email = account.get("email", "unknown")
             org_name = account.get("organizationName", "") or ""
             org_uuid = account.get("organizationUuid", "") or ""
+            alias = account.get("alias", "") or ""
             is_active = str(num) == active_num
 
             if is_active:
@@ -438,18 +441,20 @@ class ListReporter:
                 if recovered is not None:
                     creds = recovered
 
-            accounts_info.append((num, email, org_name, org_uuid, is_active, creds))
+            accounts_info.append(
+                (num, email, org_name, org_uuid, is_active, creds, alias)
+            )
         return accounts_info
 
     def _static_usage_sentinel(
-        self, account_info: tuple[int, str, str, str, bool, str],
+        self, account_info: tuple[int, str, str, str, bool, str, str],
     ) -> str | None:
         """Sentinel state derivable without any network call, or ``None``.
 
         Re-derived on every collect pass (never persisted), so it can't
         outlive the condition that produced it.
         """
-        num, email, _, _, is_active, creds = account_info
+        num, email, _, _, is_active, creds, _ = account_info
         if looks_like_api_key(creds):
             # Managed API-key account: no subscription quota to fetch.
             return USAGE_API_KEY
@@ -477,12 +482,12 @@ class ListReporter:
         return None
 
     def _run_usage_fetches(
-        self, infos: list[tuple[int, str, str, str, bool, str]],
+        self, infos: list[tuple[int, str, str, str, bool, str, str]],
     ) -> dict[str, FetchRecord]:
         """Fetch the given accounts in parallel, staggering request starts so
         N accounts never hit the endpoint in the same instant."""
         def fetch_one(
-            idx_info: tuple[int, tuple[int, str, str, str, bool, str]],
+            idx_info: tuple[int, tuple[int, str, str, str, bool, str, str]],
         ) -> tuple[str, FetchRecord]:
             idx, info = idx_info
             if idx and _FETCH_STAGGER_S:
@@ -494,7 +499,7 @@ class ListReporter:
 
     def collect_usage_entries(
         self,
-        accounts_info: list[tuple[int, str, str, str, bool, str]],
+        accounts_info: list[tuple[int, str, str, str, bool, str, str]],
         fetch: set[str] | None = None,
     ) -> dict[str, UsageEntry]:
         """Store-backed usage collection: one :class:`UsageEntry` per account.
@@ -515,7 +520,7 @@ class ListReporter:
         store = self._host._usage_store
         identities = {
             str(num): (email, org_uuid or "")
-            for num, email, _org_name, org_uuid, _active, _creds in accounts_info
+            for num, email, _org_name, org_uuid, _active, _creds, _alias in accounts_info
         }
         info_by_num = {str(info[0]): info for info in accounts_info}
         sentinels: dict[str, str] = {}
@@ -567,16 +572,16 @@ class ListReporter:
         }
 
     def resolve_usages(
-        self, accounts_info: list[tuple[int, str, str, str, bool, str]],
+        self, accounts_info: list[tuple[int, str, str, str, bool, str, str]],
     ) -> dict[str, UsageEntry]:
         """Store-backed entries for every row (every stale account eligible)."""
         return self.collect_usage_entries(accounts_info)
 
     def fetch_account_usage(
-        self, account_info: tuple[int, str, str, str, bool, str],
+        self, account_info: tuple[int, str, str, str, bool, str, str],
     ) -> FetchRecord:
         """One network fetch for one account. Never raises."""
-        num, email, _, org_uuid, is_active, creds = account_info
+        num, email, _, org_uuid, is_active, creds, _ = account_info
         if is_active:
             return self.fetch_active_usage(
                 str(num), email, creds, degraded=self._active_degraded,
@@ -862,15 +867,21 @@ class ListReporter:
         creds = active.value or ""
         self._active_keychain_unavailable = active.keychain_unavailable
         self._active_degraded = active.degraded
-        info = (int(account_num), current_email, "", org_uuid or "", True, creds)
+        info = (
+            int(account_num), current_email, "", org_uuid or "", True, creds, ""
+        )
         return self.collect_usage_entries([info])[str(account_num)]
 
     def build_list_payload(
         self,
-        accounts_info: list[tuple[int, str, str, str, bool, str]],
+        accounts_info: list[tuple[int, str, str, str, bool, str, str]],
         entries: dict[str, UsageEntry],
     ) -> dict[str, Any]:
-        payload = list_payload(accounts_info, entries)
+        payload = list_payload(
+            accounts_info,
+            entries,
+            disabled=frozenset(self._host.disabled_account_numbers()),
+        )
         # Additive fields (absent when clean) — never printed warnings; the
         # JSON contract keeps stdout a single machine-readable object.
         dup_warnings = self.duplicate_account_warnings(accounts_info)
@@ -885,7 +896,7 @@ class ListReporter:
         return payload
 
     def duplicate_account_warnings(
-        self, accounts_info: list[tuple[int, str, str, str, bool, str]]
+        self, accounts_info: list[tuple[int, str, str, str, bool, str, str]]
     ) -> list[str]:
         """Slots that provably authenticate as the same account.
 
@@ -909,7 +920,7 @@ class ListReporter:
         by_fp: dict[str, str] = {}
         by_identity: dict[tuple[str, str], str] = {}
         out: list[str] = []
-        for num, email, _org_name, org_uuid, _is_active, creds in accounts_info:
+        for num, email, _org_name, org_uuid, _is_active, creds, _alias in accounts_info:
             snum = str(num)
             fp = oauth.credential_fingerprint(creds) if creds else None
             if fp:
@@ -938,7 +949,7 @@ class ListReporter:
 
     def lockstep_usage_warnings(
         self,
-        accounts_info: list[tuple[int, str, str, str, bool, str]],
+        accounts_info: list[tuple[int, str, str, str, bool, str, str]],
         entries: dict[str, UsageEntry],
     ) -> list[str]:
         """Heuristic: slots whose usage moves in perfect lockstep.
@@ -962,7 +973,7 @@ class ListReporter:
         """
         seen: dict[tuple[Any, ...], str] = {}
         out: list[str] = []
-        for num, _email, _org_name, _org_uuid, _is_active, _creds in accounts_info:
+        for num, _email, _org_name, _org_uuid, _is_active, _creds, _alias in accounts_info:
             snum = str(num)
             entry = entries.get(snum)
             usage = entry.decision_value() if entry else None
@@ -1032,7 +1043,7 @@ class ListReporter:
 
     def print_account_rows(
         self,
-        accounts_info: list[tuple[int, str, str, str, bool, str]],
+        accounts_info: list[tuple[int, str, str, str, bool, str, str]],
         entries: dict[str, UsageEntry],
         health_notes: dict[str, list[str]],
         *,
@@ -1040,20 +1051,19 @@ class ListReporter:
         show_token_status: bool,
     ) -> None:
         """Render the per-account usage/health/token block."""
+        seq_data = self._host._get_sequence_data() or {}
         print(bolded("Accounts:"))
-        for i, (num, email, org_name, org_uuid, is_active, _) in enumerate(
+        for i, (num, email, org_name, org_uuid, is_active, _, alias) in enumerate(
             accounts_info,
         ):
             tag = self._host._get_display_tag(email, org_name, org_uuid)
-            # NOTE: the TUI watch view (tui._watch_account_rows) parses this
-            # output to map rows to accounts for quick-switch: it relies on the
-            # uncolored ``  {num}: `` prefix and the ``(active)`` marker below.
-            # Keep them intact when tweaking this line, or update that parser.
+            label = f"{accent(alias)} ({email})" if alias else email
+            markers = ""
             if is_active:
-                marker = f" {bold_accent('(active)')}"
-                print(f"  {num}: {email} {muted(f'[{tag}]')}{marker}")
-            else:
-                print(f"  {num}: {email} {muted(f'[{tag}]')}")
+                markers += f" {bold_accent('(active)')}"
+            if self._host._disabled_from_data(seq_data, str(num)):
+                markers += f" {muted('(disabled)')}"
+            print(f"  {num}: {label} {muted(f'[{tag}]')}{markers}")
             entry = entries[str(num)]
             for line in _usage_entry_lines(entry):
                 print(f"     {line}")

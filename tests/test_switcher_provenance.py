@@ -692,8 +692,8 @@ class TestDuplicateAccountDetection:
             "accessToken": "sk", "refreshToken": "rt-shared",
         }})
         info = [
-            (1, "account1@example.com", "", "", True, same),
-            (2, "account2@example.com", "", "", False, same),
+            (1, "account1@example.com", "", "", True, same, ""),
+            (2, "account2@example.com", "", "", False, same, ""),
         ]
         warnings = ListReporter(switcher).duplicate_account_warnings(info)
         assert len(warnings) == 1
@@ -705,8 +705,8 @@ class TestDuplicateAccountDetection:
         sample_sequence_data["accounts"]["2"]["uuid"] = "uuid-1"
         switcher = self._switcher(temp_home, sample_sequence_data)
         info = [
-            (1, "account1@example.com", "", "", True, "creds-a"),
-            (2, "account2@example.com", "", "", False, "creds-b"),
+            (1, "account1@example.com", "", "", True, "creds-a", ""),
+            (2, "account2@example.com", "", "", False, "creds-b", ""),
         ]
         warnings = ListReporter(switcher).duplicate_account_warnings(info)
         assert len(warnings) == 1
@@ -720,8 +720,8 @@ class TestDuplicateAccountDetection:
         sample_sequence_data["accounts"]["2"]["uuid"] = ""
         switcher = self._switcher(temp_home, sample_sequence_data)
         info = [
-            (1, "setup-token-1@token.local", "", "", True, "creds-a"),
-            (2, "setup-token-2@token.local", "", "", False, "creds-b"),
+            (1, "setup-token-1@token.local", "", "", True, "creds-a", ""),
+            (2, "setup-token-2@token.local", "", "", False, "creds-b", ""),
         ]
         assert ListReporter(switcher).duplicate_account_warnings(info) == []
 
@@ -731,9 +731,9 @@ class TestDuplicateAccountDetection:
         switcher = self._switcher(temp_home, sample_sequence_data)
         info = [
             (1, "account1@example.com", "", "", True,
-             json.dumps({"claudeAiOauth": {"refreshToken": "rt-1"}})),
+             json.dumps({"claudeAiOauth": {"refreshToken": "rt-1"}}), ""),
             (2, "account2@example.com", "", "", False,
-             json.dumps({"claudeAiOauth": {"refreshToken": "rt-2"}})),
+             json.dumps({"claudeAiOauth": {"refreshToken": "rt-2"}}), ""),
         ]
         assert ListReporter(switcher).duplicate_account_warnings(info) == []
 
@@ -752,7 +752,7 @@ class TestLockstepUsageDetection:
     @staticmethod
     def _info(n=2):
         return [
-            (i, f"account{i}@example.com", "", "", i == 1, f"creds-{i}")
+            (i, f"account{i}@example.com", "", "", i == 1, f"creds-{i}", "")
             for i in range(1, n + 1)
         ]
 

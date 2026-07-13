@@ -293,15 +293,17 @@ def format_reset(resets_at: str) -> tuple[str, str]:
     else:
         countdown = f"{minutes}m"
 
-    reset_local = reset_utc.astimezone()
-    now_local = now.astimezone()
-    if reset_local.date() == now_local.date():
-        time_str = reset_local.strftime("%H:%M")
-    else:
-        day = str(reset_local.day)
-        time_str = reset_local.strftime(f"%b {day} %H:%M")
+    return countdown, reset_clock_string(reset_utc, now)
 
-    return countdown, time_str
+
+def reset_clock_string(reset_utc: datetime, now_utc: datetime) -> str:
+    """Absolute reset time in local time: "20:39" same-day, else "Jul 5 08:59"."""
+    reset_local = reset_utc.astimezone()
+    now_local = now_utc.astimezone()
+    if reset_local.date() == now_local.date():
+        return reset_local.strftime("%H:%M")
+    day = str(reset_local.day)
+    return reset_local.strftime(f"%b {day} %H:%M")
 
 
 def fresh_reset_strings(window: dict[str, Any]) -> tuple[str, str] | None:

@@ -23,7 +23,7 @@ from claude_swap.exceptions import (
     TransferError,
 )
 from claude_swap.locking import FileLock
-from claude_swap.models import Platform, get_timestamp
+from claude_swap.models import Platform, get_timestamp, normalize_alias
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
@@ -84,12 +84,19 @@ def _validate_imported_account(
     # Org/uuid/added must be strings (or absent). A list/dict here would
     # otherwise blow up downstream (unhashable in seen_keys, broken composite
     # key matching, garbage in sequence.json).
-    for field in ("organizationUuid", "organizationName", "uuid", "added"):
+    for field in ("organizationUuid", "organizationName", "uuid", "added", "alias"):
         if field in account and account[field] is not None:
             if not isinstance(account[field], str):
                 raise TransferError(
                     f"{field} for {email} must be a string, got {type(account[field]).__name__}"
                 )
+
+    alias = account.get("alias")
+    if isinstance(alias, str):
+        try:
+            normalize_alias(alias)
+        except ValueError as e:
+            raise TransferError(f"invalid alias for {email}: {e}") from e
 
     return email, str(raw_number)
 
@@ -381,6 +388,8 @@ def export_accounts(
         }
         if is_api_key:
             entry["kind"] = "api_key"
+        if record.get("alias"):
+            entry["alias"] = record["alias"]
         accounts_payload.append(entry)
 
     if not accounts_payload:
@@ -471,8 +480,17 @@ def _normalize_import_accounts(
 ) -> list[dict[str, Any]]:
     # Pass 1: validate every account before any writes. A malformed account
     # later in the list must not leave earlier accounts half-imported.
+    local_data = switcher._get_sequence_data_migrated() or {}
+    local_aliases: dict[str, tuple[str, str]] = {
+        (acc.get("alias") or "").lower(): (
+            acc.get("email", ""), acc.get("organizationUuid", "") or "",
+        )
+        for acc in local_data.get("accounts", {}).values()
+        if acc.get("alias")
+    }
     normalized: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str]] = set()
+    seen_aliases: set[str] = set()
     for raw in accounts:
         email, exported_num = _validate_imported_account(switcher, raw)
         org_uuid = raw.get("organizationUuid", "") or ""
@@ -503,6 +521,23 @@ def _normalize_import_accounts(
                 f"duplicate account in export: {email} (org={org_uuid or 'personal'})"
             )
         seen_keys.add(key)
+
+        alias = raw.get("alias") or None
+        if alias:
+            alias_key = normalize_alias(alias)  # already validated in pass-1 above
+            if alias_key in seen_aliases:
+                raise TransferError(f"duplicate alias in export: {alias_key}")
+            seen_aliases.add(alias_key)
+            owner = local_aliases.get(alias_key)
+            if owner is not None and owner != (email, org_uuid):
+                _eprint(
+                    f"Warning: alias '{alias_key}' for {email} already used by an "
+                    "existing account, dropping the imported alias"
+                )
+                alias = None
+            else:
+                alias = alias_key
+
         normalized.append(
             {
                 "email": email,
@@ -512,6 +547,7 @@ def _normalize_import_accounts(
                 "uuid": raw.get("uuid", "") or "",
                 "added": raw.get("added") or get_timestamp(),
                 "kind": "api_key" if is_api_key else "oauth",
+                "alias": alias,
                 "creds_text": creds_text,
                 "config_text": json.dumps(config_obj, indent=2),
             }
@@ -644,6 +680,8 @@ def _import_one_entry(
         }
         if entry["kind"] == "api_key":
             new_record["kind"] = "api_key"
+        if entry.get("alias"):
+            new_record["alias"] = entry["alias"]
         data["accounts"][target_num] = new_record
         if int(target_num) not in data["sequence"]:
             data["sequence"].append(int(target_num))

@@ -10,12 +10,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from claude_swap import __version__
 from claude_swap import cli
+from claude_swap.switcher import ClaudeAccountSwitcher
 
 # src layout: ensure subprocess can find claude_swap
 _SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
@@ -709,13 +710,6 @@ class TestRunCommand:
         calls = self._dispatch(["run", "2", "--", "--no-share"])
         assert ("run", "2", ["--no-share"], True, False) in calls
 
-    def test_run_without_account_errors(self, capsys):
-        with patch.object(sys, "argv", ["claude-swap", "run"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-        assert excinfo.value.code == 2
-        assert "NUM|EMAIL" in capsys.readouterr().err
-
     def test_run_unknown_flag_errors(self, capsys):
         with patch.object(sys, "argv", ["claude-swap", "run", "2", "--bogus"]):
             with pytest.raises(SystemExit) as excinfo:
@@ -739,6 +733,15 @@ class TestRunCommand:
             env=_subprocess_env(),
         )
         assert "run 2" in result.stdout
+
+    def test_main_help_mentions_alias(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "claude_swap", "--help"],
+            capture_output=True,
+            text=True,
+            env=_subprocess_env(),
+        )
+        assert "alias <num|email>" in result.stdout
 
     def test_session_error_exits_cleanly(self, capsys):
         class FailingSessionManager:
@@ -1141,3 +1144,505 @@ class TestAutoCommand:
                 cli.main()
         assert excinfo.value.code == 1
         assert "nope" in capsys.readouterr().err  # printer.error -> stderr
+
+
+class TestMapCommand:
+    """`cswap map` / `cswap unmap` directory-mapping commands."""
+
+    def _seeded_switcher_env(self, temp_home):
+        """Build a real switcher with one managed account (slot 2)."""
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._init_sequence_file()
+        data = switcher._get_sequence_data()
+        data["accounts"]["2"] = {
+            "email": "work@co.com",
+            "uuid": "u2",
+            "organizationUuid": "",
+            "organizationName": "",
+            "added": "2024-01-01T00:00:00Z",
+        }
+        data["sequence"] = [2]
+        switcher._write_json(switcher.sequence_file, data)
+        return switcher
+
+    def test_map_account_to_path(self, temp_home, capsys):
+        from claude_swap.mappings import MappingStore
+        self._seeded_switcher_env(temp_home)
+        target = temp_home / "proj"
+        target.mkdir()
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._map_command(["2", str(target)])
+
+        store = MappingStore(ClaudeAccountSwitcher().backup_dir)
+        entry = store.get(target)
+        assert entry is not None
+        assert entry["email"] == "work@co.com"
+        assert "Mapped" in capsys.readouterr().out
+
+    def test_map_nonexistent_path_warns_but_maps(self, temp_home, capsys):
+        from claude_swap.mappings import MappingStore
+        self._seeded_switcher_env(temp_home)
+        target = temp_home / "not-created-yet"
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._map_command(["2", str(target)])
+
+        assert MappingStore(ClaudeAccountSwitcher().backup_dir).get(target) is not None
+        assert "is not an existing directory" in capsys.readouterr().out
+
+    def test_map_by_email_defaults_to_cwd(self, temp_home, monkeypatch, capsys):
+        from claude_swap.mappings import MappingStore
+        self._seeded_switcher_env(temp_home)
+        cwd = temp_home / "here"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._map_command(["work@co.com"])
+
+        store = MappingStore(ClaudeAccountSwitcher().backup_dir)
+        assert store.get(cwd) is not None
+
+    def test_map_unknown_account_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit) as exc:
+                cli._map_command(["999", str(temp_home)])
+        assert exc.value.code == 1
+        assert "Error" in capsys.readouterr().err
+
+    def test_map_list_empty(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._map_command([])
+        assert "No directory mappings yet" in capsys.readouterr().out
+
+    def test_map_list_shows_entries(self, temp_home, capsys):
+        from claude_swap.mappings import MappingStore
+        switcher = self._seeded_switcher_env(temp_home)
+        target = temp_home / "proj"
+        target.mkdir()
+        MappingStore(switcher.backup_dir).set(target, "work@co.com", "")
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._map_command([])
+
+        out = capsys.readouterr().out
+        assert "Directory mappings" in out
+        assert "work@co.com" in out
+        assert "2:" in out  # slot number resolved
+
+    def test_map_list_flags_removed_account(self, temp_home, capsys):
+        from claude_swap.mappings import MappingStore
+        switcher = self._seeded_switcher_env(temp_home)
+        target = temp_home / "proj"
+        target.mkdir()
+        # Map an account identity that is not in the sequence.
+        MappingStore(switcher.backup_dir).set(target, "ghost@co.com", "")
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._map_command([])
+
+        assert "account removed" in capsys.readouterr().out
+
+    def test_unmap_removes(self, temp_home, capsys):
+        from claude_swap.mappings import MappingStore
+        switcher = self._seeded_switcher_env(temp_home)
+        target = temp_home / "proj"
+        target.mkdir()
+        store = MappingStore(switcher.backup_dir)
+        store.set(target, "work@co.com", "")
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._unmap_command([str(target)])
+
+        assert store.get(target) is None
+        assert "Unmapped" in capsys.readouterr().out
+
+    def test_unmap_nonexistent_notes(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        target = temp_home / "proj"
+        target.mkdir()
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._unmap_command([str(target)])
+        assert "No mapping for" in capsys.readouterr().out
+
+    def test_map_dispatched_from_main(self, temp_home):
+        """`cswap map` routes through main() to _map_command."""
+        with patch("claude_swap.cli._map_command") as map_fn, \
+             patch.object(sys, "argv", ["claude-swap", "map", "2", "/tmp/x"]):
+            cli.main()
+        map_fn.assert_called_once_with(["2", "/tmp/x"])
+
+    def test_unmap_dispatched_from_main(self, temp_home):
+        with patch("claude_swap.cli._unmap_command") as unmap_fn, \
+             patch.object(sys, "argv", ["claude-swap", "unmap", "/tmp/x"]):
+            cli.main()
+        unmap_fn.assert_called_once_with(["/tmp/x"])
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="root guard is POSIX-only")
+    def test_unmap_refuses_root(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=0, create=True), \
+             patch.object(ClaudeAccountSwitcher, "_is_running_in_container", return_value=False):
+            with pytest.raises(SystemExit) as exc:
+                cli._unmap_command([str(temp_home)])
+        assert exc.value.code == 1
+        assert "root" in capsys.readouterr().err
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="root guard is POSIX-only")
+    def test_map_refuses_root(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=0, create=True), \
+             patch.object(ClaudeAccountSwitcher, "_is_running_in_container", return_value=False):
+            with pytest.raises(SystemExit) as exc:
+                cli._map_command(["2", str(temp_home)])
+        assert exc.value.code == 1
+        assert "root" in capsys.readouterr().err
+
+
+class TestAliasCommand:
+    """`cswap alias` — set/unset/list a short display alias for an account."""
+
+    def _seeded_switcher_env(self, temp_home):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._init_sequence_file()
+        data = switcher._get_sequence_data()
+        data["accounts"]["2"] = {
+            "email": "work@co.com",
+            "uuid": "u2",
+            "organizationUuid": "",
+            "organizationName": "",
+            "added": "2024-01-01T00:00:00Z",
+        }
+        data["sequence"] = [2]
+        switcher._write_json(switcher.sequence_file, data)
+        return switcher
+
+    def test_set_alias_by_number(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._alias_command(["2", "dev"])
+
+        data = ClaudeAccountSwitcher()._get_sequence_data()
+        assert data["accounts"]["2"]["alias"] == "dev"
+        assert "dev" in capsys.readouterr().out
+
+    def test_set_alias_by_email(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._alias_command(["work@co.com", "dev"])
+
+        data = ClaudeAccountSwitcher()._get_sequence_data()
+        assert data["accounts"]["2"]["alias"] == "dev"
+
+    def test_unset_alias(self, temp_home, capsys):
+        switcher = self._seeded_switcher_env(temp_home)
+        data = switcher._get_sequence_data()
+        data["accounts"]["2"]["alias"] = "dev"
+        switcher._write_json(switcher.sequence_file, data)
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._alias_command(["2", "--unset"])
+
+        data = ClaudeAccountSwitcher()._get_sequence_data()
+        assert "alias" not in data["accounts"]["2"]
+
+    def test_list_aliases(self, temp_home, capsys):
+        switcher = self._seeded_switcher_env(temp_home)
+        data = switcher._get_sequence_data()
+        data["accounts"]["2"]["alias"] = "dev"
+        switcher._write_json(switcher.sequence_file, data)
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._alias_command([])
+
+        out = capsys.readouterr().out
+        assert "dev" in out
+
+    def test_missing_name_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit):
+                cli._alias_command(["2"])
+
+    def test_unset_without_account_errors(self, temp_home, capsys):
+        """`cswap alias --unset` with no target must error, not silently list."""
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit):
+                cli._alias_command(["--unset"])
+
+    def test_unset_with_name_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit):
+                cli._alias_command(["2", "dev", "--unset"])
+
+    def test_invalid_alias_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit) as exc:
+                cli._alias_command(["2", "123"])
+        assert exc.value.code == 1
+        assert "Error" in capsys.readouterr().err
+
+    def test_unknown_account_errors(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            with pytest.raises(SystemExit) as exc:
+                cli._alias_command(["999", "dev"])
+        assert exc.value.code == 1
+
+    def test_dispatched_from_main(self, temp_home):
+        with patch("claude_swap.cli._alias_command") as alias_fn, \
+             patch.object(sys, "argv", ["claude-swap", "alias", "2", "dev"]):
+            cli.main()
+        alias_fn.assert_called_once_with(["2", "dev"])
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="root guard is POSIX-only")
+    def test_alias_refuses_root(self, temp_home, capsys):
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=0, create=True), \
+             patch.object(ClaudeAccountSwitcher, "_is_running_in_container", return_value=False):
+            with pytest.raises(SystemExit) as exc:
+                cli._alias_command(["2", "dev"])
+        assert exc.value.code == 1
+        assert "root" in capsys.readouterr().err
+
+    def test_add_with_alias_flag(self, temp_home, mock_claude_config, capsys):
+        fake_creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        with patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(ClaudeAccountSwitcher, "_read_credentials", return_value=fake_creds), \
+             patch.object(
+                 ClaudeAccountSwitcher,
+                 "_write_verified_live_account_credentials",
+                 return_value=fake_creds,
+             ), \
+             patch.object(sys, "argv", ["claude-swap", "add", "--alias", "dev"]):
+            cli.main()
+
+        data = ClaudeAccountSwitcher()._get_sequence_data()
+        assert data["accounts"]["1"]["alias"] == "dev"
+
+    def test_alias_flag_without_add_errors(self, temp_home, capsys):
+        with patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "list", "--alias", "dev"]):
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+        assert exc.value.code == 2
+        assert "--alias can only be used with 'add'" in capsys.readouterr().err
+
+
+class TestRunAutoResolve:
+    """`cswap run` with no account resolves the cwd's directory mapping."""
+
+    def _fake_manager(self, calls):
+        class FakeSessionManager:
+            def __init__(self, switcher):
+                pass
+
+            def run(self, identifier, claude_args, share=True, share_history=False):
+                calls.append(("run", identifier, claude_args, share, share_history))
+
+            def exec_default(self, claude_args):
+                calls.append(("exec_default", claude_args))
+
+        return FakeSessionManager
+
+    def _fake_switcher(self, backup, seq):
+        sw = MagicMock()
+        sw.backup_dir = backup
+        sw._get_sequence_data_migrated.return_value = seq
+        # Use the real resolvers, not MagicMock auto-attrs.
+        sw._find_account_slot = ClaudeAccountSwitcher._find_account_slot
+        sw.slot_for_directory = (
+            lambda d: ClaudeAccountSwitcher.slot_for_directory(sw, d)
+        )
+        return sw
+
+    def test_mapped_dir_runs_resolved_account(self, tmp_path, monkeypatch):
+        from claude_swap.mappings import MappingStore
+
+        repo = tmp_path / "work" / "client-app"
+        repo.mkdir(parents=True)
+        backup = tmp_path / "backup"
+        backup.mkdir()
+        MappingStore(backup).set(repo, "work@co.com", "org-1")
+        seq = {
+            "accounts": {
+                "2": {
+                    "email": "work@co.com",
+                    "organizationUuid": "org-1",
+                    "organizationName": "Co",
+                }
+            },
+            "sequence": [2],
+        }
+        calls = []
+        monkeypatch.chdir(repo)
+        with patch("claude_swap.session.SessionManager", self._fake_manager(calls)), \
+             patch("claude_swap.cli.ClaudeAccountSwitcher",
+                   return_value=self._fake_switcher(backup, seq)), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "run"]):
+            cli.main()
+        assert ("run", "2", [], True, False) in calls
+
+    def test_mapped_subdir_inherits(self, tmp_path, monkeypatch):
+        from claude_swap.mappings import MappingStore
+
+        repo = tmp_path / "work"
+        sub = repo / "client" / "src"
+        sub.mkdir(parents=True)
+        backup = tmp_path / "backup"
+        backup.mkdir()
+        MappingStore(backup).set(repo, "work@co.com", "")
+        seq = {
+            "accounts": {"2": {"email": "work@co.com", "organizationUuid": "",
+                                "organizationName": ""}},
+            "sequence": [2],
+        }
+        calls = []
+        monkeypatch.chdir(sub)
+        with patch("claude_swap.session.SessionManager", self._fake_manager(calls)), \
+             patch("claude_swap.cli.ClaudeAccountSwitcher",
+                   return_value=self._fake_switcher(backup, seq)), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "run"]):
+            cli.main()
+        assert ("run", "2", [], True, False) in calls
+
+    def test_unmapped_dir_falls_back_to_default(self, tmp_path, monkeypatch, capsys):
+        backup = tmp_path / "backup"
+        backup.mkdir()
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        calls = []
+        monkeypatch.chdir(scratch)
+        with patch("claude_swap.session.SessionManager", self._fake_manager(calls)), \
+             patch("claude_swap.cli.ClaudeAccountSwitcher",
+                   return_value=self._fake_switcher(backup, {"accounts": {}, "sequence": []})), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "run"]):
+            cli.main()
+        assert ("exec_default", []) in calls
+        assert "No account mapped" in capsys.readouterr().out
+
+    def test_removed_account_falls_back_with_warning(self, tmp_path, monkeypatch, capsys):
+        from claude_swap.mappings import MappingStore
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        backup = tmp_path / "backup"
+        backup.mkdir()
+        MappingStore(backup).set(repo, "ghost@co.com", "")
+        calls = []
+        monkeypatch.chdir(repo)
+        with patch("claude_swap.session.SessionManager", self._fake_manager(calls)), \
+             patch("claude_swap.cli.ClaudeAccountSwitcher",
+                   return_value=self._fake_switcher(backup, {"accounts": {}, "sequence": []})), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "run"]):
+            cli.main()
+        assert ("exec_default", []) in calls
+        assert "no longer exists" in capsys.readouterr().out
+
+    def test_explicit_account_still_runs(self, tmp_path, monkeypatch):
+        """An explicit account argument bypasses mapping resolution."""
+        backup = tmp_path / "backup"
+        backup.mkdir()
+        calls = []
+        monkeypatch.chdir(tmp_path)
+        with patch("claude_swap.session.SessionManager", self._fake_manager(calls)), \
+             patch("claude_swap.cli.ClaudeAccountSwitcher",
+                   return_value=self._fake_switcher(backup, {"accounts": {}, "sequence": []})), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "run", "3"]):
+            cli.main()
+        assert ("run", "3", [], True, False) in calls
+
+    def test_no_account_forwards_tail(self, tmp_path, monkeypatch):
+        from claude_swap.mappings import MappingStore
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        backup = tmp_path / "backup"
+        backup.mkdir()
+        MappingStore(backup).set(repo, "work@co.com", "")
+        seq = {
+            "accounts": {"2": {"email": "work@co.com", "organizationUuid": "",
+                                "organizationName": ""}},
+            "sequence": [2],
+        }
+        calls = []
+        monkeypatch.chdir(repo)
+        with patch("claude_swap.session.SessionManager", self._fake_manager(calls)), \
+             patch("claude_swap.cli.ClaudeAccountSwitcher",
+                   return_value=self._fake_switcher(backup, seq)), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "run", "--", "--resume"]):
+            cli.main()
+        assert ("run", "2", ["--resume"], True, False) in calls
+
+    def test_no_account_forwards_share_history(self, tmp_path, monkeypatch):
+        """--share-history survives the mapped-account resolution path."""
+        from claude_swap.mappings import MappingStore
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        backup = tmp_path / "backup"
+        backup.mkdir()
+        MappingStore(backup).set(repo, "work@co.com", "")
+        seq = {
+            "accounts": {"2": {"email": "work@co.com", "organizationUuid": "",
+                                "organizationName": ""}},
+            "sequence": [2],
+        }
+        calls = []
+        monkeypatch.chdir(repo)
+        with patch("claude_swap.session.SessionManager", self._fake_manager(calls)), \
+             patch("claude_swap.cli.ClaudeAccountSwitcher",
+                   return_value=self._fake_switcher(backup, seq)), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch.object(sys, "argv", ["claude-swap", "run", "--share-history"]):
+            cli.main()
+        assert ("run", "2", [], True, True) in calls
+
+
+class TestDisableEnableDispatch:
+    """`cswap disable`/`cswap enable` (and the legacy --disable-account /
+    --enable-account flags) forward to switcher.set_account_disabled."""
+
+    def _run(self, argv):
+        with patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls, \
+             patch.object(sys, "argv", ["claude-swap", *argv]), \
+             patch("os.geteuid", return_value=1000, create=True), \
+             patch("claude_swap.update_check.check_for_update", return_value=None):
+            cli.main()
+        return switcher_cls.return_value
+
+    def test_disable_subcommand_forwards(self):
+        switcher = self._run(["disable", "2"])
+        switcher.set_account_disabled.assert_called_once_with("2", True)
+
+    def test_enable_subcommand_forwards(self):
+        switcher = self._run(["enable", "user@example.com"])
+        switcher.set_account_disabled.assert_called_once_with("user@example.com", False)
+
+    def test_legacy_disable_flag_forwards(self):
+        switcher = self._run(["--disable-account", "3"])
+        switcher.set_account_disabled.assert_called_once_with("3", True)
+
+    def test_legacy_enable_flag_forwards(self):
+        switcher = self._run(["--enable-account", "3"])
+        switcher.set_account_disabled.assert_called_once_with("3", False)
+
+    def test_disable_without_target_errors(self, capsys):
+        with patch.object(sys, "argv", ["claude-swap", "disable"]):
+            with pytest.raises(SystemExit) as excinfo:
+                cli.main()
+        assert excinfo.value.code == 2

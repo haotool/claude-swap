@@ -181,6 +181,8 @@ def account_row(
     *,
     usage_fetched_at: float | None = None,
     usage_age_s: float | None = None,
+    alias: str = "",
+    disabled: bool = False,
 ) -> dict[str, Any]:
     """A full account row for ``--list``."""
     status, usage = usage_fields(usage_entry)
@@ -194,6 +196,12 @@ def account_row(
         "usageStatus": status,
         "usage": usage,
     }
+    if alias:
+        row["alias"] = alias
+    # Additive field: present only when the slot is held out of rotation, so
+    # existing consumers keying on the base schema are unaffected.
+    if disabled:
+        row["disabled"] = True
     if usage is not None:
         row.update(usage_freshness_fields(usage_fetched_at, usage_age_s))
     return row
@@ -217,13 +225,18 @@ def empty_list_payload() -> dict[str, Any]:
 
 
 def list_payload(
-    accounts_info: list[tuple[int, str, str, str, bool, str]],
+    accounts_info: list[tuple[int, str, str, str, bool, str, str]],
     entries: dict[str, StoreUsageEntry],
+    disabled: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Build the ``--list --json`` payload from gathered account + usage data."""
+    """Build the ``--list --json`` payload from gathered account + usage data.
+
+    ``disabled`` names the slot numbers held out of rotation (``cswap
+    disable``) so their rows carry the additive ``disabled`` field.
+    """
     active_num: int | None = None
     accounts = []
-    for num, email, org_name, org_uuid, is_active, _ in accounts_info:
+    for num, email, org_name, org_uuid, is_active, _, alias in accounts_info:
         if is_active:
             active_num = num
         entry = entries[str(num)]
@@ -237,6 +250,8 @@ def list_payload(
                 entry.decision_value(),
                 usage_fetched_at=entry.fetched_at,
                 usage_age_s=entry.age_s,
+                alias=alias,
+                disabled=str(num) in disabled,
             )
         )
     return {
@@ -316,6 +331,7 @@ def status_payload(
         }
     org_name = account_record.get("organizationName", "") or ""
     org_uuid = account_record.get("organizationUuid", "") or ""
+    alias = account_record.get("alias", "") or ""
     # Decision-grade projection, same rule as the --list payload: stale
     # beyond STALE_OK_S reports unavailable, not "ok" with old numbers.
     entry = usage_entry if usage_entry is not None else StoreUsageEntry()
@@ -330,6 +346,8 @@ def status_payload(
         "usageStatus": status,
         "usage": usage,
     }
+    if alias:
+        active["alias"] = alias
     if usage is not None:
         active.update(usage_freshness_fields(entry.fetched_at, entry.age_s))
     payload: dict[str, Any] = {

@@ -693,7 +693,7 @@ class TestRotatedTokenPersistContention:
             patch.object(switcher, "_live_session_pids", return_value=[]),
         ):
             return ListReporter(switcher).fetch_account_usage(
-                (2, "account2@example.com", "", "", False, creds),
+                (2, "account2@example.com", "", "", False, creds, ""),
             )
 
     def test_persist_waits_out_a_held_lock_and_lands_the_rotation(
@@ -829,7 +829,7 @@ class TestRotatedTokenPersistContention:
             patch.object(switcher, "_live_session_pids", return_value=[]),
         ):
             ListReporter(switcher).fetch_account_usage(
-                (2, "account2@example.com", "", "", False, expired),
+                (2, "account2@example.com", "", "", False, expired, ""),
             )
 
         stored = switcher._read_account_credentials("2", "account2@example.com")
@@ -1339,7 +1339,7 @@ class TestActiveAccountRefresh:
             {"1": FetchRecord(usage={"five_hour": {"pct": 25.0}})},
             {"1": ("test@example.com", "")},
         )
-        info = (1, "test@example.com", "", "", True, self._EXPIRED)
+        info = (1, "test@example.com", "", "", True, self._EXPIRED, "")
 
         with (
             patch(
@@ -1635,7 +1635,7 @@ class TestFetchAccountUsageSessionProfile:
     """
 
     def _info(self, backup_creds: str) -> tuple:
-        return (2, "test@example.com", "Org", "org-uuid", False, backup_creds)
+        return (2, "test@example.com", "Org", "org-uuid", False, backup_creds, "")
 
     def test_fresh_session_credentials_fetch_read_only(self, temp_home: Path):
         """Profile creds are used with is_active=True (no refresh, no persist)."""
@@ -1731,7 +1731,7 @@ class TestDeadTokenQuarantine:
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
         self._make_dead(switcher)
-        info = [(2, "test@example.com", "Org", "", False, self._dead_creds())]
+        info = [(2, "test@example.com", "Org", "", False, self._dead_creds(), "")]
 
         with patch("claude_swap.oauth.try_fetch_usage_for_account") as fetch:
             entries = ListReporter(switcher).collect_usage_entries(info)
@@ -1745,7 +1745,7 @@ class TestDeadTokenQuarantine:
         # still render "re-login needed" now, not only on the next refresh.
         switcher = ClaudeAccountSwitcher()
         switcher._setup_directories()
-        info = [(2, "test@example.com", "Org", "", False, self._dead_creds())]
+        info = [(2, "test@example.com", "Org", "", False, self._dead_creds(), "")]
 
         reporter = ListReporter(switcher)
         with patch.object(
