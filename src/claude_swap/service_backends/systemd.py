@@ -200,6 +200,25 @@ def _installed_version() -> str | None:
 _WSL_KEEPALIVE_EXEC = "sleep infinity"
 
 
+def _wsl_keepalive_register_command(distro: str, user: str) -> str:
+    """One-shot Task Scheduler registration for the WSL keepalive, paste-ready.
+
+    Two Task Scheduler defaults silently break a hand-made task: an ``AtLogOn``
+    trigger not scoped to a user is denied without elevation (0x80070005), and
+    the default 72h ``ExecutionTimeLimit`` kills the keepalive after 3 days —
+    taking the distro and the engine down with it. ``-User`` scopes the trigger
+    to the current Windows user and ``[TimeSpan]::Zero`` disables the limit.
+    """
+    argument = f"-d {distro} -u {user} --exec {_WSL_KEEPALIVE_EXEC}"
+    return (
+        "Register-ScheduledTask -TaskName 'cswap-wsl-keepalive' "
+        f"-Action (New-ScheduledTaskAction -Execute 'wsl.exe' -Argument '{argument}') "
+        '-Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\\$env:USERNAME") '
+        "-Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) "
+        "-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries) -Force"
+    )
+
+
 def _print_wsl_guidance() -> None:
     distro = os.environ.get("WSL_DISTRO_NAME", "<distro>")
     user = os.environ.get("USER") or getpass.getuser()
@@ -210,6 +229,13 @@ def _print_wsl_guidance() -> None:
     print(f"  {dimmed(f'wsl.exe -d {distro} -u {user} --exec {_WSL_KEEPALIVE_EXEC}')}")
     print(
         f"  {dimmed('The command must leave a resident process behind (sleep infinity never exits) — WSL shuts the distro down when idle and systemd services do not keep it alive, stopping the engine.')}"
+    )
+    print(
+        f"  {dimmed('Register it in one shot (paste into Windows PowerShell, no admin needed):')}"
+    )
+    print(f"  {dimmed(_wsl_keepalive_register_command(distro, user))}")
+    print(
+        f"  {dimmed('The command disables the task execution time limit — the Task Scheduler GUI default (3 days) would kill the keepalive after 72h and stop the engine.')}"
     )
     print(
         f"  {dimmed('WSL ~/.claude and Windows %USERPROFILE%\\.claude are separate; install cswap in the same environment as Claude Code.')}"
@@ -324,9 +350,9 @@ class SystemdBackend:
         if not structured.exists():
             print(f"  {dimmed('(none yet)')}")
         else:
-            tail = structured.read_text(encoding="utf-8", errors="replace").splitlines()[
-                -lines:
-            ]
+            tail = structured.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()[-lines:]
             for line in tail:
                 print(f"  {muted(line)}")
 

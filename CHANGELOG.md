@@ -78,6 +78,13 @@ Release version is defined in `pyproject.toml` (currently `0.21.0b1+haotool.1`).
 
 ### Added
 
+- **WSL keepalive: paste-ready Task Scheduler registration.** `cswap service
+  install` on WSL (and the README) now print a one-shot
+  `Register-ScheduledTask` PowerShell command instead of GUI-only guidance.
+  The command scopes the `AtLogOn` trigger to the current user (an unscoped
+  trigger is denied without elevation, `0x80070005`) and disables the
+  execution time limit — the GUI default (3 days) silently killed a hand-made
+  keepalive after 72h, idle-terminating the distro and the engine with it.
 - **Upstream v0.17.1 merged** (usage-polling tuning and macOS hot-reload
   fix — upstream #85/#86):
   - **Deliberate staleness stays decision-grade.** Usage kept stale by a
