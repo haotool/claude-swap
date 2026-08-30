@@ -506,7 +506,7 @@ class TestMoveUnreadableSourceIsNotAbsent:
         reason="needs POSIX permission semantics (non-root)",
     )
     def test_unreadable_enc_aborts_the_move_before_anything_changes(
-        self, temp_home: Path, sample_sequence_data: dict
+        self, temp_home: Path, sample_sequence_data: dict, block_real_keychain
     ):
         switcher = ClaudeAccountSwitcher()
         self._write(switcher, sample_sequence_data)
@@ -521,6 +521,13 @@ class TestMoveUnreadableSourceIsNotAbsent:
             == "rt-1"
         )
 
+        if switcher.platform == Platform.MACOS:
+            from claude_swap.credentials import SECURITY_SERVICE
+
+            switcher._write_backup_enc("2", "account2@example.com", "live-rt")
+            block_real_keychain.data.pop(
+                (SECURITY_SERVICE, "account-2-account2@example.com"), None
+            )
         enc = switcher._backup_enc_path("2", "account2@example.com")
         enc.chmod(0o000)
         try:

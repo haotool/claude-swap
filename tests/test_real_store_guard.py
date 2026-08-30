@@ -665,13 +665,20 @@ def test_c0_a_scratch_home_still_protects_the_os_account_home_store(monkeypatch,
     specs = conftest._freeze_real_store_specs()
     roots = [root for root, _recursive in specs]
 
-    assert pwd_home / ".local" / "share" / "claude-swap" in roots, (
+    if Platform.detect() in (Platform.LINUX, Platform.WSL):
+        pwd_backup = pwd_home / ".local" / "share" / "claude-swap"
+        scratch_backup = scratch / ".local" / "share" / "claude-swap"
+    else:
+        pwd_backup = pwd_home / paths.LEGACY_BACKUP_DIRNAME
+        scratch_backup = scratch / paths.LEGACY_BACKUP_DIRNAME
+
+    assert pwd_backup in roots, (
         "with $HOME pointed at a scratch dir -- what the mandated isolation "
         "recipe does BEFORE the interpreter starts -- the account's true "
         "store under the OS account home must still be frozen as protected; "
         "otherwise the guard is armed only for a bare-pytest developer and "
         "disarmed for exactly the population running mutation batteries"
     )
-    assert scratch / ".local" / "share" / "claude-swap" in roots, (
+    assert scratch_backup in roots, (
         "the scratch HOME's own root must stay protected too"
     )
