@@ -8,11 +8,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 from claude_swap.update_check import (
     CACHE_TTL,
     _detect_install_method,
-    _is_local_version,
     check_for_update,
     run_self_upgrade,
 )
@@ -36,11 +34,6 @@ def _write_cache(path, version, timestamp=None):
     }))
 
 
-@pytest.fixture(autouse=True)
-def _default_current_version(monkeypatch):
-    monkeypatch.setattr("claude_swap.update_check._current_version", lambda: "0.3.2")
-
-
 class TestCheckForUpdate:
     @patch("claude_swap.update_check.urllib.request.urlopen")
     def test_newer_version_available(self, mock_urlopen, tmp_path, monkeypatch):
@@ -52,35 +45,6 @@ class TestCheckForUpdate:
         assert result is not None
         assert "0.4.0" in result
         assert "0.3.2" in result
-
-    @patch("claude_swap.update_check.urllib.request.urlopen")
-    def test_pep440_prerelease_current_version_still_checks(
-        self, mock_urlopen, tmp_path, monkeypatch
-    ):
-        # Regression: a PEP 440 pre-release must not make the update check
-        # silently no-op via int("0b2") ValueError.
-        monkeypatch.setattr(
-            "claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json"
-        )
-        mock_urlopen.return_value = _make_pypi_response("0.16.0")
-
-        result = check_for_update("0.15.0b2")
-
-        assert result is not None
-        assert "0.16.0" in result
-
-    @patch("claude_swap.update_check.urllib.request.urlopen")
-    def test_local_fork_version_skips_upstream_pypi(
-        self, mock_urlopen, tmp_path, monkeypatch
-    ):
-        monkeypatch.setattr(
-            "claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json"
-        )
-
-        result = check_for_update("0.15.0b2+haotool.1")
-
-        assert result is None
-        mock_urlopen.assert_not_called()
 
     @patch("claude_swap.update_check.urllib.request.urlopen")
     def test_already_on_latest(self, mock_urlopen, tmp_path, monkeypatch):
@@ -200,13 +164,6 @@ class TestDetectInstallMethod:
         assert _detect_install_method() == "pipx"
 
 
-class TestLocalVersionDetection:
-    def test_local_version_marker(self):
-        assert _is_local_version("0.15.0b2+haotool.1") is True
-        assert _is_local_version("0.15.0+local") is True
-        assert _is_local_version("0.15.0b2") is False
-
-
 class TestCheckForUpdateMessage:
     @patch("claude_swap.update_check.sys.platform", "linux")
     @patch("claude_swap.update_check.urllib.request.urlopen")
@@ -259,20 +216,6 @@ class TestCheckForUpdateMessage:
 
 @patch("claude_swap.update_check.sys.platform", "linux")
 class TestRunSelfUpgrade:
-    @patch(
-        "claude_swap.update_check._current_version", return_value="0.15.0b2+haotool.1"
-    )
-    @patch("claude_swap.update_check.subprocess.run")
-    @patch("claude_swap.update_check._detect_install_method", return_value="uv")
-    def test_local_fork_version_refuses_upstream_upgrade(
-        self, mock_detect, mock_run, mock_version, capsys
-    ):
-        assert run_self_upgrade() == 1
-        mock_run.assert_not_called()
-        err = capsys.readouterr().err
-        assert "source/git fork" in err
-        assert "uv tool upgrade claude-swap" not in err
-
     @patch("claude_swap.update_check.subprocess.run")
     @patch("claude_swap.update_check._detect_install_method", return_value="uv")
     def test_uv_invokes_uv_tool_upgrade(self, mock_detect, mock_run):

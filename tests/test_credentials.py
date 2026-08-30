@@ -1,357 +1,273 @@
-"""Tests for the credentials module.
+"""``CredentialStore``: the active-credential read must stay on one profile.
 
-These prove the store is independently testable against a minimal ``_StoreHost``
-— a plain object exposing ``platform`` / ``credentials_dir`` / ``_logger`` and
-**no methods** — which is the whole point of the extraction: the credential
-storage layer no longer needs a full ``ClaudeAccountSwitcher`` to exercise.
+The identity read honors ``CLAUDE_CONFIG_DIR`` (``paths.get_claude_config_home``)
+while the Keychain read used a hardcoded service name that does not. Pairing one
+profile's identity with another profile's credential is silent, and every
+consumer of the active read inherits it.
 
-``TestCredentialRefresherLocking`` uses the same pattern for ``RefreshHost``:
-``_refresher_host`` is a ``SimpleNamespace`` fake that satisfies the Protocol
-structurally (no inheritance, no full switcher).
-
-The file (Linux/WSL/Windows) backup backend is used because it depends only on
-the injected ``credentials_dir`` — no real Keychain and no ``$HOME`` coupling —
-so the Protocol boundary is exercised in isolation on every platform.
+The fix resolves the Keychain item the way claude does for the same environment
+(``session.keychain_service_name``, the same derivation ``delete``, the
+session read and capture already use) rather than skipping the Keychain under a
+custom profile. Skipping would trade a wrong answer for a missing one: claude
+writes rotations keychain-only on macOS, so a custom profile frequently has no
+plaintext file at all and would render as "no credentials" while logged in.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import sys
-import threading
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
-from claude_swap.credential_refresh import CredentialRefresher
-from claude_swap.credentials import CredentialStore
-from claude_swap.exceptions import CredentialWriteError
-from claude_swap.locking import FileLock
-from claude_swap.models import Platform
-
-
-def _file_host(tmp_path: Path) -> SimpleNamespace:
-    """A minimal data-only host for the file backup backend."""
-    creds_dir = tmp_path / "credentials"
-    creds_dir.mkdir(parents=True, exist_ok=True)
-    return SimpleNamespace(
-        platform=Platform.LINUX,
-        credentials_dir=creds_dir,
-        _logger=logging.getLogger("test.credentials"),
-    )
-
-
-def test_store_constructs_from_data_only_host(tmp_path: Path):
-    """A SimpleNamespace (no methods) satisfies the host contract."""
-    store = CredentialStore(_file_host(tmp_path))
-    assert store._uses_file_backup_backend() is True
-
-
-def test_account_credentials_file_round_trip(tmp_path: Path):
-    """write → read returns the same payload via the base64 .enc file."""
-    store = CredentialStore(_file_host(tmp_path))
-    store._write_account_credentials("1", "alice@example.com", "secret-token")
-    assert store._read_account_credentials("1", "alice@example.com") == "secret-token"
-
-
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows permissions are ACLs; chmod only toggles the read-only bit",
+from claude_swap.credentials import (
+    CLAUDE_CODE_KEYCHAIN_SERVICE,
+    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+    CredentialStore,
 )
-def test_account_credentials_written_0600(tmp_path: Path):
-    """Backup file lands with owner-only permissions (no umask window)."""
-    host = _file_host(tmp_path)
-    store = CredentialStore(host)
-    store._write_account_credentials("2", "bob@example.com", "tok")
-    enc = host.credentials_dir / ".creds-2-bob@example.com.enc"
-    assert enc.exists()
-    assert (enc.stat().st_mode & 0o777) == 0o600
+from claude_swap.models import Platform
+from claude_swap.session import keychain_service_name
 
 
-def test_read_missing_account_returns_empty(tmp_path: Path):
-    """A slot with no backup reads as "" (not an error / not None)."""
-    store = CredentialStore(_file_host(tmp_path))
-    assert store._read_account_credentials("9", "nobody@example.com") == ""
+class _Host:
+    """Minimal ``_StoreHost``: data only, read at call time."""
+
+    def __init__(self, credentials_dir: Path):
+        self.platform = Platform.MACOS
+        self.credentials_dir = credentials_dir
+        self._logger = logging.getLogger("test")
 
 
-def test_delete_account_credentials_removes_file(tmp_path: Path):
-    store = CredentialStore(_file_host(tmp_path))
-    store._write_account_credentials("3", "carol@example.com", "tok")
-    store._delete_account_credentials("3", "carol@example.com")
-    assert store._read_account_credentials("3", "carol@example.com") == ""
+DEFAULT_PROFILE_CREDS = json.dumps({
+    "claudeAiOauth": {
+        "accessToken": "sk-default-profile",
+        "refreshToken": "rt-default-profile",
+        "expiresAt": 9999999999000,
+    }
+})
+
+CUSTOM_PROFILE_CREDS = json.dumps({
+    "claudeAiOauth": {
+        "accessToken": "sk-custom-profile",
+        "refreshToken": "rt-custom-profile",
+        "expiresAt": 9999999999000,
+    }
+})
+
+SECURE_PROFILE_CREDS = json.dumps({
+    "claudeAiOauth": {
+        "accessToken": "sk-secure-profile",
+        "refreshToken": "rt-secure-profile",
+        "expiresAt": 9999999999000,
+    }
+})
 
 
-def test_post_construction_platform_override_is_honored(tmp_path: Path):
-    """The store reads ``platform`` off the host at call time, not construction.
+def _keychain(mapping: dict[str, str], seen: list[str]):
+    """A fake Keychain: only the listed services exist, and record every probe.
 
-    Mutating the host after construction flips the backend — this is why the
-    Protocol is data-only and read lazily (mirrors tests setting
-    ``switcher.platform`` post-init).
+    Anything unlisted returns ``None``, which is claude's rc-44 "absent item"
+    signal — the case that legitimately falls through to the plaintext file.
     """
-    host = _file_host(tmp_path)
-    store = CredentialStore(host)
-    assert store._uses_file_backup_backend() is True
-    host.platform = Platform.MACOS
-    assert store._uses_file_backup_backend() is False
+
+    def fake_get_password(service: str, account: str):
+        seen.append(service)
+        return mapping.get(service)
+
+    return fake_get_password
 
 
-@pytest.mark.parametrize("platform", [Platform.LINUX, Platform.WSL, Platform.WINDOWS])
-def test_file_backends(tmp_path: Path, platform: Platform):
-    host = _file_host(tmp_path)
-    host.platform = platform
-    store = CredentialStore(host)
-    assert store._uses_file_backup_backend() is True
-
-
-def _oauth_creds(token: str = "live-token") -> str:
-    return json.dumps(
-        {
-            "claudeAiOauth": {
-                "accessToken": token,
-                "refreshToken": "rt",
-                "expiresAt": 9_999_999_999_000,
-            },
-        }
-    )
-
-
-def _refresher_host(tmp_path: Path) -> SimpleNamespace:
-    creds_dir = tmp_path / "credentials"
-    creds_dir.mkdir(parents=True, exist_ok=True)
-    lock_file = tmp_path / ".lock"
-    store: dict[tuple[str, str], str] = {}
-    live = {"creds": _oauth_creds()}
-
-    host = SimpleNamespace(
-        platform=Platform.LINUX,
-        credentials_dir=creds_dir,
-        lock_file=lock_file,
-        _logger=logging.getLogger("test.credential_refresh"),
-    )
-    host._read_account_credentials = lambda num, email: store.get((num, email), "")
-    host._write_account_credentials = lambda num, email, creds: store.__setitem__(
-        (num, email),
-        creds,
-    )
-    host._read_credentials = lambda: live["creds"]
-    host._store = store
-    host._live = live
-    return host
-
-
-class TestCredentialRefresherLocking:
-    def test_write_verified_live_acquires_lock_when_uncontested(self, tmp_path: Path):
-        host = _refresher_host(tmp_path)
-        refresher = CredentialRefresher(host)
-        acquires: list[bool] = []
-        real_acquire = FileLock.acquire
-
-        def track_acquire(lock_self, timeout=None):
-            acquires.append(True)
-            return real_acquire(lock_self, timeout)
-
-        with patch.object(FileLock, "acquire", track_acquire):
-            result = refresher.write_verified_live(
-                "1", "a@example.com", host._live["creds"]
-            )
-
-        assert acquires == [True]
-        assert result == host._live["creds"]
-        assert host._store[("1", "a@example.com")] == host._live["creds"]
-
-    def test_write_verified_live_skips_reentrant_lock_when_already_held(
-        self,
-        tmp_path: Path,
+class TestActiveReadStaysOnOneProfile:
+    def test_custom_config_dir_does_not_return_the_default_keychain_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        host = _refresher_host(tmp_path)
-        refresher = CredentialRefresher(host)
+        """The hardcoded ``Claude Code-credentials`` item belongs to the DEFAULT
+        profile. Under a custom ``CLAUDE_CONFIG_DIR`` it must never answer, or
+        the store hands back one account's token against another's identity."""
+        custom = tmp_path / "custom-profile"
+        custom.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
 
-        with FileLock(host.lock_file):
-            result = refresher.write_verified_live(
-                "1",
-                "a@example.com",
-                host._live["creds"],
-                assume_locked=True,
-            )
-
-        assert result == host._live["creds"]
-        assert host._store[("1", "a@example.com")] == host._live["creds"]
-
-    def test_write_verified_live_blocks_while_lock_held_by_other(self, tmp_path: Path):
-        host = _refresher_host(tmp_path)
-        refresher = CredentialRefresher(host)
-        body_entered = threading.Event()
-        original_body = refresher._write_verified_live_body
-
-        def tracked_body(*args, **kwargs):
-            body_entered.set()
-            return original_body(*args, **kwargs)
-
-        with patch.object(
-            refresher, "_write_verified_live_body", side_effect=tracked_body
-        ):
-            with FileLock(host.lock_file):
-                thread = threading.Thread(
-                    target=refresher.write_verified_live,
-                    args=("1", "a@example.com", host._live["creds"]),
-                )
-                thread.start()
-                body_entered.wait(timeout=0.5)
-                assert not body_entered.is_set()
-
-            thread.join(timeout=5)
-
-        assert body_entered.is_set()
-        assert host._store[("1", "a@example.com")] == host._live["creds"]
-
-    def test_sync_live_to_backup_holds_lock_for_read_compare_write(
-        self,
-        tmp_path: Path,
-    ):
-        host = _refresher_host(tmp_path)
-        refresher = CredentialRefresher(host)
-        host._live["creds"] = _oauth_creds("rotated-live")
-        lock_held_during_write = {"value": False}
-
-        original_write = refresher.write_verified_live
-
-        def write_under_lock(num, email, creds, *, assume_locked=False):
-            assert assume_locked is True
-            lock = FileLock(host.lock_file)
-            lock_held_during_write["value"] = lock.acquire(timeout=0) is False
-            return original_write(num, email, creds, assume_locked=assume_locked)
-
-        with patch.object(
-            refresher, "write_verified_live", side_effect=write_under_lock
-        ):
-            refresher.sync_live_to_backup("1", "a@example.com", host._live["creds"])
-
-        assert lock_held_during_write["value"] is True
-
-    def test_sync_live_to_backup_never_raises_when_lock_contended(
-        self, tmp_path: Path, caplog
-    ):
-        """A busy lock degrades the opportunistic sync to a warning.
-
-        A concurrent switch legitimately holds the lock past the acquire
-        timeout (in-lock network refresh); letting LockError escape here
-        killed every --list/--status that raced it. The sync retries on the
-        next list pass, so warn-and-skip loses nothing.
-        """
-        host = _refresher_host(tmp_path)
-        host._store[("1", "a@example.com")] = _oauth_creds("old-backup")
-        refresher = CredentialRefresher(host)
-        host._live["creds"] = _oauth_creds("rotated-live")
-
-        with FileLock(host.lock_file):
-            with (
-                patch(
-                    "claude_swap.credential_refresh.FileLock",
-                    side_effect=lambda p: FileLock(p, timeout=0.1),
-                ),
-                caplog.at_level(
-                    logging.WARNING, logger="test.credential_refresh"
-                ),
-            ):
-                refresher.sync_live_to_backup(
-                    "1", "a@example.com", host._live["creds"]
-                )
-
-        assert host._store[("1", "a@example.com")] == _oauth_creds("old-backup")
-        assert any(
-            "Failed to sync live credentials for account 1" in r.getMessage()
-            for r in caplog.records
-        ), [r.getMessage() for r in caplog.records]
-
-    def test_refresh_inactive_does_not_hold_lock_during_network_refresh(
-        self,
-        tmp_path: Path,
-    ):
-        host = _refresher_host(tmp_path)
-        refresher = CredentialRefresher(host)
-        expired = json.dumps(
-            {
-                "claudeAiOauth": {
-                    "accessToken": "old",
-                    "refreshToken": "rt-old",
-                    "expiresAt": 0,
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "claude_swap.macos_keychain.get_password",
+            _keychain(
+                {
+                    CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS,
+                    CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE: "sk-ant-api-default",
                 },
-            }
-        )
-        refreshed = _oauth_creds("new")
-        host._store[("1", "a@example.com")] = expired
-        lock_events: list[str] = []
-
-        real_acquire = FileLock.acquire
-        real_release = FileLock.release
-
-        def track_acquire(lock_self, timeout=None):
-            lock_events.append("acquire")
-            return real_acquire(lock_self, timeout)
-
-        def track_release(lock_self):
-            lock_events.append("release")
-            return real_release(lock_self)
-
-        def refresh_outside_lock(creds):
-            lock_events.append("network")
-            probe = FileLock(host.lock_file)
-            assert probe.acquire(timeout=0) is True
-            probe.release()
-            return refreshed
-
-        with (
-            patch.object(FileLock, "acquire", track_acquire),
-            patch.object(FileLock, "release", track_release),
-            patch(
-                "claude_swap.oauth.refresh_oauth_credentials",
-                side_effect=refresh_outside_lock,
+                seen,
             ),
-        ):
-            result, note = refresher.refresh_inactive_if_needed(
-                "1",
-                "a@example.com",
-                expired,
-            )
-
-        assert result == refreshed
-        assert note == "token refreshed"
-        assert lock_events.index("network") > lock_events.index("release")
-        assert any(
-            i > lock_events.index("network")
-            for i, event in enumerate(lock_events)
-            if event == "acquire"
         )
 
-    def test_refresh_inactive_raises_when_persist_does_not_stick(
-        self,
-        tmp_path: Path,
+        result = CredentialStore(_Host(tmp_path / "backups"))._read_active_credentials()
+
+        assert CLAUDE_CODE_KEYCHAIN_SERVICE not in seen, (
+            f"read the default profile's OAuth item: {seen}"
+        )
+        assert CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE not in seen, (
+            f"read the default profile's managed-key item: {seen}"
+        )
+        assert result.value != DEFAULT_PROFILE_CREDS
+        assert not result.value
+
+    def test_custom_config_dir_reads_its_own_hashed_keychain_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        # A single-use refresh token is consumed by the network refresh. If the
-        # backup write silently fails to persist (read-back mismatch), the slot
-        # must surface CredentialWriteError, not return a stale/bricked backup.
-        host = _refresher_host(tmp_path)
-        refresher = CredentialRefresher(host)
-        expired = json.dumps(
-            {
-                "claudeAiOauth": {
-                    "accessToken": "old",
-                    "refreshToken": "rt-old",
-                    "expiresAt": 0,
-                },
-            }
-        )
-        host._store[("1", "a@example.com")] = expired
+        """The regression a plain skip would introduce.
 
-        with (
-            patch(
-                "claude_swap.oauth.refresh_oauth_credentials",
-                return_value=_oauth_creds("new"),
+        On macOS claude writes rotations keychain-only, so a live custom profile
+        commonly has a hashed item and NO plaintext file. Skipping the Keychain
+        would report "no credentials" for a profile that is logged in; the
+        redirect returns the profile's real credential."""
+        custom = tmp_path / "custom-profile"
+        custom.mkdir()  # deliberately no .credentials.json
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "claude_swap.macos_keychain.get_password",
+            _keychain(
+                {
+                    keychain_service_name(str(custom)): CUSTOM_PROFILE_CREDS,
+                    CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS,
+                },
+                seen,
             ),
-            patch.object(host, "_write_account_credentials", lambda *a, **k: None),
-            pytest.raises(CredentialWriteError, match="read-back mismatch"),
-        ):
-            refresher.refresh_inactive_if_needed("1", "a@example.com", expired)
+        )
+
+        result = CredentialStore(_Host(tmp_path / "backups"))._read_active_credentials()
+
+        assert result.value == CUSTOM_PROFILE_CREDS
+        assert seen == [keychain_service_name(str(custom))]
+
+    def test_custom_config_dir_falls_back_to_its_own_credentials_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """An ABSENT hashed item (rc 44) is claude's own signal to read the
+        plaintext seed — and that file is unambiguously this profile's."""
+        custom = tmp_path / "custom-profile"
+        custom.mkdir()
+        (custom / ".credentials.json").write_text(
+            CUSTOM_PROFILE_CREDS, encoding="utf-8"
+        )
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "claude_swap.macos_keychain.get_password",
+            _keychain({CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS}, seen),
+        )
+
+        store = CredentialStore(_Host(tmp_path / "backups"))
+        assert store._read_active_credentials().value == CUSTOM_PROFILE_CREDS
+        assert CLAUDE_CODE_KEYCHAIN_SERVICE not in seen
+
+    def test_default_profile_still_reads_the_unsuffixed_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The common case is unchanged. With no ``CLAUDE_CONFIG_DIR`` the
+        unsuffixed item IS this profile's credential."""
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "claude_swap.macos_keychain.get_password",
+            _keychain({CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS}, seen),
+        )
+
+        store = CredentialStore(_Host(tmp_path / "backups"))
+        assert store._read_active_credentials().value == DEFAULT_PROFILE_CREDS
+        assert seen == [CLAUDE_CODE_KEYCHAIN_SERVICE]
+
+    def test_config_dir_equal_to_the_default_falls_back_to_the_unsuffixed_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Setting ``CLAUDE_CONFIG_DIR`` to the default profile explicitly is not
+        a custom profile. Claude hashes the exported string, so the hashed name
+        is tried first, but a user who has always used the default profile may
+        only have the unsuffixed item — so that fallback must remain."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        default = tmp_path / ".claude"
+        default.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(default))
+        monkeypatch.delenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", raising=False)
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "claude_swap.macos_keychain.get_password",
+            _keychain({CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS}, seen),
+        )
+
+        store = CredentialStore(_Host(tmp_path / "backups"))
+        assert store._read_active_credentials().value == DEFAULT_PROFILE_CREDS
+        assert seen == [
+            keychain_service_name(str(default)),
+            CLAUDE_CODE_KEYCHAIN_SERVICE,
+        ]
+
+
+class TestSecureStorageOverride:
+    """``CLAUDE_SECURESTORAGE_CONFIG_DIR`` takes precedence when *defined*.
+
+    Claude 2.1.220+ resolves secure storage from it and only falls back to
+    ``CLAUDE_CONFIG_DIR`` when it is undefined. ``_read_capture_credentials``
+    already reads it this way; the active read has to agree, or the two disagree
+    about which profile they are looking at.
+    """
+
+    def test_defined_and_empty_selects_the_default_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Defined-but-empty means the DEFAULT secure store, even with a custom
+        ``CLAUDE_CONFIG_DIR``. Here the unsuffixed item is the correct read, so
+        a guard keyed only on ``CLAUDE_CONFIG_DIR`` would wrongly return
+        nothing."""
+        custom = tmp_path / "custom-profile"
+        custom.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+        monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "claude_swap.macos_keychain.get_password",
+            _keychain({CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS}, seen),
+        )
+
+        store = CredentialStore(_Host(tmp_path / "backups"))
+        assert store._read_active_credentials().value == DEFAULT_PROFILE_CREDS
+        assert seen == [CLAUDE_CODE_KEYCHAIN_SERVICE]
+
+    def test_defined_and_set_selects_that_stores_hashed_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A defined, non-empty value names the only store claude will read."""
+        custom = tmp_path / "custom-profile"
+        custom.mkdir()
+        secure = tmp_path / "secure-profile"
+        secure.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+        monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(secure))
+
+        seen: list[str] = []
+        monkeypatch.setattr(
+            "claude_swap.macos_keychain.get_password",
+            _keychain(
+                {
+                    keychain_service_name(str(secure)): SECURE_PROFILE_CREDS,
+                    keychain_service_name(str(custom)): CUSTOM_PROFILE_CREDS,
+                    CLAUDE_CODE_KEYCHAIN_SERVICE: DEFAULT_PROFILE_CREDS,
+                },
+                seen,
+            ),
+        )
+
+        store = CredentialStore(_Host(tmp_path / "backups"))
+        assert store._read_active_credentials().value == SECURE_PROFILE_CREDS
+        assert seen == [keychain_service_name(str(secure))]

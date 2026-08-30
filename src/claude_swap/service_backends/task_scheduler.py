@@ -24,8 +24,7 @@ from xml.dom import minidom
 from claude_swap import __version__, service_spec
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.printer import bolded, dimmed, muted, warning
-from claude_swap.protocols import ServiceState
-from claude_swap.protocols import ServiceHost
+from claude_swap.protocols import ServiceHost, ServiceState
 
 _TASK_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 _VERSION_RE = re.compile(r"<Version>([^<]+)</Version>")

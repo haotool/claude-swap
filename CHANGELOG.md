@@ -2,11 +2,18 @@
 
 All notable user-facing changes to claude-swap are documented here.
 
-Release version is defined in `pyproject.toml` (currently `0.21.0b1+haotool.1`).
+Release version is defined in `pyproject.toml` (currently `0.26.0b1+haotool.1`).
 
 ## [Unreleased]
 
 ### Added
+
+- **Upstream 0.22–0.26 merged** (upstream `2213700`, 0.26.0b1): pace-aware usage
+  display, `cswap swap`/`move`, unclaimed credential stash, appearance themes,
+  fsutil/replace-with-retry, OAuth profile fetch, real-store guard, and the
+  full upstream test matrix through 0.26.0b1. Fork **service layer preserved**
+  (`cswap service`, launchd/systemd/Task Scheduler backends,
+  `migrate_autoswitch_config_to_settings`, retired `--monitor` argv shim).
 
 - **Upstream 0.21.0b1 merged** (upstream `1e2515a`): directory→account
   mappings (`cswap map`/`unmap`, mapping-aware `cswap run` — upstream #71),

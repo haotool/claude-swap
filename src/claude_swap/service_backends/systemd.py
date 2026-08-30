@@ -63,9 +63,7 @@ def _user_manager_available() -> bool:
     state = proc.stdout.strip().lower()
     if state == "offline":
         return False
-    if not state and proc.returncode != 0 and "bus" in proc.stderr.lower():
-        return False
-    return True
+    return not (not state and proc.returncode != 0 and "bus" in proc.stderr.lower())
 
 
 def _require_systemd() -> None:

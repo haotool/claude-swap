@@ -8,7 +8,7 @@ Multi-account switcher for Claude Code. Easily switch between multiple Claude ac
 
 | Item | Value |
 |------|-------|
-| **Release version (SSOT)** | `pyproject.toml` → `[project].version` (currently `0.21.0b1+haotool.1`) |
+| **Release version (SSOT)** | `pyproject.toml` → `[project].version` (currently `0.26.0b1+haotool.1`) |
 | **Scheme** | [PEP 440](https://peps.python.org/pep-0440/) with a **local version label** (`+haotool.1`) to distinguish this fork from upstream |
 | **PyPI** | **Not publishable** — PyPI rejects local version segments (`+…`); this fork is installed from git/source only |
 | **Upstream PyPI** | Publishes plain semver (e.g. `0.15.1`) without the `+haotool.*` suffix |
@@ -42,21 +42,30 @@ uv tool install claude-swap
 # or: pipx install claude-swap
 ```
 
+### From source (upstream)
+
+```bash
+git clone https://github.com/realiti4/claude-swap.git
+cd claude-swap
+uv sync
+uv run cswap help
+```
+
 ### Updating
 
 **This fork:** pull latest and reinstall:
 
 ```bash
 git pull
-uv sync
-# if installed with uv tool / pip -e:
-uv tool upgrade --reinstall claude-swap  # when using uv tool install --editable .
+uv sync --all-groups
+uv tool install --editable .   # if installed as a tool
 ```
 
-**Upstream PyPI installs** (`uv tool` / `pipx`):
+**Upstream / PyPI:**
 
 ```bash
-cswap upgrade          # auto-detects uv/pipx on macOS/Linux
+cswap upgrade          # uv/pipx installs on macOS/Linux: auto-detects and upgrades
+# or run your installer directly:
 uv tool upgrade claude-swap
 pipx upgrade claude-swap
 ```
@@ -78,6 +87,8 @@ Log in with another account, then:
 ```bash
 cswap add
 ```
+
+Do not run `/logout` first: current Claude Code may revoke the refresh token stored for the account you are leaving.
 
 ### Switch accounts
 
@@ -115,17 +126,19 @@ cswap auto --threshold 80      # switch earlier
 cswap auto --model Fable       # also switch when the Fable weekly limit is hit
 cswap auto --once              # single check-and-switch, for cron/scripts
 cswap auto --dry-run           # log what it would do, never switch
+cswap auto --strategy consume-first   # burn the soonest-resetting account first
 ```
 
 <details>
 <summary>How it behaves & advanced usage</summary>
 
 - Runs safely alongside Claude Code: switches take the same credential locks Claude Code uses, so a swap never collides with a token refresh.
-- A cooldown (default 5 min) and a hysteresis margin stop it flip-flopping near the threshold: a proactive switch only lands on an account that's below the threshold *and* better than the current one by the margin — a candidate that clears the margin is always taken, but two accounts hovering at the line never ping-pong. When every account is exhausted it sleeps until the first one becomes usable again.
-- Usage polling is adaptive — a couple of accounts per check, busy alternates watched more closely, exhausted ones left alone until they reset — so API traffic stays flat no matter how many accounts you manage.
+- A cooldown (default 5 min) and a hysteresis margin stop it flip-flopping near the threshold: a proactive switch only lands on an account that's below the threshold *and* better than the current one by the margin — a candidate that clears the margin is always taken, but two accounts hovering at the line never ping-pong. When every account is exhausted it keeps checking on a bounded slow cadence, waking sooner for an imminent reset.
+- **Strategies** (`--strategy`, or `cswap config set autoswitch.strategy`): `best` (default) stays put until the active account nears its limit, then moves to the account with the most quota left. `consume-first` proactively keeps you on the account whose **weekly window resets soonest** — use-it-or-lose-it — switching to a sooner-resetting account (with room to spare) even below the threshold, so perishable weekly quota isn't wasted.
+- Usage polling is adaptive — a couple of accounts per check, busy alternates watched more closely, and exhausted ones checked about every ten minutes (or slower after 429s) — so API traffic stays flat no matter how many accounts you manage.
 - It fails safe: if a usage check errors it keeps trusting the last-known numbers while retries back off, and an expired token on an idle machine makes it hold rather than fail over (Claude Code refreshes the token on your next message).
-- An account whose refresh token has died is quarantined and reported until you log in with it and re-run `cswap add --slot N`. API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
-- To hold an account out of rotation yourself — a work account you don't want touched, one you're resting — run `cswap disable <num|email>`; `cswap enable <num|email>` puts it back. Disabled accounts are skipped by auto-switch, bare `cswap switch`, and the `best` / `next-available` strategies, but stay fully managed and remain a valid explicit `cswap switch <num|email>` target. They show a `(disabled)` marker in `cswap list`.
+- An account whose refresh token has died is quarantined and reported until you either log in with it and re-run `cswap add --slot N`, or replace its stored credentials from a known-good export — a plain `cswap import backup.cswap` replaces dead-token slots on its own (`--force` is still required to replace other existing accounts; note a stale export can carry an already-superseded token). API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
+- To hold an account out of rotation yourself — a work account you don't want touched, one you're resting — run `cswap disable <num|email>`; `cswap enable <num|email>` puts it back. Disabled accounts are skipped by auto-switch, bare `cswap switch`, and the `best` / `next-available` strategies, but stay fully managed and remain a valid explicit `cswap switch <num|email>` target. They show a `(disabled)` marker in `cswap list`, in the [TUI](#interactive-dashboard-tui), and in the [menu bar](#menu-bar-macos) — both of which also let you toggle the state in place (TUI: menu → *Disable / enable account…*; menu bar: *Disable / enable account*).
 - By default only the account-wide 5h/7d windows drive switching. If you work on one model and hit its **weekly per-model limit** first (e.g. Fable), add `--model Fable` (or `cswap config set autoswitch.model Fable`) to fold that model's window into the decision, so it switches off an account whose model quota is spent even while its 5h/7d windows still have room.
   - **Model names** are Anthropic's own per-model `display_name`s, matched case-insensitively. The exact strings for your accounts are the per-model rows in `cswap list` (e.g. a line reading `Fable: 100%`).
 
@@ -138,51 +151,6 @@ For cron/systemd timers, `--once` reports the outcome in its exit code (`0` swit
 Defaults like the threshold and cooldown are configurable with `cswap config set autoswitch.threshold 80` — flags override them (see [Configuration](#configuration)).
 
 </details>
-
-### Run multiple accounts at the same time (session mode)
-
-Launch Claude Code as a specific account in the current terminal only — every other terminal and the VS Code extension stay on your default account, so two accounts can work in parallel.
-
-```bash
-cswap run 2                     # launch Claude Code as account 2, here only
-cswap run user@example.com      # by email
-cswap run 2 -- --resume         # everything after '--' is forwarded to claude
-cswap run 2 --share-history     # share your chat history with this account too
-```
-
-Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, etc.), but each account keeps its own chat history. Pass `--share-history` if you want your accounts to continue the same conversations — a session started under one account shows up in `--resume` under the others, and nothing already saved is lost. Not supported on Windows yet.
-
-<details>
-<summary>Map accounts to directories — auto-pick per repo</summary>
-
-Bind a directory to an account, and a bare `cswap run` there launches that account in session mode — e.g. work account in work repos, personal elsewhere:
-
-```bash
-cswap map 2 ~/work/client-app   # map a directory to account 2
-cswap map user@example.com      # map the current directory
-cswap map                       # list mappings
-cswap unmap ~/work/client-app   # remove one (defaults to current directory)
-
-cd ~/work/client-app/src
-cswap run                       # → account 2, session mode
-```
-
-Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap run` just launches plain `claude` with your default login. Mappings are per-machine (not part of `cswap export`) and are cleaned up when their account is removed.
-
-</details>
-
-### Interactive dashboard (TUI)
-
-Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.
-
-<img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
-
-Because switching doesn't require a Claude Code restart (see the note above),
-the new account takes effect on your next message — on macOS once the Keychain
-cache expires. The engine refreshes the target's OAuth token *before*
-activation when it is close to expiry, so the first API call after handoff
-uses a token with plenty of lifetime left. Manual `cswap --switch` still uses
-predictable round-robin.
 
 #### Run it in the background
 
@@ -223,20 +191,55 @@ wsl.exe -d <distro> -u <user> --exec sleep infinity
 
 **Windows (native).** The scheduled task runs at logon under your user account (`RunLevel` limited — no elevation). Engine events go to the structured log; use `cswap service logs` to inspect it.
 
-#### Failure modes
-
-The engine polls the usage API directly each tick, so there is no cache to
-pre-seed. Common event lines and what they mean:
-
-| Event | Meaning | What to do |
-|---------|---------|------------|
-| `no switch: cooldown` | A switch just happened; the cooldown floor bounds the switch rate | Expected — wait it out, or lower `cooldownSeconds` in `settings.json` |
-| `no switch: no-viable-target` | No candidate has meaningfully more headroom than the active account | Expected near-uniform usage; add an account if it persists |
-| `all accounts exhausted` | Every account is at its limit; the engine sleeps until the earliest reset | Expected — it wakes and switches on its own |
-| `account quarantined` | An account's refresh token has died | Log in with it and re-run `cswap --add-account --slot N` |
-
 After upgrading, reinstall the service once (`cswap service install`) so the
 supervisor picks up the new entry point, then check `cswap service status`.
+
+### Run multiple accounts at the same time (session mode)
+
+Launch Claude Code as a specific account in the current terminal only — every other terminal and the VS Code extension stay on your default account, so two accounts can work in parallel.
+
+```bash
+cswap run 2                     # launch Claude Code as account 2, here only
+cswap run user@example.com      # by email
+cswap run 2 -- --resume         # everything after '--' is forwarded to claude
+cswap run 2 --share-history     # share your chat history with this account too
+```
+
+Sessions use your normal `~/.claude` setup (settings, CLAUDE.md, skills, MCP servers, etc.), but each account keeps its own chat history — pass `--share-history` if you want your accounts to continue the same conversations.
+
+<details>
+<summary>Sharing details — MCP servers & chat history</summary>
+
+- With `--share-history`, a session started under one account shows up in `--resume` under the others, and nothing already saved is lost.
+- User-scope MCP servers (`claude mcp add -s user`) are mirrored from your default profile on every launch — manage them there; changes made inside a session don't persist. Definitions are copied as-is (including inline `env`/`headers` values), but MCP OAuth logins are not — HTTP servers may ask you to authenticate once per profile via `/mcp`.
+- `--no-share` turns sharing off and removes the mirrored MCP config (profiles that never mirrored are left alone).
+
+</details>
+
+<details>
+<summary>Map accounts to directories — auto-pick per repo</summary>
+
+Bind a directory to an account, and a bare `cswap run` there launches that account in session mode — e.g. work account in work repos, personal elsewhere:
+
+```bash
+cswap map 2 ~/work/client-app   # map a directory to account 2
+cswap map user@example.com      # map the current directory
+cswap map                       # list mappings
+cswap unmap ~/work/client-app   # remove one (defaults to current directory)
+
+cd ~/work/client-app/src
+cswap run                       # → account 2, session mode
+```
+
+Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap run` just launches plain `claude` with your default login. Mappings are per-machine (not part of `cswap export`) and are cleaned up when their account is removed.
+
+</details>
+
+### Interactive dashboard (TUI)
+
+Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.
+
+<img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
 ### Refresh expired tokens
 
@@ -255,8 +258,7 @@ cswap run 2                     # Run an account in this terminal only (session 
 cswap auto                      # Auto-switch when nearing rate limits (see above)
 cswap config                    # Show or edit settings (see Configuration below)
 cswap list                      # Show all accounts with 5h/7d usage and reset times
-cswap list --token-status       # list plus per-account OAuth token status (valid/expired)
-cswap --health                  # Show account health, usage, and OAuth token status
+cswap list --token-status       # Add source-labelled OAuth token diagnostics
 cswap status                    # Show current account
 cswap add --slot 3              # Add account to a specific slot (prompts before overwrite)
 cswap add --alias dev           # Add account and give it a short alias
@@ -266,6 +268,9 @@ cswap enable 2                  # Return a disabled account to rotation
 cswap alias 2 dev               # Give an account a short alias (usable anywhere NUM|EMAIL is)
 cswap alias 2 --unset           # Remove an account's alias
 cswap alias                     # List all aliases
+cswap move 2 1                  # Assign an account to a slot (relocates to an empty slot, swaps if taken)
+cswap unclaimed                 # List stashed credential entries (slot + why they were stashed)
+cswap unclaimed --purge ID      # Drop one (deletes its bytes; recover with /login + `cswap add`)
 cswap tui                       # Interactive dashboard (also: bare `cswap`)
 cswap watch                     # Dashboard, opened on the live watch page
 cswap upgrade                   # Upgrade upstream/PyPI installs; fork builds use git pull
@@ -282,10 +287,12 @@ The original flag spellings (`cswap --switch`, `cswap --list`, ...) keep working
 ## How it works
 
 - Backs up OAuth tokens and config when you add an account
-- Swaps credentials when you switch accounts
+- Swaps only the account-specific Claude login when you switch accounts;
+  live account-independent OAuth state (such as MCP server logins) is
+  preserved instead of being overwritten by a slot's older snapshot
 - Account credentials stored securely using platform-appropriate methods
 - Switches (manual and automatic) hold Claude Code's own credential locks while writing, so a swap never interleaves with a token refresh
-- Auto-switch freshens a target's token before activating it, and quarantines accounts whose refresh token has died (recover with `cswap add --slot N`)
+- Auto-switch freshens a target's token before activating it, and quarantines accounts whose refresh token has died (recover by re-adding it with `cswap add --slot N`, or by replacing its stored credentials from a known-good export — a plain `cswap import backup.cswap` replaces dead-token slots automatically)
 - Usage numbers refresh every few minutes — faster for an account being used or close to switching, slower for idle ones — keeping cswap comfortably inside Anthropic's rate limits however many dashboards you keep open on a machine. An age note like `· 6m ago` just means the next scheduled check hasn't come yet, not that something is stuck.
 
 ## Data locations
@@ -312,7 +319,7 @@ uv tool install 'claude-swap[menubar]'   # or: pipx install 'claude-swap[menubar
 cswap menubar
 ```
 
-Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / remove / refresh actions. Enable *Settings → Auto-switch accounts* to run the same engine as [`cswap auto`](#automatic-switching) in the background; it shares the `autoswitch.*` settings, so the menu bar and CLI stay in sync. Off until you turn it on.
+Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / disable-enable / remove / refresh actions. Enable *Settings → Auto-switch accounts* to run the same engine as [`cswap auto`](#automatic-switching) in the background; it shares the `autoswitch.*` settings, so the menu bar and CLI stay in sync. Off until you turn it on.
 
 </details>
 
@@ -345,12 +352,12 @@ Move account data between machines or back it up:
 ```bash
 cswap export backup.cswap                    # All accounts to a file
 cswap export backup.cswap --account 2        # One account
-cswap export backup.cswap --full             # Include full local ~/.claude.json (same-PC backup)
+cswap export backup.cswap --full             # Include full ~/.claude.json and credential object (same-PC backup)
 cswap import backup.cswap                    # Skips accounts that already exist
 cswap import backup.cswap --force            # Overwrite existing
 ```
 
-The export file is plaintext JSON. If you need encryption, pipe through your tool of choice (e.g. `cswap export - | gpg -c > backup.gpg`).
+The export file is plaintext JSON and, by default, carries only each account's own login — machine-shared MCP/plugin OAuth tokens and the device token stay on the source machine (`--full` keeps everything, for same-PC backups). If you need encryption, pipe through your tool of choice (e.g. `cswap export - | gpg -c > backup.gpg`).
 
 If an imported account is the one you're currently logged in as, activate the imported credentials with `cswap switch N --force` (a plain `switch` to the current account is a safe no-op and won't touch the import).
 
@@ -382,9 +389,11 @@ cswap switch 2 --json
 
 Every payload carries a `schemaVersion` (currently `1`); on a handled error stdout is `{"schemaVersion":1,"error":{...}}` with a non-zero exit code. `--switch`/`--switch-to` report `{"switched": true|false, "from": …, "to": …, "reason": …}`.
 
-Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age, e.g. `· 2m ago`). Rows with usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is. An account held out of rotation with `cswap disable` carries an additive `"disabled": true` on its row (absent otherwise).
+Usage is served from a per-account cache: when the usage API is briefly unreachable, the last-known numbers are shown instead of nothing (the human view marks them with their age, e.g. `· 2m ago`). Rows with decision-trusted usage carry additive `usageFetchedAt`/`usageAgeSeconds` fields telling you how old the measurement is. Whenever `usage` is null but a last-known measurement exists — data too old to drive a decision (`usageStatus` stays `unavailable`), or a row in a non-`ok` state such as `token_expired` — additive `lastGoodUsage`/`lastGoodFetchedAt`/`lastGoodAgeSeconds` fields preserve the human display without making the account actionable. These fields apply to list rows and the managed active row from `status --json`. An account held out of rotation with `cswap disable` carries an additive `"disabled": true` on its row (absent otherwise).
 
 An account row also carries an additive `alias` field once one is set with `cswap alias` (e.g. `"alias": "dev"`); accounts without one simply omit the key.
+
+Weekly windows (`sevenDay` and per-model `scoped` entries — never `fiveHour`) additively carry pace fields once the week is ~a day old: `expectedPct` (where usage would sit if spread evenly across the week) and `aheadOfPace` (`true` when meaningfully above that — the same signal the human views show as an `(ahead)`/`(ahead of pace)` marker). `projectedExhaustionAt`/`willLastToReset` extrapolate the current rate into an ETA to 100% and a yes/no "will it last to the reset"; they stay `--json`-only since a linear projection is too rough to present as fact in the UI.
 
 </details>
 

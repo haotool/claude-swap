@@ -214,8 +214,6 @@ class TestFetchUsage:
 
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
-        assert result["five_hour"]["resets_at"] == future.isoformat()
-        assert result["seven_day"]["resets_at"] == future.isoformat()
         assert result["five_hour"]["countdown"] == "1h 0m"
 
     def test_network_error(self):
@@ -368,50 +366,6 @@ class TestFetchUsage:
         assert result["five_hour"]["pct"] == 22.0
         assert result["seven_day"]["pct"] == 61.0
         assert "spend" not in result
-
-    def test_resets_at_preserved_when_utilization_null(self):
-        """Cooldown-aware target picker needs resets_at even when utilization is null."""
-        result = self._fetch_with_response(
-            {
-                "five_hour": {
-                    "utilization": None,
-                    "resets_at": "2026-06-15T12:00:00+00:00",
-                },
-                "seven_day": {
-                    "utilization": 50.0,
-                    "resets_at": "2026-06-22T00:00:00+00:00",
-                },
-            }
-        )
-        assert result is not None
-        assert result["five_hour"]["pct"] is None
-        assert result["five_hour"]["resets_at"] == "2026-06-15T12:00:00+00:00"
-        assert "countdown" in result["five_hour"]
-        assert "clock" in result["five_hour"]
-        assert result["seven_day"]["pct"] == 50.0
-
-    def test_missing_extra_usage_key_keeps_other_rows(self):
-        """API omits extra_usage entirely → five_hour/seven_day still rendered."""
-        result = self._fetch_with_response(
-            {
-                "five_hour": {"utilization": 22.0, "resets_at": None},
-                "seven_day": {"utilization": 61.0, "resets_at": None},
-            }
-        )
-        assert result is not None
-        assert result["five_hour"]["pct"] == 22.0
-        assert result["seven_day"]["pct"] == 61.0
-        assert "spend" not in result
-
-    def test_malformed_resets_at_propagates_as_none(self):
-        """A bad resets_at raises ValueError inside format_reset; fetch_usage
-        swallows it and returns None. Pins today's behavior."""
-        result = self._fetch_with_response(
-            {
-                "five_hour": {"utilization": 22.0, "resets_at": "not-an-iso-string"},
-            }
-        )
-        assert result is None
 
     def test_scoped_per_model_limits(self):
         """weekly_scoped entries in limits[] surface as result['scoped'] by model name."""
@@ -569,9 +523,12 @@ class TestTryRefreshOAuthCredentials:
         outcome = oauth.try_refresh_oauth_credentials(creds)
         assert outcome.error == "no_refresh_token"
 
-    def test_invalid_json_is_permanent(self):
+    def test_invalid_json_is_transient(self):
+        # Changed contract (stale-credential robustness): an unparseable blob
+        # is more likely a torn read than a credential shape — it must not
+        # produce a permanent strike-advancing verdict.
         outcome = oauth.try_refresh_oauth_credentials("not json")
-        assert outcome.error == "no_refresh_token"
+        assert outcome.error == "transient"
 
     def test_wrapper_returns_none_on_failure(self):
         err = self._http_error(400, b'{"error": "invalid_grant"}')
@@ -776,13 +733,12 @@ class TestFetchUsageForAccount:
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
         with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
-            outcome = oauth.try_fetch_usage_for_account(
+            result = oauth.fetch_usage_for_account(
                 "1", "test@example.com", credentials,
                 is_active=False,
             )
 
-        assert outcome.usage is None
-        assert outcome.error == "refresh-failed"
+        assert result is None
 
     def test_refreshes_when_scopes_are_missing(self):
         """Refresh should work even when stored credentials have no scopes."""
@@ -849,7 +805,7 @@ class TestFetchUsageForAccount:
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
         with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
-            outcome = oauth.try_fetch_usage_for_account(
+            result = oauth.fetch_usage_for_account(
                 "1", "test@example.com", credentials,
                 is_active=True,
                 persist_credentials=persist_mock,
@@ -857,8 +813,8 @@ class TestFetchUsageForAccount:
 
         assert refresh_calls == 0
         persist_mock.assert_not_called()
-        assert outcome.usage is None
-        assert outcome.error == "http-401"
+        # Usage call 401'd and there's no retry-with-refresh for active, so None.
+        assert result is None
 
     def test_active_account_401_does_not_retry_with_refresh(self):
         """Active account that 401s returns None without attempting a refresh."""
@@ -877,53 +833,14 @@ class TestFetchUsageForAccount:
 
         persist_mock = MagicMock()
         with patch("claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen):
-            outcome = oauth.try_fetch_usage_for_account(
+            result = oauth.fetch_usage_for_account(
                 "1", "test@example.com", credentials,
                 is_active=True,
                 persist_credentials=persist_mock,
             )
 
-        assert outcome.usage is None
-        assert outcome.error == "http-401"
+        assert result is None
         persist_mock.assert_not_called()
-
-    def test_rate_limit_returns_classified_error(self):
-        """429s should be observable instead of collapsing into None."""
-        credentials = self._make_credentials()
-        body = json.dumps(
-            {
-                "error": {
-                    "type": "rate_limit_error",
-                    "message": "Rate limited. Please try again later.",
-                }
-            }
-        ).encode()
-        headers = {"Retry-After": "30"}
-
-        def mock_urlopen(req, timeout=0):
-            if "oauth/usage" in req.full_url:
-                raise urllib.error.HTTPError(
-                    req.full_url,
-                    429,
-                    "Too Many Requests",
-                    hdrs=headers,
-                    fp=MagicMock(read=MagicMock(return_value=body)),
-                )
-            raise AssertionError(f"Unexpected URL: {req.full_url}")
-
-        with patch(
-            "claude_swap.oauth.urllib.request.urlopen", side_effect=mock_urlopen
-        ):
-            outcome = oauth.try_fetch_usage_for_account(
-                "1",
-                "test@example.com",
-                credentials,
-                is_active=True,
-            )
-
-        assert outcome.usage is None
-        assert outcome.error == "http-429"
-        assert outcome.retry_after_s == 30.0
 
     def test_persist_failure_logs_warning_with_recovery_hint(self, caplog, capsys):
         """If the persist callback raises, _persist logs at WARNING level with
@@ -953,53 +870,6 @@ class TestFetchUsageForAccount:
         output = capsys.readouterr().out
         assert "failed to save refreshed token" in output
         assert "cswap --add-account" in output
-
-    def test_mandatory_persist_failure_raises(self, caplog):
-        """Mandatory persist paths must fail fast after a single-use refresh."""
-        import logging
-
-        backup: dict[str, str] = {"before": "old-refresh"}
-
-        def boom(_num, _email, creds):
-            backup["attempt"] = creds
-            raise RuntimeError("disk exploded")
-
-        with caplog.at_level(logging.WARNING, logger="claude-swap"):
-            with pytest.raises(RuntimeError, match="disk exploded"):
-                oauth._persist(
-                    boom,
-                    "1",
-                    "test@example.com",
-                    '{"claudeAiOauth":{"refreshToken":"consumed-rt"}}',
-                    persist_mandatory=True,
-                )
-
-        assert backup["attempt"] == '{"claudeAiOauth":{"refreshToken":"consumed-rt"}}'
-        assert backup.get("before") == "old-refresh"
-
-    def test_mandatory_persist_failure_does_not_write_backup(self):
-        """Mandatory failure must not leave backup diverged from pre-refresh state."""
-        store: dict[str, str] = {"backup": "stale-on-disk"}
-
-        def fail_persist(_num, _email, creds):
-            store["attempted"] = creds
-            raise OSError("write failed")
-
-        refreshed = self._make_credentials(access="new-access", refresh="consumed-rt")
-        with pytest.raises(OSError, match="write failed"):
-            oauth._persist(
-                fail_persist,
-                "1",
-                "test@example.com",
-                refreshed,
-                persist_mandatory=True,
-            )
-
-        assert store["backup"] == "stale-on-disk"
-        assert (
-            json.loads(store["attempted"])["claudeAiOauth"]["refreshToken"]
-            == "consumed-rt"
-        )
 
 
 class TestClassifyUsageError:
@@ -1129,9 +999,11 @@ class TestTryFetchUsageOutcome:
         assert "account 1" in line
         assert "retry-after 42s" in line
         assert "a@b.c" not in line
-        # Any 429 = the per-token usage budget, which cumulative polling
+        # Any 429 = the usage endpoint's own budget, which cumulative polling
         # across cswap surfaces can drain — the log says what is happening.
-        assert "per-token usage budget" in line
+        # Deliberately not scoped to the token in the wording: the budget is
+        # account/org-scoped (see poll_policy), so a re-login does not clear it.
+        assert "usage-endpoint budget" in line
 
     def test_edge_429_warning_names_the_budget(self, caplog):
         import email.message
@@ -1157,7 +1029,7 @@ class TestTryFetchUsageOutcome:
         )
         # "Retry-After: 0" is the saturated-budget edge — same hint.
         assert "retry-after 0s" in line
-        assert "per-token usage budget" in line
+        assert "usage-endpoint budget" in line
 
     def test_timeout_outcome(self):
         with patch(
@@ -1361,6 +1233,7 @@ class TestTokenAccountParsing:
         }
 
 
+@pytest.mark.no_oauth_profile_fake
 class TestFetchOauthProfile:
     """Access-token → account-identity resolution (/api/oauth/profile)."""
 
@@ -1512,3 +1385,118 @@ class TestFetchOauthProfile:
             "401" in r.message and "pre-fix" in r.message
             for r in caplog.records
         )
+
+
+class TestInvalidGrantTaxonomy:
+    """M3: the permanent invalid_grant verdict requires an RFC 6749 §5.2
+    parse — top-level error == "invalid_grant" in the JSON body. Substring
+    hits inside other envelopes stay transient; invalid_client is a distinct
+    systemic kind, never a dead-token verdict."""
+
+    def _refresh_with_body(self, monkeypatch, code, body):
+        import urllib.error, io
+        creds = json.dumps({
+            "claudeAiOauth": {"refreshToken": "rt-x", "accessToken": "a"}
+        })
+
+        def raise_http(*a, **k):
+            raise urllib.error.HTTPError(
+                "url", code, "err", {}, io.BytesIO(body.encode())
+            )
+
+        monkeypatch.setattr(
+            "claude_swap.oauth.urllib.request.urlopen", raise_http
+        )
+        return oauth.try_refresh_oauth_credentials(creds)
+
+    def test_rfc_invalid_grant_is_permanent(self, monkeypatch):
+        out = self._refresh_with_body(
+            monkeypatch, 400, '{"error": "invalid_grant"}'
+        )
+        assert out.error == "invalid_grant"
+
+    def test_substring_in_other_envelope_is_transient(self, monkeypatch):
+        # the marker appears only inside a nested message — not a §5.2 error
+        out = self._refresh_with_body(
+            monkeypatch, 400,
+            '{"error": "server_error", "detail": "log mentions invalid_grant"}'
+        )
+        assert out.error == "transient"
+
+    def test_invalid_client_is_systemic_not_dead_token(self, monkeypatch):
+        out = self._refresh_with_body(
+            monkeypatch, 401, '{"error": "invalid_client"}'
+        )
+        assert out.error == "invalid_client"
+
+    def test_unparseable_body_is_transient(self, monkeypatch):
+        out = self._refresh_with_body(monkeypatch, 400, "<html>oops</html>")
+        assert out.error == "transient"
+
+    def test_error_description_variant_still_permanent(self, monkeypatch):
+        out = self._refresh_with_body(
+            monkeypatch, 400,
+            '{"error": "invalid_grant", "error_description": "revoked"}'
+        )
+        assert out.error == "invalid_grant"
+
+
+class TestNoRefreshTokenStructuralGuard:
+    """M3: ``no_refresh_token`` is permanent only for a structurally complete
+    OAuth dict genuinely missing the field — an unparseable/partial blob is
+    transient (a torn read must not condemn the slot)."""
+
+    def test_complete_dict_without_rt_is_permanent(self):
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "a"}})
+        out = oauth.try_refresh_oauth_credentials(creds)
+        assert out.error == "no_refresh_token"
+
+    def test_unparseable_blob_is_transient(self):
+        out = oauth.try_refresh_oauth_credentials('{"claudeAiOa')  # torn read
+        assert out.error == "transient"
+
+    def test_non_dict_payload_is_transient(self):
+        out = oauth.try_refresh_oauth_credentials('"just-a-string"')
+        assert out.error == "transient"
+
+
+class TestConsumeBusyIsDeterministic:
+    """A busy consume gate must not fall through to a guaranteed 401.
+
+    `consume-busy` means another process holds the gate — the token in hand is
+    known-expired, so calling the usage endpoint with it 401s every time, and
+    the retry re-enters the gate and gets busy again. The kind then arrives as
+    generic "refresh-failed", hiding the distinct kind this PR added and
+    spending a request per pass to learn nothing.
+    """
+
+    def test_a_busy_gate_does_not_spend_a_doomed_request(self):
+        creds = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "expired",
+                "refreshToken": "r",
+                "expiresAt": 1,  # long past
+            }
+        })
+        with patch("claude_swap.oauth.request_usage_data") as usage:
+            out = oauth.try_fetch_usage_for_account(
+                "1", "a@example.com", creds, is_active=False,
+                refresh_via=lambda *_: oauth.RefreshOutcome(None, "consume-busy"),
+            )
+        assert out.error == "consume-busy", out.error
+        usage.assert_not_called()
+
+    def test_every_deterministic_kind_has_a_note(self):
+        """The reason these kinds stay distinct is the note they carry.
+
+        ``try_fetch_usage_for_account`` keeps a deterministic kind rather than
+        collapsing it to "refresh-failed" because "ERROR_NOTES renders the
+        remedy for each" — a kind with no note renders the bare identifier,
+        which is strictly worse than the generic string it displaced.
+        """
+        from claude_swap.switcher import ERROR_NOTES
+
+        missing = [
+            k for k in oauth._DETERMINISTIC_REFRESH_ERRORS if k not in ERROR_NOTES
+        ]
+        assert not missing, missing

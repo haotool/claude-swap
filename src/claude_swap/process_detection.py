@@ -7,7 +7,6 @@ currently running. Uses the same mechanism Claude Code itself uses internally.
 
 from __future__ import annotations
 
-import ctypes
 import json
 import logging
 import os
@@ -60,87 +59,56 @@ def is_pid_alive(pid: int) -> bool:
 
     if sys.platform == "win32":
         return _is_pid_alive_windows(pid)
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except PermissionError:
-            # EPERM means the process exists but we lack permission
-            return True
-        except OSError:
-            return False
 
-
-_ERROR_ACCESS_DENIED = 5
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        # EPERM means the process exists but we lack permission
+        return True
+    except OSError:
+        return False
 
 
 def _is_pid_alive_windows(pid: int) -> bool:
     """Windows-specific PID liveness check using ctypes."""
-    if sys.platform == "win32":
-        try:
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            # use_last_error captures GetLastError safely (ctypes keeps a
-            # thread-local copy right after the foreign call).
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            handle = kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-            )
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            if ctypes.get_last_error() != _ERROR_ACCESS_DENIED:
-                return False
-            # ACCESS_DENIED is how OpenProcess refuses an elevated (or
-            # protected) live process — but on Windows 11 it also comes back
-            # for many dead and never-existing PIDs (giampaolo/psutil#2359),
-            # so it only proves liveness when the PID is also in the system
-            # PID list. psutil 6.0 does the same two-step confirmation
-            # (giampaolo/psutil#2394).
-            return _pid_in_system_pids(pid)
-        except Exception:
-            return False
-    else:
-        return False
+    try:
+        import ctypes
 
-
-def _pid_in_system_pids(pid: int) -> bool:
-    """Confirm a PID against the system PID list (psapi EnumProcesses).
-
-    EnumProcesses gives no "buffer too small" error: it fills the array and
-    reports the bytes written, so a result that saturates the array means
-    "retry with a larger one" (MS Learn, EnumProcesses). If the call itself
-    fails there is no verdict either way; assume alive so a transient psapi
-    failure never lets cswap treat a possibly-live session as dead
-    (fail-closed, matching the elevated ACCESS_DENIED motivation above).
-    """
-    if sys.platform == "win32":
-        try:
-            psapi = ctypes.WinDLL("psapi", use_last_error=True)
-            size = 1024
-            while True:
-                pid_array = (ctypes.c_ulong * size)()
-                byte_count = ctypes.c_ulong(0)
-                if not psapi.EnumProcesses(
-                    pid_array, ctypes.sizeof(pid_array), ctypes.byref(byte_count)
-                ):
-                    return True
-                if byte_count.value < ctypes.sizeof(pid_array):
-                    count = byte_count.value // ctypes.sizeof(ctypes.c_ulong)
-                    return pid in pid_array[:count]
-                size *= 2
-        except Exception:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
             return True
-    else:
+        return False
+    except Exception:
         return False
 
 
-def list_sessions(claude_dir: Path | None = None) -> list[ClaudeSession]:
-    """Read session PID files and return only those with alive processes."""
+def scan_sessions(claude_dir: Path | None = None) -> tuple[list[ClaudeSession], int]:
+    """Live sessions, and how many records could NOT be read.
+
+    Two kinds of caller read this directory and they need opposite things from
+    an unparseable record:
+
+    - A SCAN (a listing, a status display) wants it skipped. One bad file must
+      not take out the whole listing.
+    - A GUARD wants to know. ``0 live`` and ``0 readable`` are the same list,
+      and only the first is safe to act on -- the callers gate ``_bootstrap``
+      (which deletes a profile's Keychain entry and overwrites
+      ``.credentials.json``) and account removal, so reading "could not tell"
+      as "nobody there" runs them underneath a live instance.
+
+    So the count is returned rather than swallowed, and ``list_sessions``
+    below is the scan-shaped view that drops it.
+    """
     sessions_dir = (claude_dir or get_claude_dir()) / "sessions"
     if not sessions_dir.is_dir():
-        return []
+        return [], 0
 
     sessions = []
+    unreadable = 0
     for path in sessions_dir.glob("*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -156,9 +124,34 @@ def list_sessions(claude_dir: Path | None = None) -> list[ClaudeSession]:
                 entrypoint=data.get("entrypoint", ""),
                 status=data.get("status"),
             ))
-        except (json.JSONDecodeError, KeyError, TypeError, OSError) as exc:
+        except (
+            json.JSONDecodeError,   # malformed JSON
+            KeyError,               # required field missing
+            TypeError,              # field has the wrong type (e.g. pid not an int)
+            AttributeError,         # valid JSON that is not an object: a
+                                    # top-level array reaches `.get` as a list.
+                                    # Also how a too-deep nesting lands where
+                                    # the parser's recursion limit is high
+                                    # enough not to raise -- it differs per
+                                    # machine, so BOTH outcomes must be inert.
+            ValueError,             # includes UnicodeDecodeError from read_text
+            OverflowError,          # pid too large for os.kill's C long (is_pid_alive)
+            RecursionError,         # pathologically nested JSON in json.loads
+            OSError,
+        ) as exc:
+            unreadable += 1
             logger.debug("Skipping session file %s: %s", path, exc)
-    return sessions
+    return sessions, unreadable
+
+
+def list_sessions(claude_dir: Path | None = None) -> list[ClaudeSession]:
+    """Live sessions. A record that cannot be read is SKIPPED.
+
+    SCAN USE ONLY. The returned list cannot distinguish "no live sessions"
+    from "no readable records", so anything gating a destructive step must
+    call :func:`scan_sessions` and treat a non-zero count as live.
+    """
+    return scan_sessions(claude_dir)[0]
 
 
 def list_ide_instances(claude_dir: Path | None = None) -> list[IdeInstance]:
@@ -181,7 +174,21 @@ def list_ide_instances(claude_dir: Path | None = None) -> list[IdeInstance]:
                 ide_name=data.get("ideName", "Unknown IDE"),
                 workspace_folders=data.get("workspaceFolders", []),
             ))
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError) as exc:
+        except (
+            json.JSONDecodeError,   # malformed JSON
+            KeyError,               # required field missing
+            TypeError,              # field has the wrong type (e.g. pid not an int)
+            AttributeError,         # valid JSON that is not an object: a
+                                    # top-level array reaches `.get` as a list.
+                                    # Also how a too-deep nesting lands where
+                                    # the parser's recursion limit is high
+                                    # enough not to raise -- it differs per
+                                    # machine, so BOTH outcomes must be inert.
+            ValueError,             # includes UnicodeDecodeError from read_text
+            OverflowError,          # pid too large for os.kill's C long (is_pid_alive)
+            RecursionError,         # pathologically nested JSON in json.loads
+            OSError,
+        ) as exc:
             logger.debug("Skipping IDE lockfile %s: %s", path, exc)
     return instances
 

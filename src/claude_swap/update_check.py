@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
-from typing import cast
 
 from claude_swap.cache import CACHE_DIR, MISSING, read_cache, write_cache
 
@@ -18,23 +16,8 @@ CACHE_TTL = 24 * 3600  # 24 hours
 PYPI_URL = "https://pypi.org/pypi/claude-swap/json"
 
 
-def _is_local_version(version: str) -> bool:
-    """True for PEP 440 local/source builds that PyPI cannot publish."""
-    return "+" in version
-
-
 def _parse_version(v: str) -> tuple[int, ...]:
-    # Compare numeric release segments only, tolerating PEP 440 pre-release /
-    # local suffixes (e.g. "0.15.0b2", "0.15.0b2+haotool.1"). Without this,
-    # int("0b2") raised and the update check silently no-op'd on our own
-    # version format.
-    parts: list[int] = []
-    for seg in v.split("+", 1)[0].split("."):
-        m = re.match(r"\d+", seg)
-        if m is None:
-            break
-        parts.append(int(m.group()))
-    return tuple(parts)
+    return tuple(int(x) for x in v.split("."))
 
 
 def _detect_install_method() -> str | None:
@@ -60,25 +43,15 @@ def _detect_install_method() -> str | None:
     return None
 
 
-def _current_version() -> str:
-    """Return the installed package version without importing cli/switcher."""
-    from claude_swap import __version__
-
-    return __version__
-
-
 def check_for_update(current_version: str) -> str | None:
     """Return a notification string if a newer version exists, else None."""
     try:
-        if _is_local_version(current_version):
-            return None
-
         latest_version = None
 
         # Try reading cache
         cached_data = read_cache(CACHE_PATH, CACHE_TTL)
         if cached_data is not MISSING:
-            latest_version = cast(str | None, cached_data)
+            latest_version = cached_data
         else:
             # Fetch from PyPI
             try:
@@ -123,17 +96,6 @@ def run_self_upgrade() -> int:
     manager is missing from PATH.
     """
     from claude_swap.printer import accent, error
-
-    if _is_local_version(_current_version()):
-        error(
-            "This is a source/git fork build, not the upstream PyPI release.\n"
-            "Do not run `pip install --upgrade claude-swap` or package-manager "
-            "upgrade commands; they may replace fork-only features such as "
-            "`cswap service`.\n"
-            "Update this checkout with `git pull` (or reinstall from the fork "
-            "source) instead."
-        )
-        return 1
 
     method = _detect_install_method()
     commands = {

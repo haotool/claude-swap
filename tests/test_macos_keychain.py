@@ -10,7 +10,7 @@ function bodies run against a fake process.)
 from __future__ import annotations
 
 import subprocess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 

@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import io
 import json
-import logging
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +13,7 @@ import pytest
 
 from claude_swap import __version__
 from claude_swap import cli
+from claude_swap.credentials import ActiveCredentials
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 # src layout: ensure subprocess can find claude_swap
@@ -27,7 +25,15 @@ _SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
 # data migration against real accounts (touching the real Keychain on macOS). An empty,
 # isolated HOME has no ``sequence.json`` → the migration skips before any Keychain
 # access, and no ``.claude.json`` → no account to read.
-_ISOLATED_HOME = tempfile.mkdtemp(prefix="cswap-subproc-home-")
+# Allocated under pytest's basetemp so its own retention reclaims it, rather
+# than a sweep at exit that a signal-killed worker never reaches.
+_ISOLATED_HOME: str | None = None
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolated_subprocess_home(tmp_path_factory):
+    global _ISOLATED_HOME
+    _ISOLATED_HOME = str(tmp_path_factory.mktemp("subproc-home"))
 
 
 def _subprocess_env(**extra: str) -> dict[str, str]:
@@ -41,6 +47,8 @@ def _subprocess_env(**extra: str) -> dict[str, str]:
     env = {**os.environ, **extra}
     env["PYTHONPATH"] = _SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
     if "HOME" not in extra:
+        # Falling through here would point the child at the real HOME.
+        assert _ISOLATED_HOME is not None, "_isolated_subprocess_home did not run"
         env["HOME"] = _ISOLATED_HOME
         env["USERPROFILE"] = _ISOLATED_HOME
     elif "USERPROFILE" not in extra:
@@ -131,29 +139,13 @@ class TestCLI:
         assert "--debug" not in result.stderr or "unrecognized" not in result.stderr
 
     def test_token_status_flag_requires_list(self, capsys):
-        """--token-status should only be accepted alongside --list (or --health)."""
+        """--token-status should only be accepted alongside --list."""
         with patch.object(sys, "argv", ["claude-swap", "--token-status", "--status"]):
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
 
         assert excinfo.value.code == 2
-        # Fork also allows --health; upstream only mentioned --list.
-        assert (
-            "--token-status can only be used with --list or --health"
-            in capsys.readouterr().err
-        )
-
-    def test_token_status_flag_requires_list_or_health(self, capsys):
-        """--token-status should only be accepted alongside --list or --health."""
-        with patch.object(sys, "argv", ["claude-swap", "--token-status", "--status"]):
-            with pytest.raises(SystemExit) as excinfo:
-                cli.main()
-
-        assert excinfo.value.code == 2
-        assert (
-            "--token-status can only be used with --list or --health"
-            in capsys.readouterr().err
-        )
+        assert "--token-status can only be used with 'list'" in capsys.readouterr().err
 
     def test_token_status_flag_is_forwarded_to_list(self):
         """--list --token-status should call list_accounts(show_token_status=True)."""
@@ -165,6 +157,7 @@ class TestCLI:
 
         switcher_cls.return_value.list_accounts.assert_called_once_with(
             show_token_status=True,
+            json_output=False,
         )
 
     def test_strategy_best_requires_switch(self, capsys):
@@ -205,7 +198,6 @@ class TestCLI:
              patch("claude_swap.update_check.check_for_update", return_value=None):
             cli.main()
 
-        # Non-JSON path omits json_output kwarg (defaults to False in switcher).
         switcher_cls.return_value.switch.assert_called_once_with(
             strategy="best", json_output=False, models=(), model_source=None
         )
@@ -264,39 +256,8 @@ class TestCLI:
              patch("claude_swap.update_check.check_for_update", return_value=None):
             cli.main()
 
-        # Non-JSON path omits json_output kwarg (defaults to False in switcher).
         switcher_cls.return_value.switch.assert_called_once_with(
             strategy=None, json_output=False, models=(), model_source=None
-        )
-
-    def test_health_shows_token_status_and_health(self):
-        """--health should reuse the account list with health observability enabled."""
-        with (
-            patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls,
-            patch.object(sys, "argv", ["claude-swap", "--health"]),
-            patch("os.geteuid", return_value=1000, create=True),
-            patch("claude_swap.update_check.check_for_update", return_value=None),
-        ):
-            cli.main()
-
-        switcher_cls.return_value.list_accounts.assert_called_once_with(
-            show_token_status=True,
-            show_health=True,
-        )
-
-    def test_token_status_flag_is_allowed_with_health(self):
-        """--health already shows token status, and explicit --token-status is accepted."""
-        with (
-            patch("claude_swap.cli.ClaudeAccountSwitcher") as switcher_cls,
-            patch.object(sys, "argv", ["claude-swap", "--health", "--token-status"]),
-            patch("os.geteuid", return_value=1000, create=True),
-            patch("claude_swap.update_check.check_for_update", return_value=None),
-        ):
-            cli.main()
-
-        switcher_cls.return_value.list_accounts.assert_called_once_with(
-            show_token_status=True,
-            show_health=True,
         )
 
     def test_slot_flag_requires_add_account(self, capsys):
@@ -518,56 +479,6 @@ class TestCLI:
         assert called.get("ran") is True
 
 
-class TestRedirectedStreamEncoding:
-    """Redirected Windows streams must carry the --list glyphs as UTF-8."""
-
-    def test_win32_redirected_stdout_emits_utf8_glyphs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        # `cswap --list > file` on Windows encodes stdout with the locale
-        # ANSI code page under errors=strict: cp1252 crashed on the tree
-        # connectors, and cp950 emitted ANSI multi-byte sequences that UTF-8
-        # consumers render as mojibake. Redirected streams are reconfigured
-        # to UTF-8, so every glyph round-trips.
-        buffer = io.BytesIO()
-        monkeypatch.setattr(sys, "platform", "win32")
-        monkeypatch.setattr(
-            sys, "stdout", io.TextIOWrapper(buffer, encoding="cp1252")
-        )
-        monkeypatch.setattr(
-            sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
-        )
-
-        cli._relax_redirected_stream_encoding()
-        print("└ ├ • ● —", file=sys.stdout)
-        sys.stdout.flush()
-
-        assert "└ ├ • ● —".encode("utf-8") in buffer.getvalue()
-        assert b"?" not in buffer.getvalue()
-
-    def test_posix_streams_left_strict(self, monkeypatch: pytest.MonkeyPatch):
-        redirected = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
-        monkeypatch.setattr(sys, "platform", "darwin")
-        monkeypatch.setattr(sys, "stdout", redirected)
-
-        cli._relax_redirected_stream_encoding()
-
-        assert redirected.errors == "strict"
-
-    def test_replaced_stdout_without_reconfigure_is_tolerated(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        # sys.stdout may be swapped for a bare text sink (tests, wrappers);
-        # anything without reconfigure() must be skipped, not crash main().
-        monkeypatch.setattr(sys, "platform", "win32")
-        monkeypatch.setattr(sys, "stdout", io.StringIO())
-        monkeypatch.setattr(
-            sys, "stderr", io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
-        )
-
-        cli._relax_redirected_stream_encoding()
-
-
 class TestCLICommands:
     """Test individual CLI commands."""
 
@@ -762,32 +673,6 @@ class TestRunCommand:
 
         assert excinfo.value.code == 1
         assert "boom" in capsys.readouterr().err
-
-
-class TestRetiredServiceArgvShim:
-    """Old installed services supervise `--monitor --service-monitor`; that
-    argv must exit 0 with a migration note, not argparse-error into a
-    supervisor restart loop (launchd SuccessfulExit:False / systemd
-    on-failure only restart on nonzero exits)."""
-
-    @pytest.mark.parametrize(
-        "argv",
-        [
-            ["claude-swap", "--monitor", "--service-monitor"],
-            ["claude-swap", "--monitor"],
-        ],
-    )
-    def test_retired_monitor_argv_exits_zero_with_note(self, argv, capsys):
-        with patch.object(sys, "argv", argv), pytest.raises(SystemExit) as exc:
-            cli.main()
-        assert exc.value.code == 0
-        err = capsys.readouterr().err
-        assert "cswap service install" in err
-        assert "cswap auto" in err
-
-    def test_normal_argv_is_not_intercepted(self):
-        cli._intercept_retired_service_argv(["--list"])
-        cli._intercept_retired_service_argv(["auto", "--once"])
 
 
 class TestSubcommandAliases:
@@ -1084,32 +969,6 @@ class TestAutoCommand:
             assert payload["event"] == "no-switch"
             assert payload["schemaVersion"] == 1
 
-    def test_events_mirror_into_decision_log(self, temp_home, caplog):
-        # A supervised engine's stdout may go nowhere (pythonw has none), so
-        # every event must also land in the structured claude-swap.log.
-        from claude_swap.autoswitch import (
-            ErrorEvent,
-            NoSwitchEvent,
-            TickOutcome,
-        )
-
-        class EmittingEngine(self.FakeEngine):
-            def tick(self):
-                self.on_event(NoSwitchEvent(reason="below-threshold"))
-                self.on_event(ErrorEvent(message="boom"))
-                return TickOutcome.NO_ACTION
-
-        with patch("claude_swap.autoswitch.AutoSwitchEngine", EmittingEngine), \
-             patch("os.geteuid", return_value=1000, create=True), \
-             patch.object(sys, "argv", ["claude-swap", "auto", "--once"]), \
-             caplog.at_level(logging.INFO, logger="claude-swap"):
-            with pytest.raises(SystemExit):
-                cli.main()
-        infos = [r for r in caplog.records if r.levelno == logging.INFO]
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("below-threshold" in r.getMessage() for r in infos)
-        assert any("boom" in r.getMessage() for r in warnings)
-
     def test_unknown_flag_errors(self, temp_home, capsys):
         with patch.object(sys, "argv", ["claude-swap", "auto", "--bogus"]):
             with pytest.raises(SystemExit) as excinfo:
@@ -1144,6 +1003,56 @@ class TestAutoCommand:
                 cli.main()
         assert excinfo.value.code == 1
         assert "nope" in capsys.readouterr().err  # printer.error -> stderr
+
+
+class TestUnclaimedCommand:
+    """Minor 2: the operator escape hatch for a stash row.
+
+    ``--json`` emits bare entry ids, and the two conditions this branch
+    introduces (a stranded row, a permanently unreadable one) both leave a row
+    an operator must be able to see the slot/reason of, and drop.
+    """
+
+    def _stashed(self, temp_home):
+        switcher = ClaudeAccountSwitcher()
+        switcher._setup_directories()
+        switcher._init_sequence_file()
+        entry_id = switcher._store._write_unclaimed_credential(
+            "creds-bytes",
+            {"reason": "consume-gate-persist-lock-failed",
+             "configSlot": "2",
+             "consumedFp": "fp-old"},
+        )
+        return switcher, entry_id
+
+    def test_list_shows_slot_and_reason_not_just_the_id(self, temp_home, capsys):
+        _, entry_id = self._stashed(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._unclaimed_command([])
+        out = capsys.readouterr().out
+        assert entry_id in out
+        assert "consume-gate-persist-lock-failed" in out
+        assert "2" in out
+
+    def test_purge_removes_bytes_and_row(self, temp_home, capsys):
+        switcher, entry_id = self._stashed(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._unclaimed_command(["--purge", entry_id])
+        assert switcher.list_unclaimed_credentials() == {}
+        assert not switcher._store._stash_entry_path(entry_id).exists()
+
+    def test_purging_an_unknown_id_fails_loudly(self, temp_home):
+        self._stashed(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True), \
+             pytest.raises(SystemExit) as exc:
+            cli._unclaimed_command(["--purge", "no-such-entry"])
+        assert exc.value.code == 1
+
+    def test_dispatched_from_main(self, temp_home):
+        with patch("claude_swap.cli._unclaimed_command") as fn, \
+             patch.object(sys, "argv", ["claude-swap", "unclaimed", "--purge", "x"]):
+            cli.main()
+        fn.assert_called_once_with(["--purge", "x"])
 
 
 class TestMapCommand:
@@ -1416,12 +1325,9 @@ class TestAliasCommand:
     def test_add_with_alias_flag(self, temp_home, mock_claude_config, capsys):
         fake_creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
         with patch("os.geteuid", return_value=1000, create=True), \
-             patch.object(ClaudeAccountSwitcher, "_read_credentials", return_value=fake_creds), \
-             patch.object(
-                 ClaudeAccountSwitcher,
-                 "_write_verified_live_account_credentials",
-                 return_value=fake_creds,
-             ), \
+             patch.object(ClaudeAccountSwitcher, "_read_active_credentials",
+                          return_value=ActiveCredentials(fake_creds, False)), \
+             patch.object(ClaudeAccountSwitcher, "_write_account_credentials"), \
              patch.object(sys, "argv", ["claude-swap", "add", "--alias", "dev"]):
             cli.main()
 
@@ -1646,3 +1552,29 @@ class TestDisableEnableDispatch:
             with pytest.raises(SystemExit) as excinfo:
                 cli.main()
         assert excinfo.value.code == 2
+
+
+def test_importing_the_module_allocates_no_temp_dir(tmp_path, tmp_path_factory):
+    """Import must allocate nothing; the fixture must allocate inside basetemp.
+
+    The child gets a private TMPDIR of its own rather than watching the shared
+    system one, which several checkouts write to concurrently. Both halves are
+    needed: re-adding the module-level ``mkdtemp`` is caught only by the empty
+    private tmp, and a fixture allocating outside basetemp only by containment.
+    """
+    child_tmp = tmp_path / "childtmp"
+    child_tmp.mkdir()
+    child = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); import tests.test_cli",
+         str(Path(__file__).resolve().parent.parent)],
+        capture_output=True, text=True,
+        env=_subprocess_env(TMPDIR=str(child_tmp)), timeout=120,
+    )
+    assert child.returncode == 0, child.stderr
+    allocated = list(child_tmp.iterdir())
+    assert not allocated, f"import allocated {[a.name for a in allocated]}"
+
+    home = Path(_subprocess_env()["HOME"])
+    assert home.is_dir(), f"the isolated HOME is not a real directory: {home}"
+    assert home.is_relative_to(tmp_path_factory.getbasetemp()), f"{home} escapes basetemp"

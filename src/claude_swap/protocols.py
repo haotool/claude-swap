@@ -9,26 +9,10 @@ surface", not "private to one module" — these views are the seam.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Literal, Protocol
 
 ServiceState = Literal["not installed", "installed but not loaded", "loaded"]
-
-
-class RefreshHost(Protocol):
-    """Switch surface ``CredentialRefresher`` uses for OAuth read/write paths."""
-
-    lock_file: Path
-    credentials_dir: Path
-    _logger: logging.Logger
-
-    def _read_credentials(self) -> str | None: ...
-    def _read_account_credentials(self, account_num: str, email: str) -> str: ...
-    def _write_account_credentials(
-        self, account_num: str, email: str, credentials: str,
-    ) -> None: ...
-    def _live_session_pids(self, account_num: str, email: str) -> list[int]: ...
 
 
 class ServiceHost(Protocol):

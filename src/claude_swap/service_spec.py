@@ -14,7 +14,9 @@ from pathlib import Path
 
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
-from claude_swap.models import is_wsl as is_wsl  # SSOT in models; re-export for backends
+from claude_swap.models import (
+    is_wsl as is_wsl,  # SSOT in models; re-export for backends
+)
 from claude_swap.printer import accent, bolded, dimmed, muted, warning
 from claude_swap.protocols import ServiceHost
 

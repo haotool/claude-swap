@@ -14,14 +14,13 @@ an entry's (email, org) to a live slot via the switcher themselves.
 
 from __future__ import annotations
 
-from typing import Any
-
 import json
 import os
 import sys
 import tempfile
 from pathlib import Path
 
+from claude_swap.fsutil import replace_with_retry
 from claude_swap.models import get_timestamp
 
 SCHEMA_VERSION = 1
@@ -44,7 +43,7 @@ class MappingStore:
     def __init__(self, backup_dir: Path):
         self.path = Path(backup_dir) / "mappings.json"
 
-    def load(self) -> dict[str, dict[str, Any]]:
+    def load(self) -> dict[str, dict]:
         """Return the normalized-path → entry map (empty on missing/corrupt)."""
         if not self.path.exists():
             return {}
@@ -57,11 +56,11 @@ class MappingStore:
         mappings = data.get("mappings", {})
         return mappings if isinstance(mappings, dict) else {}
 
-    def all(self) -> dict[str, dict[str, Any]]:
+    def all(self) -> dict[str, dict]:
         """Public alias for the full mapping table."""
         return self.load()
 
-    def get(self, path: str | Path) -> dict[str, Any] | None:
+    def get(self, path: str | Path) -> dict | None:
         """Exact-match lookup for a normalized path (no ancestor walk)."""
         return self.load().get(normalize_path(path))
 
@@ -99,7 +98,7 @@ class MappingStore:
             self._write(mappings)
         return len(doomed)
 
-    def resolve(self, cwd: str | Path) -> tuple[str, dict[str, Any]] | None:
+    def resolve(self, cwd: str | Path) -> tuple[str, dict] | None:
         """Return (key, entry) of the longest mapped ancestor of ``cwd``.
 
         A mapping matches when its directory equals ``cwd`` or is an ancestor
@@ -108,7 +107,7 @@ class MappingStore:
         root→cwd chain, so the longest key string is the deepest match.
         """
         target = Path(normalize_path(cwd))
-        best: tuple[str, dict[str, Any]] | None = None
+        best: tuple[str, dict] | None = None
         best_len = -1
         for key, entry in self.load().items():
             candidate = Path(key)
@@ -118,7 +117,7 @@ class MappingStore:
                     best_len = len(key)
         return best
 
-    def _write(self, mappings: dict[str, dict[str, Any]]) -> None:
+    def _write(self, mappings: dict[str, dict]) -> None:
         """Atomically write the mappings file (tempfile + os.replace)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if sys.platform != "win32":
@@ -134,7 +133,7 @@ class MappingStore:
                 os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(payload)
-            os.replace(tmp, self.path)
+            replace_with_retry(tmp, self.path)
         except OSError:
             try:
                 os.unlink(tmp)

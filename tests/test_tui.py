@@ -8,7 +8,9 @@ flows) — no scraping, no real credentials, no network.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import json
 import sys
 import threading
 import time
@@ -78,6 +80,7 @@ def make_account(
     entry: UsageEntry | None = None,
     email: str | None = None,
     alias: str = "",
+    disabled: bool = False,
 ) -> AccountSnapshot:
     return AccountSnapshot(
         number=str(number),
@@ -89,6 +92,21 @@ def make_account(
         switchable=switchable,
         usage=entry if entry is not None else make_entry(),
         alias=alias,
+        disabled=disabled,
+    )
+
+
+def make_usage_at(
+    fetched_at: float | None,
+    pct: float = 25.0,
+    *,
+    sentinel: str | None = None,
+) -> UsageEntry:
+    return UsageEntry(
+        sentinel=sentinel,
+        last_good={"five_hour": {"pct": pct, "resets_at": _iso_in(7200)}},
+        fetched_at=fetched_at,
+        age_s=(time.time() - fetched_at) if fetched_at is not None else None,
     )
 
 
@@ -146,6 +164,17 @@ class FakeSwitcher:
         self._accounts = [a for a in self._accounts if a.number != str(identifier)]
         print(f"Removed account {identifier}")
 
+    def set_account_disabled(self, identifier: str, disabled: bool) -> None:
+        self.calls.append(("set_disabled", str(identifier), disabled))
+        self._accounts = [
+            dataclasses.replace(a, disabled=disabled)
+            if a.number == str(identifier)
+            else a
+            for a in self._accounts
+        ]
+        verb = "Disabled" if disabled else "Enabled"
+        print(f"{verb} Account-{identifier}")
+
     def add_account(self, slot: int | None = None, assume_yes: bool = False) -> None:
         self.calls.append(("add", slot, assume_yes))
         print("Added Account 9: fresh@example.com")
@@ -169,6 +198,46 @@ class FakeSwitcher:
         self._poll_inputs_override = None
 
 
+class BlockingSnapshotSwitcher(FakeSwitcher):
+    """Fake switcher with independently gated normal/store snapshot lanes."""
+
+    def __init__(
+        self,
+        normal_account: AccountSnapshot,
+        store_account: AccountSnapshot,
+        backup_dir: Path,
+    ):
+        super().__init__([normal_account], backup_dir)
+        self.normal_account = normal_account
+        self.store_account = store_account
+        self.normal_started = threading.Event()
+        self.normal_release = threading.Event()
+        self.normal_done = threading.Event()
+        self.store_started = threading.Event()
+        self.store_release = threading.Event()
+        self.store_done = threading.Event()
+        self.block_store = False
+
+    def accounts_snapshot(self, fetch: set[str] | None = None) -> AccountsSnapshot:
+        self.fetch_sets.append(fetch)
+        if fetch is None:
+            self.normal_started.set()
+            self.normal_release.wait(timeout=2)
+            self.normal_done.set()
+            account = self.normal_account
+        else:
+            self.store_started.set()
+            if self.block_store:
+                self.store_release.wait(timeout=2)
+            self.store_done.set()
+            account = self.store_account
+        return AccountsSnapshot(
+            active_number=account.number,
+            accounts=(account,),
+            taken_at=time.time(),
+        )
+
+
 def make_app(fake: FakeSwitcher):
     from claude_swap.tui.app import CswapApp
 
@@ -187,6 +256,10 @@ async def settle(pilot) -> None:
         await app.workers.wait_for_complete(pending)
     await pilot.pause()
     await pilot.pause()
+
+
+async def wait_event(event: threading.Event, timeout: float = 1.0) -> None:
+    assert await asyncio.to_thread(event.wait, timeout)
 
 
 async def menu_select(pilot, action_id: str) -> None:
@@ -231,7 +304,7 @@ class TestFormatting:
         # active account, not that the user must re-login.
         assert (
             tui_data.sentinel_label(USAGE_TOKEN_EXPIRED)
-            == "token expired — Claude Code refreshes the active account"
+            == "token expired — refresh deferred this pass; retries automatically"
         )
         from claude_swap.switcher import SENTINEL_NOTES
 
@@ -252,7 +325,7 @@ class TestFormatting:
             age_s=720.0,
         )
         card = account_card_text(make_account(1, active=True, entry=entry), 80).plain
-        assert "token expired — Claude Code refreshes the active account" in card
+        assert "token expired — refresh deferred this pass; retries automatically" in card
         assert "last seen 53% used" in card
 
         no_history = account_card_text(
@@ -269,6 +342,15 @@ class TestFormatting:
             80,
         ).plain
         assert "last seen" not in api_key
+
+    def test_account_card_uses_light_palette_when_passed(self):
+        from claude_swap.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
+        from claude_swap.tui.widgets import account_card_text
+
+        acc = make_account(1, active=True, entry=make_entry(pct5=95.0))
+        text = account_card_text(acc, 100, palette=Palette.from_theme(CSWAP_LIGHT))
+        styles = {str(span.style) for span in text.spans}
+        assert any(ACCENT_LIGHT in s for s in styles)  # active marker uses light accent
 
     def test_window_helpers(self):
         entry = make_entry(pct5=47.0)
@@ -314,7 +396,7 @@ class TestSnapshotSource:
         # Pacing lives in the usage store (poll plans + freshness + atomic
         # reservation), so every take is the same on-demand pass `cswap list`
         # runs — including the user's explicit refresh, which cannot bypass
-        # the store's per-token cadence.
+        # the store's per-account cadence.
         fake, source = self._source(tmp_path)
         source.take()
         source.take()
@@ -325,6 +407,87 @@ class TestSnapshotSource:
         fake, source = self._source(tmp_path)
         source.take(store_only=True)
         assert fake.fetch_sets == [set()]
+
+    def test_expired_sentinel_retained_until_fetched_at_advances(self, tmp_path):
+        expired = make_account(
+            1,
+            active=True,
+            entry=make_usage_at(100.0, sentinel=USAGE_TOKEN_EXPIRED),
+        )
+        fresh_same_stamp = make_account(1, active=True, entry=make_usage_at(100.0))
+        fresh_new_stamp = make_account(1, active=True, entry=make_usage_at(101.0))
+        fake, source = self._source(tmp_path, [expired])
+
+        assert source.take().accounts[0].usage.sentinel == USAGE_TOKEN_EXPIRED
+        fake._accounts = [fresh_same_stamp]
+        assert source.take(store_only=True).accounts[0].usage.sentinel == USAGE_TOKEN_EXPIRED
+        fake._accounts = [fresh_new_stamp]
+        assert source.take(store_only=True).accounts[0].usage.sentinel is None
+
+    def test_expired_sentinel_clears_on_superseding_sentinel(self, tmp_path):
+        expired = make_account(
+            1,
+            active=True,
+            entry=make_usage_at(100.0, sentinel=USAGE_TOKEN_EXPIRED),
+        )
+        api_key = make_account(
+            1,
+            active=True,
+            kind="api_key",
+            entry=make_usage_at(None, sentinel=USAGE_API_KEY),
+        )
+        fake, source = self._source(tmp_path, [expired])
+
+        source.take()
+        fake._accounts = [api_key]
+        assert source.take(store_only=True).accounts[0].usage.sentinel == USAGE_API_KEY
+
+    def test_expired_sentinel_clears_on_identity_replacement(self, tmp_path):
+        expired = make_account(
+            1,
+            active=True,
+            email="old@example.com",
+            entry=make_usage_at(100.0, sentinel=USAGE_TOKEN_EXPIRED),
+        )
+        replacement = make_account(
+            1,
+            active=True,
+            email="new@example.com",
+            entry=make_usage_at(100.0),
+        )
+        fake, source = self._source(tmp_path, [expired])
+
+        source.take()
+        fake._accounts = [replacement]
+        assert source.take(store_only=True).accounts[0].usage.sentinel is None
+
+    def test_late_worker_fetched_at_regression_is_rejected(self, tmp_path):
+        newer = make_account(1, active=True, entry=make_usage_at(200.0, pct=80.0))
+        older = make_account(1, active=True, entry=make_usage_at(100.0, pct=10.0))
+        fake, source = self._source(tmp_path, [newer])
+
+        source.take()
+        fake._accounts = [older]
+        snap = source.take(store_only=True)
+        usage = snap.accounts[0].usage
+        assert usage.fetched_at == 200.0
+        assert usage.last_good["five_hour"]["pct"] == 80.0
+
+    def test_late_expired_sentinel_cannot_replace_newer_usage(self, tmp_path):
+        newer = make_account(1, active=True, entry=make_usage_at(200.0, pct=80.0))
+        older = make_account(
+            1,
+            active=True,
+            entry=make_usage_at(100.0, pct=10.0, sentinel=USAGE_TOKEN_EXPIRED),
+        )
+        fake, source = self._source(tmp_path, [newer])
+
+        source.take()
+        fake._accounts = [older]
+        usage = source.take(store_only=True).accounts[0].usage
+        assert usage.sentinel is None
+        assert usage.fetched_at == 200.0
+        assert usage.last_good["five_hour"]["pct"] == 80.0
 
 
 class TestUsageRows:
@@ -388,6 +551,49 @@ class TestUsageRows:
         assert usage_rows(None, time.time()) == []
         assert usage_rows({}, time.time()) == []
 
+    def test_seven_day_ahead_of_pace_marker(self):
+        # 1 day elapsed of the week, 50% used -> far ahead of the ~14% expected.
+        from claude_swap.tui.widgets import usage_rows
+
+        now = time.time()
+        last_good = {"seven_day": {"pct": 50.0, "resets_at": _iso_in(86400 * 6)}}
+        row = usage_rows(last_good, now, now)[0]
+        assert "(ahead of pace)" in row[2]
+        assert "(ahead of pace)" in row[3]
+
+    def test_five_hour_never_shows_pace_marker(self):
+        from claude_swap.tui.widgets import usage_rows
+
+        now = time.time()
+        last_good = {"five_hour": {"pct": 90.0, "resets_at": _iso_in(3600 * 4)}}
+        row = usage_rows(last_good, now, now)[0]
+        assert "pace" not in row[2]
+
+    def test_scoped_ahead_of_pace_marker(self):
+        from claude_swap.tui.widgets import usage_rows
+
+        now = time.time()
+        last_good = {"scoped": [{"name": "Fable", "pct": 50.0, "resets_at": _iso_in(86400 * 6)}]}
+        row = usage_rows(last_good, now, now)[0]
+        assert "(ahead of pace)" in row[2]
+
+    def test_maxed_scoped_marker_wins_over_pace(self):
+        from claude_swap.tui.widgets import usage_rows
+
+        now = time.time()
+        last_good = {"scoped": [{"name": "Fable", "pct": 100.0, "resets_at": _iso_in(86400 * 6)}]}
+        row = usage_rows(last_good, now, now)[0]
+        assert "(!)" in row[2]
+        assert "ahead of pace" not in row[2]
+
+    def test_no_pace_marker_without_fetched_at(self):
+        from claude_swap.tui.widgets import usage_rows
+
+        now = time.time()
+        last_good = {"seven_day": {"pct": 50.0, "resets_at": _iso_in(86400 * 6)}}
+        row = usage_rows(last_good, now)[0]
+        assert "pace" not in row[2]
+
     def test_card_shows_clock_only_where_it_fits(self):
         # Per-row degradation: the wide card shows every clock, a mid width
         # keeps 5h/7d clocks while the longer spend row falls back to its
@@ -417,6 +623,44 @@ class TestUsageRows:
 
         narrow = account_card_text(acc, 40).plain
         assert " · " not in narrow
+
+
+class TestMiniAccountText:
+    def test_seven_day_ahead_of_pace_marker(self):
+        from claude_swap.tui.widgets import mini_account_text
+
+        now = time.time()
+        entry = UsageEntry(
+            last_good={"seven_day": {"pct": 50.0, "resets_at": _iso_in(86400 * 6)}},
+            fetched_at=now,
+            age_s=0.0,
+        )
+        acc = make_account(1, entry=entry)
+        assert "(ahead)" in mini_account_text(acc, now).plain
+
+    def test_five_hour_never_shows_pace_marker(self):
+        from claude_swap.tui.widgets import mini_account_text
+
+        now = time.time()
+        entry = UsageEntry(
+            last_good={"five_hour": {"pct": 90.0, "resets_at": _iso_in(3600 * 4)}},
+            fetched_at=now,
+            age_s=0.0,
+        )
+        acc = make_account(1, entry=entry)
+        assert "pace" not in mini_account_text(acc, now).plain
+
+    def test_no_pace_marker_without_fetched_at(self):
+        from claude_swap.tui.widgets import mini_account_text
+
+        now = time.time()
+        entry = UsageEntry(
+            last_good={"seven_day": {"pct": 50.0, "resets_at": _iso_in(86400 * 6)}},
+            fetched_at=None,
+            age_s=None,
+        )
+        acc = make_account(1, entry=entry)
+        assert "pace" not in mini_account_text(acc, now).plain
 
 
 class TestRunAction:
@@ -482,6 +726,27 @@ class TestDashboard:
             mini_part = panel.split("user2@example.com", 1)[1]
             assert "━" not in mini_part
 
+    async def test_disabled_marker_on_active_card_and_mini(self, tmp_path):
+        # A disabled account is still shown; it's just annotated so the user
+        # can see it's held out of auto-rotation — on the full card when it's
+        # the active login, and on the one-line form otherwise.
+        fake = FakeSwitcher(
+            [
+                make_account(1, active=True, disabled=True),
+                make_account(2, disabled=True),
+            ],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            from claude_swap.tui.widgets import AccountsPanel
+
+            panel = app.screen.query_one(AccountsPanel).render().plain
+            assert "● active" in panel  # still the active card
+            # both the active card and the mini row carry the marker
+            assert panel.count("(disabled)") == 2
+
     async def test_active_card_skips_absent_window_and_shows_scoped(self, tmp_path):
         fake = FakeSwitcher(
             [
@@ -538,7 +803,9 @@ class TestDashboard:
                 "watch",
                 "auto",
                 "add-menu",
+                "disable-menu",
                 "remove-menu",
+                "theme-menu",
                 "quit",
             ]
             # nest into Add (index 3), then back out with escape
@@ -576,6 +843,29 @@ class TestDashboard:
             assert any("dev (user1@example.com)" in label for label in labels)
             assert any("plain@example.com" in label for label in labels)
             assert not any("(plain@example.com)" in label for label in labels)
+
+    async def test_remove_menu_label_renders_bracket_tag_literally(self, tmp_path):
+        # The remove menu labels each account with `[{display_tag}]`, and an
+        # org name of "red" makes that literally "[red]" — a valid Rich
+        # color markup tag. MenuItem must render it as text, not consume it
+        # as styling (which would silently drop the tag from the label).
+        fake = FakeSwitcher(
+            [dataclasses.replace(make_account(1, active=True), org_name="red")],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            from textual.widgets import ListView, Static
+
+            from claude_swap.tui.widgets import MenuItem
+
+            await menu_select(pilot, "remove-menu")
+            menu = app.screen.query_one("#menu", ListView)
+            labels = [
+                item.query_one(Static).render().plain for item in menu.query(MenuItem)
+            ]
+            assert any("[red]" in label for label in labels)
 
     async def test_back_menu_entry_pops_submenu(self, tmp_path):
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
@@ -676,6 +966,51 @@ class TestDashboard:
             await pilot.press("n")
             await settle(pilot)
             assert not any(call[0] == "remove" for call in fake.calls)
+
+    async def test_disable_via_menu_toggles_without_confirm(self, tmp_path):
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "disable-menu")
+            await menu_select(pilot, "disable:2")  # no modal — direct action
+            await settle(pilot)
+            assert ("set_disabled", "2", True) in fake.calls
+            # the submenu pops back to root after the toggle
+            from textual.widgets import ListView
+
+            from claude_swap.tui.widgets import MenuItem
+
+            menu = app.screen.query_one("#menu", ListView)
+            ids = [item.action_id for item in menu.query(MenuItem)]
+            assert ids[0] == "switch"
+
+    async def test_disable_menu_row_reflects_state_and_re_enables(self, tmp_path):
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2, disabled=True)],
+            tmp_path,
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "disable-menu")
+            from textual.widgets import ListView, Static
+
+            from claude_swap.tui.widgets import MenuItem
+
+            menu = app.screen.query_one("#menu", ListView)
+            labels = [
+                item.query_one(Static).render().plain for item in menu.query(MenuItem)
+            ]
+            # the already-disabled account offers to enable; the active one to disable
+            assert any("(disabled)" in label and "enable" in label for label in labels)
+            assert any("disable" in label and "(disabled)" not in label for label in labels)
+            # selecting the disabled account flips it back on
+            await menu_select(pilot, "disable:2")
+            await settle(pilot)
+            assert ("set_disabled", "2", False) in fake.calls
 
     async def test_modal_arrow_keys_choose_button(self, tmp_path):
         fake = FakeSwitcher(
@@ -850,6 +1185,97 @@ class TestWatchScreen:
             await pilot.press("escape")
             await pilot.pause()
             assert isinstance(app.screen, DashboardScreen)
+
+    async def test_blocked_normal_allows_store_only_repaint_without_stale_overpaint(
+        self, tmp_path
+    ):
+        normal = make_account(1, active=True, entry=make_usage_at(100.0, pct=10.0))
+        store = make_account(1, active=True, entry=make_usage_at(200.0, pct=80.0))
+        fake = BlockingSnapshotSwitcher(normal, store, tmp_path)
+        app = make_app(fake)
+
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_event(fake.normal_started)
+            app._tick()
+            await wait_event(fake.store_done)
+            await pilot.pause()
+            assert app.snapshot.accounts[0].usage.last_good["five_hour"]["pct"] == 80.0
+
+            fake.normal_release.set()
+            await wait_event(fake.normal_done)
+            await pilot.pause()
+            assert app.snapshot.accounts[0].usage.last_good["five_hour"]["pct"] == 80.0
+            assert fake.fetch_sets == [None, set()]
+
+    async def test_late_normal_can_advance_usage_after_store_repaint(self, tmp_path):
+        normal = make_account(1, active=True, entry=make_usage_at(200.0, pct=80.0))
+        store = make_account(1, active=True, entry=make_usage_at(100.0, pct=10.0))
+        fake = BlockingSnapshotSwitcher(normal, store, tmp_path)
+        app = make_app(fake)
+
+        async with app.run_test(size=(100, 40)) as pilot:
+            await wait_event(fake.normal_started)
+            app._tick()
+            await wait_event(fake.store_done)
+            await pilot.pause()
+            assert app.snapshot.accounts[0].usage.last_good["five_hour"]["pct"] == 10.0
+
+            fake.normal_release.set()
+            await wait_event(fake.normal_done)
+            await pilot.pause()
+            assert app.snapshot.accounts[0].usage.last_good["five_hour"]["pct"] == 80.0
+
+    async def test_repeated_ticks_keep_store_lane_single_flight(self, tmp_path):
+        normal = make_account(1, active=True, entry=make_usage_at(100.0, pct=10.0))
+        store = make_account(1, active=True, entry=make_usage_at(200.0, pct=80.0))
+        fake = BlockingSnapshotSwitcher(normal, store, tmp_path)
+        fake.block_store = True
+        app = make_app(fake)
+
+        async with app.run_test(size=(100, 40)):
+            await wait_event(fake.normal_started)
+            app._tick()
+            await wait_event(fake.store_started)
+            app._tick()
+            app._tick()
+            assert fake.fetch_sets == [None, set()]
+            fake.store_release.set()
+            fake.normal_release.set()
+            await wait_event(fake.store_done)
+            await wait_event(fake.normal_done)
+
+    async def test_store_only_mode_launches_only_store_lane(self, tmp_path):
+        fake = self._fake(tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            fake.fetch_sets.clear()
+            app.set_store_only(True)
+            await settle(pilot)
+            assert fake.fetch_sets == [set()]
+
+    async def test_watch_title_shows_snapshot_age_and_long_refresh(self, tmp_path):
+        app = make_app(self._fake(tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await pilot.pause()
+            from textual.widgets import Static
+
+            title = app.screen.query_one("#list-title", Static)
+            # Fresh snapshots stay quiet; the age note is a staleness alarm.
+            assert "snapshot" not in title.render().plain
+            app.snapshot = dataclasses.replace(
+                app.snapshot, taken_at=time.time() - app.SNAPSHOT_AGE_NOTE_S - 1.0
+            )
+            app._update_refresh_status()
+            await pilot.pause()
+            assert "snapshot 1m ago" in title.render().plain
+            app._normal_refreshing = True
+            app._normal_started_at = time.time() - app.POLL_INTERVAL_S - 1.0
+            app._update_refresh_status()
+            await pilot.pause()
+            assert "refreshing" in title.render().plain
 
 
 def fake_calls(app) -> list[tuple]:
@@ -1117,6 +1543,18 @@ class TestEventText:
 
         assert event.human() in event_text(event).plain
 
+    def test_event_text_uses_light_accent_for_switch(self):
+        from claude_swap.tui.autoview import event_text
+        from claude_swap.tui.theme import ACCENT_LIGHT, CSWAP_LIGHT, Palette
+
+        event = SwitchEvent(
+            trigger="proactive",
+            from_ref={"number": 1, "email": "a@x.com"},
+            to_ref={"number": 2, "email": "b@x.com"},
+        )
+        text = event_text(event, palette=Palette.from_theme(CSWAP_LIGHT))
+        assert any(ACCENT_LIGHT in str(s.style) for s in text.spans)
+
 
 # ---------------------------------------------------------------------------
 # accounts_snapshot on the real switcher
@@ -1200,3 +1638,75 @@ class TestBareInvocation:
             cli.main()
         assert excinfo.value.code == 0
         assert launched["start"] == "watch"
+
+
+# ---------------------------------------------------------------------------
+# Theme wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestThemeWiring:
+    async def test_mount_selects_light_theme_from_settings(self, tmp_path):
+        (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "light"}}))
+        fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test() as pilot:
+            await settle(pilot)
+            assert app.theme == "cswap-light"
+
+    async def test_auto_setting_uses_detected_light(self, tmp_path):
+        (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "auto"}}))
+        fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
+        from claude_swap.tui.app import CswapApp
+        app = CswapApp(fake, detected="light")
+        async with app.run_test() as pilot:
+            await settle(pilot)
+            assert app.theme == "cswap-light"
+
+    async def test_auto_setting_no_detection_falls_back_to_dark(self, tmp_path):
+        (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "auto"}}))
+        fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
+        from claude_swap.tui.app import CswapApp
+        app = CswapApp(fake, detected=None)
+        async with app.run_test() as pilot:
+            await settle(pilot)
+            assert app.theme == "cswap-dark"
+
+    async def test_toggle_cycles_dark_light_auto(self, tmp_path):
+        (tmp_path / "settings.json").write_text(json.dumps({"ui": {"theme": "dark"}}))
+        fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
+        from claude_swap.tui.app import CswapApp
+        app = CswapApp(fake, detected="light")
+        async with app.run_test() as pilot:
+            await settle(pilot)
+            assert app.theme == "cswap-dark"          # setting dark
+            app.action_toggle_theme(); await pilot.pause()
+            assert app.theme == "cswap-light"          # → light
+            app.action_toggle_theme(); await pilot.pause()
+            assert app.theme == "cswap-light"          # → auto, detected=light
+            assert json.loads((tmp_path / "settings.json").read_text())["ui"]["theme"] == "auto"
+            app.action_toggle_theme(); await pilot.pause()
+            assert app.theme == "cswap-dark"           # → back to dark
+
+    async def test_theme_menu_marks_current_and_applies(self, tmp_path):
+        from textual.widgets import ListView, Static
+
+        from claude_swap.tui.widgets import MenuItem
+
+        fake = FakeSwitcher([make_account("1", active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            assert app._theme_name == "auto"  # default
+            await menu_select(pilot, "theme-menu")
+            menu = app.screen.query_one("#menu", ListView)
+            labels = [it.query_one(Static).render().plain for it in menu.query(MenuItem)]
+            assert any("dark" in lbl for lbl in labels)
+            assert any("light" in lbl for lbl in labels)
+            current = next(lbl for lbl in labels if "auto" in lbl)
+            assert "●" in current  # the current theme is marked
+            await menu_select(pilot, "theme:light")
+            assert app._theme_name == "light"
+            assert app.theme == "cswap-light"
+

@@ -38,7 +38,7 @@ MenuEntries = list[tuple[str, str]]  # (label, action_id)
 _BACK = ("← back", "back")
 
 
-class DashboardScreen(Screen[None]):
+class DashboardScreen(Screen):
     BINDINGS = [
         Binding("s", "open_switch", "Switch accounts"),
         Binding("w", "app.open_watch", "Watch"),
@@ -78,7 +78,9 @@ class DashboardScreen(Screen[None]):
             ("Watch accounts", "watch"),
             ("Auto-switch view", "auto"),
             ("Add account…", "add-menu"),
+            ("Disable / enable account…", "disable-menu"),
             ("Remove account…", "remove-menu"),
+            ("Theme…", "theme-menu"),
             ("Quit", "quit"),
         ]
 
@@ -98,6 +100,31 @@ class DashboardScreen(Screen[None]):
                 f"remove:{acc.number}",
             )
             for acc in (snap.accounts if snap else ())
+        ]
+        entries.append(_BACK)
+        return entries
+
+    def _disable_entries(self) -> MenuEntries:
+        """One row per account, labelled with its current state and the action
+        selecting it will take (enable a disabled one, disable an active one)."""
+        snap = self.app.snapshot
+        entries: MenuEntries = []
+        for acc in (snap.accounts if snap else ()):
+            name = f"{acc.alias} ({acc.email})" if acc.alias else acc.email
+            action = "→ enable" if acc.disabled else "→ disable"
+            state = "  (disabled)" if acc.disabled else ""
+            entries.append(
+                (f"{acc.number}  {name}{state}   {action}", f"disable:{acc.number}")
+            )
+        entries.append(_BACK)
+        return entries
+
+    def _theme_entries(self) -> MenuEntries:
+        """dark / light / auto, with the active setting marked."""
+        current = self.app._theme_name
+        entries: MenuEntries = [
+            (f"{'●' if name == current else ' '} {name}", f"theme:{name}")
+            for name in ("dark", "light", "auto")
         ]
         entries.append(_BACK)
         return entries
@@ -152,6 +179,19 @@ class DashboardScreen(Screen[None]):
                 "?",
             )
             app.confirm_remove(number, email)
+        elif action_id == "theme-menu":
+            await self._push_menu("theme", self._theme_entries())
+        elif action_id.startswith("theme:"):
+            name = action_id.split(":", 1)[1]
+            app.apply_theme(name)
+            app.notify(f"Theme: {name}")
+            await self._pop_menu()
+        elif action_id == "disable-menu":
+            await self._push_menu("disable / enable", self._disable_entries())
+        elif action_id.startswith("disable:"):
+            number = action_id.split(":", 1)[1]
+            app.do_toggle_disabled(number)
+            await self._pop_menu()
         else:
             actions[action_id]()
 
@@ -171,7 +211,7 @@ class DashboardScreen(Screen[None]):
         self.query_one("#menu", ListView).action_cursor_up()
 
 
-class AccountListScreen(Screen[None]):
+class AccountListScreen(Screen):
     """Shared machinery: a live ListView of full account cards.
 
     Subclasses decide what the cursor does — :class:`SwitchScreen` is
@@ -314,10 +354,21 @@ class WatchScreen(AccountListScreen):
         self._selecting = False
 
     def on_mount(self) -> None:
-        self.query_one("#list-title", Static).update(self._WATCH_TITLE)
+        self.watch(self.app, "refresh_status", self._on_refresh_status)
+        self.query_one("#list-title", Static).update(self._title_text())
         super().on_mount()
 
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+    def _title_text(self) -> str:
+        if self._selecting:
+            return self._SELECT_TITLE
+        status = self.app.refresh_status
+        return f"{self._WATCH_TITLE} · {status}" if status else self._WATCH_TITLE
+
+    def _on_refresh_status(self, status: str) -> None:
+        if not self._selecting:
+            self.query_one("#list-title", Static).update(self._title_text())
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "select_highlighted" and not self._selecting:
             return False  # hidden and inert until selection is armed
         return True
@@ -342,7 +393,7 @@ class WatchScreen(AccountListScreen):
         else:
             listview.index = None
             self.set_focus(None)
-            title.update(self._WATCH_TITLE)
+            title.update(self._title_text())
         self.refresh_bindings()
 
     def action_toggle_select(self) -> None:

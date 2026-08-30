@@ -31,48 +31,38 @@ from claude_swap.autoswitch import (
     pct_label,
 )
 from claude_swap.models import AccountsSnapshot
-from claude_swap.settings import (
-    SETTING_SPECS,
-    AutoSwitchSettings,
-    load_settings,
-    parse_model_names,
-)
+from claude_swap.settings import SETTING_SPECS, load_settings, parse_model_names
 from claude_swap.tui import data
 from claude_swap.tui.modals import ConfirmModal
-from claude_swap.tui.theme import (
-    ACCENT,
-    FOREGROUND,
-    MUTED,
-    SEV_CRIT,
-    SEV_WARN,
-    severity_color,
-)
+from claude_swap.tui.theme import Palette
 from claude_swap.tui.widgets import AccountsPanel
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
 
-_EVENT_STYLES = {
-    "switch": ACCENT,
-    "error": SEV_WARN,
-    "account-quarantined": SEV_WARN,
-    "all-exhausted": SEV_CRIT,
+_EVENT_ROLES = {
+    "switch": "accent",
+    "error": "sev_warn",
+    "account-quarantined": "sev_warn",
+    "all-exhausted": "sev_crit",
 }
 _QUIET_KINDS = {"poll", "no-switch", "sleep", "account-unquarantined"}
 
 
-def event_text(event: AutoSwitchEvent) -> Text:
+def event_text(event: AutoSwitchEvent, *, palette: Palette = Palette.DARK) -> Text:
     """Log line for one engine event, styled like the CLI's human renderer."""
-    style = _EVENT_STYLES.get(event.kind)
-    if style is None:
-        style = MUTED if event.kind in _QUIET_KINDS else FOREGROUND
+    role = _EVENT_ROLES.get(event.kind)
+    if role is not None:
+        style = getattr(palette, role)
+    else:
+        style = palette.muted if event.kind in _QUIET_KINDS else palette.foreground
     text = Text()
-    text.append(f"{data.clock_stamp()}  ", style=MUTED)
+    text.append(f"{data.clock_stamp()}  ", style=palette.muted)
     text.append(event.human(), style=style)
     return text
 
 
-class AutoScreen(Screen[None]):
+class AutoScreen(Screen):
     BINDINGS = [
         Binding("l", "toggle_live", "Go live / dry-run"),
         Binding("t", "adjust_threshold", "Threshold"),
@@ -87,7 +77,7 @@ class AutoScreen(Screen[None]):
     def __init__(self) -> None:
         super().__init__()
         self._engine: AutoSwitchEngine | None = None
-        self._settings: AutoSwitchSettings | None = None
+        self._settings = None
         # Session-only threshold adjustment (t, then arrows). Never written
         # to settings.json — same memory-only precedent as the dry-run
         # toggle. ``_configured_threshold`` is the mount-time file value the
@@ -120,6 +110,7 @@ class AutoScreen(Screen[None]):
         self.app.threshold_pct = self._settings.threshold
         self._update_summary()
         self.watch(self.app, "snapshot", self._on_snapshot)
+        self.watch(self.app, "theme", self._on_theme_change)
         self._start_engine(dry_run=True)
 
     def on_unmount(self) -> None:
@@ -132,6 +123,13 @@ class AutoScreen(Screen[None]):
             self.app.threshold_pct = self._configured_threshold
         self.app.set_store_only(False)
 
+    def _on_theme_change(self, _theme: str) -> None:
+        self._update_summary()
+        self._update_badge()
+        snap = self.app.snapshot
+        if snap is not None:
+            self._on_snapshot(snap)
+
     def action_back(self) -> None:
         if self._adjusting:
             self._end_adjust()
@@ -140,13 +138,12 @@ class AutoScreen(Screen[None]):
 
     # -- threshold adjust mode ------------------------------------------------
 
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action in ("threshold_step", "adjust_done") and not self._adjusting:
             return False  # hidden and inert until adjust mode is armed
         return True
 
     def action_adjust_threshold(self) -> None:
-        assert self._settings is not None  # on_mount loads settings first
         if self._adjusting:
             self._end_adjust()
             return
@@ -160,16 +157,13 @@ class AutoScreen(Screen[None]):
             self._end_adjust()
 
     def action_threshold_step(self, delta: float) -> None:
-        assert self._settings is not None  # on_mount loads settings first
         if not self._adjusting:
             return
         spec = SETTING_SPECS["autoswitch.threshold"]
-        assert spec.lo is not None and spec.hi is not None  # numeric spec
         value = min(spec.hi, max(spec.lo, self._settings.threshold + delta))
         self._set_threshold(value)
 
     def _end_adjust(self) -> None:
-        assert self._settings is not None  # on_mount loads settings first
         self._adjusting = False
         self._update_summary()
         self.refresh_bindings()
@@ -181,12 +175,11 @@ class AutoScreen(Screen[None]):
             Text(
                 f"— threshold set to {pct_label(self._settings.threshold)}% "
                 "for this session —",
-                style=MUTED,
+                style=Palette.from_theme(self.app.current_theme).muted,
             )
         )
 
     def _set_threshold(self, value: float) -> None:
-        assert self._settings is not None  # on_mount loads settings first
         if value == self._settings.threshold:
             return
         self._settings = replace(self._settings, threshold=value)
@@ -197,24 +190,23 @@ class AutoScreen(Screen[None]):
         self._update_summary()
 
     def _update_summary(self) -> None:
-        assert self._settings is not None  # on_mount loads settings first
+        palette = Palette.from_theme(self.app.current_theme)
         text = Text()
         text.append("auto-switch · ")
         text.append(
             f"threshold {pct_label(self._settings.threshold)}%",
-            style=ACCENT if self._adjusting else "",
+            style=palette.accent if self._adjusting else "",
         )
         if self._settings.threshold != self._configured_threshold:
-            text.append(" (session)", style=MUTED)
+            text.append(" (session)", style=palette.muted)
         text.append(f" · poll every {self._settings.interval_seconds:.0f}s")
         if self._adjusting:
-            text.append("   ← → adjust · enter done", style=MUTED)
+            text.append("   ← → adjust · enter done", style=palette.muted)
         self.query_one("#auto-summary", Static).update(text)
 
     # -- engine -------------------------------------------------------------
 
     def _start_engine(self, *, dry_run: bool) -> None:
-        assert self._settings is not None  # on_mount loads settings first
         engine = AutoSwitchEngine(
             self.app.switcher,
             self._settings,
@@ -232,7 +224,12 @@ class AutoScreen(Screen[None]):
         self._update_badge()
         log = self.query_one("#event-log", RichLog)
         mode = "DRY-RUN (watching only)" if dry_run else "LIVE (will switch accounts)"
-        log.write(Text(f"— engine started: {mode} —", style=MUTED))
+        log.write(
+            Text(
+                f"— engine started: {mode} —",
+                style=Palette.from_theme(self.app.current_theme).muted,
+            )
+        )
 
     def _emit_from_thread(self, event: AutoSwitchEvent) -> None:
         """Engine ``on_event`` callback — runs on the worker thread."""
@@ -245,7 +242,8 @@ class AutoScreen(Screen[None]):
     def _on_engine_event(self, event: AutoSwitchEvent) -> None:
         if not self.is_attached:
             return
-        self.query_one("#event-log", RichLog).write(event_text(event))
+        palette = Palette.from_theme(self.app.current_theme)
+        self.query_one("#event-log", RichLog).write(event_text(event, palette=palette))
         if event.kind == "switch":
             self.app.request_refresh()
 
@@ -299,6 +297,7 @@ class AutoScreen(Screen[None]):
         """Switch targets ranked by remaining headroom (best first)."""
         # Same window set as the engine (autoswitch.model included), so the
         # displayed ranking can never disagree with the account it picks.
+        palette = Palette.from_theme(self.app.current_theme)
         models = parse_model_names(self._settings.model) if self._settings else ()
         ranked: list[tuple[float, str]] = []  # (sort key: pct used, number)
         lines: dict[str, Text] = {}
@@ -307,25 +306,25 @@ class AutoScreen(Screen[None]):
                 continue
             pct = binding_pct(acc.usage.last_good, models)
             entry = Text()
-            entry.append(f"\n  {acc.number:>2}  ", style=FOREGROUND)
-            entry.append(acc.email, style=FOREGROUND)
+            entry.append(f"\n  {acc.number:>2}  ", style=palette.foreground)
+            entry.append(acc.email, style=palette.foreground)
             if acc.usage.sentinel is not None:
                 entry.append(
-                    f"  {data.sentinel_label(acc.usage.sentinel)}", style=MUTED
+                    f"  {data.sentinel_label(acc.usage.sentinel)}", style=palette.muted
                 )
                 ranked.append((998.0, acc.number))
             elif pct is None:
-                entry.append("  usage unknown", style=MUTED)
+                entry.append("  usage unknown", style=palette.muted)
                 ranked.append((999.0, acc.number))
             else:
-                entry.append(f"  {pct:3.0f}% used", style=severity_color(pct))
+                entry.append(f"  {pct:3.0f}% used", style=palette.severity(pct))
                 ranked.append((pct, acc.number))
             lines[acc.number] = entry
 
         text = Text()
-        text.append("Next best", style=MUTED)
+        text.append("Next best", style=palette.muted)
         if not ranked:
-            text.append("\n  no other switchable accounts", style=MUTED)
+            text.append("\n  no other switchable accounts", style=palette.muted)
             return text
         for _pct, number in sorted(ranked):
             text.append(lines[number])

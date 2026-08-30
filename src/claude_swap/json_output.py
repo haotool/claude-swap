@@ -9,19 +9,15 @@ the single ``json.dumps`` (see cli.py).
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
 
-from claude_swap.usage_store import UsageEntry as StoreUsageEntry
-
-from claude_swap import oauth
+from claude_swap import oauth, pace
 
 # Bump only on a breaking change to any payload shape. Scripts key off this.
 SCHEMA_VERSION = 1
 
-# Sentinel entries the usage collectors yield in place of a usage dict. Kept
-# here (the serialization hub) so the human renderer and the JSON projection
-# agree instead of scattering raw strings. Human-facing wording for these
-# lives in ``list_reporter.SENTINEL_NOTES``.
+# Sentinel entries that ``_collect_usage`` / ``_fetch_active_usage`` yield in place
+# of a usage dict. Kept here (the serialization hub) so the human renderer and the
+# JSON projection agree instead of scattering raw strings.
 USAGE_NO_CREDENTIALS = "no credentials"
 USAGE_TOKEN_EXPIRED = "token expired"
 # API-key (``/login`` managed key) accounts have no subscription quota; usage is
@@ -36,44 +32,24 @@ USAGE_KEYCHAIN_UNAVAILABLE = "keychain unavailable"
 # replaces the credential; distinct from "token expired" (which Claude Code can
 # refresh on its own) because only the user can fix it.
 USAGE_RELOGIN_REQUIRED = "re-login needed"
-
-# The decision-grade usage value a store entry projects to: a usage dict, a
-# sentinel string, or None (unknown). See usage_store.UsageEntry.decision_value.
-UsageValue = dict[str, Any] | str | None
-
-# Sentinel usage values that mean "no real quota figure" — shared SSOT for the
-# switcher and the list reporter so trust checks can never diverge.
-_KNOWN_USAGE_SENTINELS = frozenset({
-    USAGE_API_KEY,
-    USAGE_KEYCHAIN_UNAVAILABLE,
-    USAGE_NO_CREDENTIALS,
-    USAGE_TOKEN_EXPIRED,
-})
+# The profile oracle proved the live credential belongs to a DIFFERENT account
+# than the slot's identity (foreign credential under a stale config — partial
+# cross-machine sync or a mid-``/login`` poll). Its quota is not this slot's, so
+# recording it would poison history and autoswitch decisions; distinct from
+# "token expired" because holding is wrong here — a switch repairs the drift
+# (stash the foreign credential, restore the slot's backup), so autoswitch
+# should treat the active as unknown-headroom and fail over.
+USAGE_FOREIGN_CREDENTIAL = "foreign credential"
 
 
-def slot_for_identity(
-    accounts: dict[str, Any],
-    email: str,
-    org_uuid: str,
-) -> str | None:
-    """Map a live ``(email, organizationUuid)`` to its managed slot number."""
-    for num, account in accounts.items():
-        if (
-            account.get("email") == email
-            and (account.get("organizationUuid", "") or "") == org_uuid
-        ):
-            return str(num)
-    return None
-
-
-def _window_to_json(entry: dict[str, Any]) -> dict[str, Any]:
+def _window_to_json(entry: dict) -> dict:
     """Project a 5h/7d usage window to JSON, preserving raw ``resetsAt``.
 
     ``countdown``/``clock`` are recomputed from ``resets_at`` at serialization
     time (the store may serve a measurement hours after its fetch); entries
     without ``resets_at`` fall back to the fetch-time strings.
     """
-    out: dict[str, Any] = {"pct": entry["pct"]}
+    out: dict = {"pct": entry["pct"]}
     if "resets_at" in entry:
         out["resetsAt"] = entry["resets_at"]
     cell = oauth.fresh_reset_strings(entry)
@@ -82,27 +58,64 @@ def _window_to_json(entry: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _scoped_window_to_json(entry: dict[str, Any]) -> dict[str, Any]:
-    """Project a per-model scoped weekly window, carrying its model name."""
+def _pace_fields(entry: dict, fetched_at: float | None) -> dict:
+    """Weekly-window pace fields (issue #125): additive, JSON-only.
+
+    Emitted only when pace is computable and not suppressed (see
+    ``claude_swap.pace.compute_pace``). ``projectedExhaustionAt`` is a linear
+    ETA — wide error bars against real, bursty usage — so it's kept out of
+    every human-facing surface and only ever appears here.
+    """
+    if fetched_at is None:
+        return {}
+    result = pace.compute_pace(entry, fetched_at=fetched_at)
+    if result is None:
+        return {}
+    out: dict = {
+        "expectedPct": round(result.expected_pct, 1),
+        "aheadOfPace": result.ahead,
+    }
+    eta = pace.projected_exhaustion_ts(result, fetched_at=fetched_at)
+    if eta is not None:
+        out["projectedExhaustionAt"] = (
+            datetime.fromtimestamp(eta, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        )
+    will_last = pace.will_last_to_reset(result)
+    if will_last is not None:
+        out["willLastToReset"] = will_last
+    return out
+
+
+def _weekly_window_to_json(entry: dict, fetched_at: float | None) -> dict:
+    """A 7d/scoped window's JSON projection, with pace fields layered in."""
     out = _window_to_json(entry)
+    out.update(_pace_fields(entry, fetched_at))
+    return out
+
+
+def _scoped_window_to_json(entry: dict, fetched_at: float | None) -> dict:
+    """Project a per-model scoped weekly window, carrying its model name."""
+    out = _weekly_window_to_json(entry, fetched_at)
     out["name"] = entry["name"]
     return out
 
 
-def usage_to_json(usage: dict[str, Any]) -> dict[str, Any]:
+def usage_to_json(usage: dict, fetched_at: float | None = None) -> dict:
     """Convert the internal usage dict to its camelCase JSON projection.
 
     Sub-keys are emitted only when present in the source (the API does not always
-    return every window or pay-as-you-go spend).
+    return every window or pay-as-you-go spend). ``fetched_at`` is the
+    measurement's fetch time; passing it adds pace fields to the weekly
+    windows (``seven_day``, ``scoped``) only — never ``five_hour`` (issue #125).
     """
-    out: dict[str, Any] = {}
+    out: dict = {}
     if "five_hour" in usage:
         out["fiveHour"] = _window_to_json(usage["five_hour"])
     if "seven_day" in usage:
-        out["sevenDay"] = _window_to_json(usage["seven_day"])
+        out["sevenDay"] = _weekly_window_to_json(usage["seven_day"], fetched_at)
     if "spend" in usage:
         spend = usage["spend"]
-        spend_out: dict[str, Any] = {
+        spend_out: dict = {
             "used": spend["used"],
             "limit": spend["limit"],
             "pct": spend["pct"],
@@ -115,51 +128,59 @@ def usage_to_json(usage: dict[str, Any]) -> dict[str, Any]:
             spend_out["countdown"], spend_out["clock"] = cell
         out["spend"] = spend_out
     if "scoped" in usage:
-        out["scoped"] = [_scoped_window_to_json(w) for w in usage["scoped"]]
+        out["scoped"] = [_scoped_window_to_json(w, fetched_at) for w in usage["scoped"]]
     return out
 
 
-def usage_fields(entry: UsageValue) -> tuple[str, dict[str, Any] | None]:
+def usage_fields(
+    entry: dict | str | None, fetched_at: float | None = None
+) -> tuple[str, dict | None]:
     """Map a collected usage entry to ``(usageStatus, usage|None)``.
 
     A collected entry is one of: a usage dict, the ``USAGE_TOKEN_EXPIRED`` sentinel
-    (active token expired while Claude Code owns it), the ``USAGE_API_KEY`` sentinel
+    (active token expired and the refresh was deferred this pass — lock
+    contention, unattributable lineage, or a failed persist; retried
+    automatically), the ``USAGE_API_KEY`` sentinel
     (managed API-key account, no subscription quota), the
     ``USAGE_KEYCHAIN_UNAVAILABLE`` sentinel (active Keychain unreadable), the
-    ``USAGE_NO_CREDENTIALS`` sentinel, or ``None`` (unknown — fetch failed or
-    the stored measurement is too old to act on).
+    ``USAGE_FOREIGN_CREDENTIAL`` sentinel (live credential proven to belong to
+    another account; usage suppressed, a switch repairs the drift), the
+    ``USAGE_NO_CREDENTIALS`` sentinel, or ``None`` (fetch failed). ``fetched_at``
+    is forwarded to ``usage_to_json`` for the weekly pace fields (issue #125).
     """
     if isinstance(entry, dict):
-        return "ok", usage_to_json(entry)
+        return "ok", usage_to_json(entry, fetched_at)
     if entry == USAGE_TOKEN_EXPIRED:
         return "token_expired", None
     if entry == USAGE_API_KEY:
         return "api_key", None
     if entry == USAGE_KEYCHAIN_UNAVAILABLE:
         return "keychain_unavailable", None
-    if entry == USAGE_NO_CREDENTIALS:
-        return "no_credentials", None
     if entry == USAGE_RELOGIN_REQUIRED:
         return "relogin_required", None
+    if entry == USAGE_FOREIGN_CREDENTIAL:
+        return "foreign_credential", None
     if isinstance(entry, str):
         return "no_credentials", None
     return "unavailable", None
 
 
-def account_ref(number: int | None, email: str) -> dict[str, Any]:
+def account_ref(number: int | None, email: str) -> dict:
     """A minimal account reference, used for switch ``from``/``to``."""
     return {"number": number, "email": email}
 
 
 def usage_freshness_fields(
     fetched_at: float | None, age_s: float | None
-) -> dict[str, Any]:
+) -> dict:
     """Additive ``usageFetchedAt``/``usageAgeSeconds`` fields describing how
     old the served ``usage`` measurement is (the store may serve last-good
-    data on fetch failure). Emitted only alongside a non-null ``usage``."""
+    data on fetch failure). Emitted under these names only alongside a
+    non-null ``usage``; ``last_good_usage_fields`` reuses them renamed to
+    ``lastGoodFetchedAt``/``lastGoodAgeSeconds`` for null-``usage`` rows."""
     if fetched_at is None:
         return {}
-    fields: dict[str, Any] = {
+    fields: dict = {
         "usageFetchedAt": (
             datetime.fromtimestamp(fetched_at, tz=timezone.utc)
             .isoformat(timespec="seconds")
@@ -171,21 +192,38 @@ def usage_freshness_fields(
     return fields
 
 
+def last_good_usage_fields(
+    usage: dict | None, fetched_at: float | None, age_s: float | None
+) -> dict:
+    """Display-grade last-good usage, separate from decision-grade ``usage``."""
+    if not isinstance(usage, dict) or fetched_at is None:
+        return {}
+    freshness = usage_freshness_fields(fetched_at, age_s)
+    out = {
+        "lastGoodUsage": usage_to_json(usage, fetched_at),
+        "lastGoodFetchedAt": freshness["usageFetchedAt"],
+    }
+    if "usageAgeSeconds" in freshness:
+        out["lastGoodAgeSeconds"] = freshness["usageAgeSeconds"]
+    return out
+
+
 def account_row(
     number: int,
     email: str,
     org_name: str,
     org_uuid: str,
     active: bool,
-    usage_entry: UsageValue,
+    usage_entry: dict | str | None,
     *,
     usage_fetched_at: float | None = None,
     usage_age_s: float | None = None,
+    last_good_usage: dict | None = None,
     alias: str = "",
     disabled: bool = False,
-) -> dict[str, Any]:
+) -> dict:
     """A full account row for ``--list``."""
-    status, usage = usage_fields(usage_entry)
+    status, usage = usage_fields(usage_entry, usage_fetched_at)
     row = {
         "number": number,
         "email": email,
@@ -204,156 +242,18 @@ def account_row(
         row["disabled"] = True
     if usage is not None:
         row.update(usage_freshness_fields(usage_fetched_at, usage_age_s))
+    else:
+        row.update(
+            last_good_usage_fields(
+                last_good_usage, usage_fetched_at, usage_age_s
+            )
+        )
     return row
 
 
-def error_envelope(exc: Exception) -> dict[str, Any]:
+def error_envelope(exc: Exception) -> dict:
     """The structured error payload emitted on a handled ClaudeSwitchError."""
     return {
         "schemaVersion": SCHEMA_VERSION,
         "error": {"type": type(exc).__name__, "message": str(exc)},
     }
-
-
-def empty_list_payload() -> dict[str, Any]:
-    """Build the ``--list --json`` payload when no accounts are managed."""
-    return {
-        "schemaVersion": SCHEMA_VERSION,
-        "activeAccountNumber": None,
-        "accounts": [],
-    }
-
-
-def list_payload(
-    accounts_info: list[tuple[int, str, str, str, bool, str, str]],
-    entries: dict[str, StoreUsageEntry],
-    disabled: frozenset[str] = frozenset(),
-) -> dict[str, Any]:
-    """Build the ``--list --json`` payload from gathered account + usage data.
-
-    ``disabled`` names the slot numbers held out of rotation (``cswap
-    disable``) so their rows carry the additive ``disabled`` field.
-    """
-    active_num: int | None = None
-    accounts = []
-    for num, email, org_name, org_uuid, is_active, _, alias in accounts_info:
-        if is_active:
-            active_num = num
-        entry = entries[str(num)]
-        # JSON carries the decision-grade value: last-good only while it is
-        # recent enough to act on (≤ STALE_OK_S), else unavailable. Showing
-        # older measurements is a human-display affordance only — scripts
-        # keying on usageStatus == "ok" must not act on arbitrarily old data.
-        accounts.append(
-            account_row(
-                num, email, org_name, org_uuid, is_active,
-                entry.decision_value(),
-                usage_fetched_at=entry.fetched_at,
-                usage_age_s=entry.age_s,
-                alias=alias,
-                disabled=str(num) in disabled,
-            )
-        )
-    return {
-        "schemaVersion": SCHEMA_VERSION,
-        "activeAccountNumber": active_num,
-        "accounts": accounts,
-    }
-
-
-def switch_result_from_op(
-    op: dict[str, Any],
-    strategy: str,
-    extra_warnings: list[str] | None = None,
-) -> dict[str, Any]:
-    """Build a switch result from a ``_perform_switch`` return value."""
-    from_ref = op["from"]
-    to_ref = op["to"]
-    switched = from_ref != to_ref
-    if switched:
-        reason = "switched"
-        message = f"Switched to Account-{to_ref['number']} ({to_ref['email']})"
-    else:
-        reason = "already-active"
-        message = f"Already on Account-{to_ref['number']} ({to_ref['email']})"
-    return {
-        "schemaVersion": SCHEMA_VERSION,
-        "switched": switched,
-        "from": from_ref,
-        "to": to_ref,
-        "strategy": strategy,
-        "reason": reason,
-        "message": message,
-        "warnings": (extra_warnings or []) + op["warnings"],
-    }
-
-
-def switch_noop(
-    *,
-    strategy: str,
-    reason: str,
-    message: str,
-    from_ref: dict[str, Any] | None = None,
-    to_ref: dict[str, Any] | None = None,
-    warnings: list[str] | None = None,
-) -> dict[str, Any]:
-    """Build a no-op switch result (``switched: false``)."""
-    if from_ref is None:
-        from_ref = to_ref
-    return {
-        "schemaVersion": SCHEMA_VERSION,
-        "switched": False,
-        "from": from_ref,
-        "to": to_ref,
-        "strategy": strategy,
-        "reason": reason,
-        "message": message,
-        "warnings": warnings or [],
-    }
-
-
-def status_payload(
-    *,
-    identity: tuple[str, str] | None,
-    account_num: str | None,
-    account_record: dict[str, Any] | None,
-    usage_entry: StoreUsageEntry | None,
-    total_managed: int | None = None,
-) -> dict[str, Any]:
-    """Build the ``--status --json`` payload."""
-    if identity is None:
-        return {"schemaVersion": SCHEMA_VERSION, "active": None}
-    current_email, current_org_uuid = identity
-    if account_num is None or account_record is None:
-        return {
-            "schemaVersion": SCHEMA_VERSION,
-            "active": {"email": current_email, "managed": False},
-        }
-    org_name = account_record.get("organizationName", "") or ""
-    org_uuid = account_record.get("organizationUuid", "") or ""
-    alias = account_record.get("alias", "") or ""
-    # Decision-grade projection, same rule as the --list payload: stale
-    # beyond STALE_OK_S reports unavailable, not "ok" with old numbers.
-    entry = usage_entry if usage_entry is not None else StoreUsageEntry()
-    status, usage = usage_fields(entry.decision_value())
-    active: dict[str, Any] = {
-        "number": int(account_num),
-        "email": current_email,
-        "organizationName": org_name,
-        "organizationUuid": org_uuid,
-        "isOrganization": bool(org_uuid),
-        "managed": True,
-        "usageStatus": status,
-        "usage": usage,
-    }
-    if alias:
-        active["alias"] = alias
-    if usage is not None:
-        active.update(usage_freshness_fields(entry.fetched_at, entry.age_s))
-    payload: dict[str, Any] = {
-        "schemaVersion": SCHEMA_VERSION,
-        "active": active,
-    }
-    if total_managed is not None:
-        payload["totalManagedAccounts"] = total_managed
-    return payload

@@ -2,25 +2,24 @@
 
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import time
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from claude_swap.process_detection import (
-    _is_pid_alive_windows,
+    ClaudeSession,
+    IdeInstance,
     get_claude_dir,
     get_running_instances,
     is_pid_alive,
     list_ide_instances,
     list_sessions,
 )
-from claude_swap.printer import abbreviate_path, entrypoint_label
+from claude_swap.printer import abbreviate_path, entrypoint_label, format_age
 
 
 # --- get_claude_dir ---
@@ -86,122 +85,6 @@ class TestIsPidAlive:
         assert is_pid_alive(-1) is False
 
 
-def _fake_ctypes(
-    open_result: int,
-    last_error: int = 0,
-    system_pids: tuple[int, ...] = (),
-    enum_fails: bool = False,
-) -> tuple[SimpleNamespace, MagicMock]:
-    """In-memory kernel32/psapi so the win32 branch runs on any test host."""
-    kernel32 = MagicMock()
-    kernel32.OpenProcess.return_value = open_result
-    kernel32.CloseHandle.return_value = 1
-
-    psapi = MagicMock()
-
-    def enum_processes(array, cb, needed):
-        if enum_fails:
-            return 0
-        capacity = cb // ctypes.sizeof(ctypes.c_ulong)
-        filled = min(len(system_pids), capacity)
-        for i in range(filled):
-            array[i] = system_pids[i]
-        # A saturated array (bytes returned == cb) is the documented
-        # "buffer may be too small, retry larger" signal.
-        needed.value = filled * ctypes.sizeof(ctypes.c_ulong)
-        return 1
-
-    psapi.EnumProcesses.side_effect = enum_processes
-
-    def win_dll(name, **kwargs):
-        return psapi if name == "psapi" else kernel32
-
-    fake = SimpleNamespace(
-        WinDLL=MagicMock(side_effect=win_dll),
-        get_last_error=lambda: last_error,
-        c_ulong=ctypes.c_ulong,
-        sizeof=ctypes.sizeof,
-        # The fake EnumProcesses writes .value on its third argument
-        # directly, so byref degrades to identity.
-        byref=lambda obj: obj,
-        psapi=psapi,
-    )
-    return fake, kernel32
-
-
-class TestIsPidAliveWindows:
-    def test_open_handle_means_alive_and_is_closed(self):
-        fake, kernel32 = _fake_ctypes(open_result=1234)
-        with patch("claude_swap.process_detection.sys.platform", "win32"), \
-             patch("claude_swap.process_detection.ctypes", fake):
-            assert _is_pid_alive_windows(4242) is True
-        kernel32.CloseHandle.assert_called_once_with(1234)
-
-    def test_access_denied_with_pid_in_system_list_means_alive(self):
-        # OpenProcess returns 0 with ERROR_ACCESS_DENIED for an elevated
-        # process that is very much alive; treating it as dead made the
-        # engine idle forever next to an admin Claude Code session.
-        fake, _ = _fake_ctypes(
-            open_result=0, last_error=5, system_pids=(4, 4242, 9001)
-        )
-        with patch("claude_swap.process_detection.sys.platform", "win32"), \
-             patch("claude_swap.process_detection.ctypes", fake):
-            assert _is_pid_alive_windows(4242) is True
-
-    def test_access_denied_with_pid_not_in_system_list_means_dead(self):
-        # Windows 11 hands out ERROR_ACCESS_DENIED for many dead and
-        # never-existing PIDs too (giampaolo/psutil#2359); without the
-        # EnumProcesses cross-check every stale session file reads alive.
-        fake, _ = _fake_ctypes(
-            open_result=0, last_error=5, system_pids=(4, 9001)
-        )
-        with patch("claude_swap.process_detection.sys.platform", "win32"), \
-             patch("claude_swap.process_detection.ctypes", fake):
-            assert _is_pid_alive_windows(4242) is False
-
-    def test_access_denied_with_enum_failure_stays_alive(self):
-        # If EnumProcesses itself fails there is no verdict; stay fail-closed
-        # (alive) so a transient psapi failure never lets cswap treat a
-        # possibly-live elevated session as dead and refresh under it.
-        fake, _ = _fake_ctypes(open_result=0, last_error=5, enum_fails=True)
-        with patch("claude_swap.process_detection.sys.platform", "win32"), \
-             patch("claude_swap.process_detection.ctypes", fake):
-            assert _is_pid_alive_windows(4242) is True
-
-    def test_access_denied_grows_array_until_pid_list_fits(self):
-        # EnumProcesses signals "array full" only via bytes-returned == array
-        # size; the helper must retry with a larger array, not truncate.
-        fake, _ = _fake_ctypes(
-            open_result=0,
-            last_error=5,
-            system_pids=tuple(range(1, 1025)) + (4242,),
-        )
-        with patch("claude_swap.process_detection.sys.platform", "win32"), \
-             patch("claude_swap.process_detection.ctypes", fake):
-            assert _is_pid_alive_windows(4242) is True
-        assert fake.psapi.EnumProcesses.call_count == 2
-
-    def test_other_open_failure_means_dead(self):
-        # ERROR_INVALID_PARAMETER (87) is what a reaped PID produces.
-        fake, _ = _fake_ctypes(open_result=0, last_error=87)
-        with patch("claude_swap.process_detection.sys.platform", "win32"), \
-             patch("claude_swap.process_detection.ctypes", fake):
-            assert _is_pid_alive_windows(4242) is False
-
-    def test_kernel32_loaded_with_use_last_error(self):
-        # Without use_last_error=True, ctypes.get_last_error() reads a stale
-        # thread-local slot and the ACCESS_DENIED check is meaningless.
-        fake, _ = _fake_ctypes(open_result=1)
-        with patch("claude_swap.process_detection.sys.platform", "win32"), \
-             patch("claude_swap.process_detection.ctypes", fake):
-            _is_pid_alive_windows(4242)
-        fake.WinDLL.assert_called_once_with("kernel32", use_last_error=True)
-
-    def test_non_windows_platform_returns_false(self):
-        with patch("claude_swap.process_detection.sys.platform", "linux"):
-            assert _is_pid_alive_windows(4242) is False
-
-
 # --- list_sessions ---
 
 
@@ -253,10 +136,22 @@ class TestListSessions:
     def test_missing_sessions_dir(self, tmp_path):
         assert list_sessions(tmp_path) == []
 
-    def test_corrupt_json(self, tmp_path):
+    @pytest.mark.parametrize(
+        "write_bad_file",
+        [
+            lambda p: p.write_text("not json{{{", encoding="utf-8"),
+            lambda p: p.write_bytes(b"\xff\xfe{\"pid\": 1}"),
+            lambda p: p.write_text(json.dumps({"pid": 2**31}), encoding="utf-8"),
+            lambda p: p.write_text("[" * 2000 + "]" * 2000, encoding="utf-8"),
+            lambda p: p.write_text("[]", encoding="utf-8"),
+        ],
+        ids=["invalid_json", "invalid_utf8", "pid_overflows_c_long",
+             "json_nested_too_deep", "json_is_an_array"],
+    )
+    def test_corrupt_session_file_is_skipped(self, tmp_path, write_bad_file):
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
-        (sessions_dir / "9999.json").write_text("not json{{{", encoding="utf-8")
+        write_bad_file(sessions_dir / "9999.json")
 
         result = list_sessions(tmp_path)
         assert result == []
@@ -361,10 +256,21 @@ class TestListIdeInstances:
     def test_missing_ide_dir(self, tmp_path):
         assert list_ide_instances(tmp_path) == []
 
-    def test_corrupt_json(self, tmp_path):
+    @pytest.mark.parametrize(
+        "write_bad_file",
+        [
+            lambda p: p.write_text("broken", encoding="utf-8"),
+            lambda p: p.write_text(json.dumps({"pid": 2**31}), encoding="utf-8"),
+            lambda p: p.write_text("[" * 2000 + "]" * 2000, encoding="utf-8"),
+            lambda p: p.write_text("[]", encoding="utf-8"),
+        ],
+        ids=["invalid_json", "pid_overflows_c_long", "json_nested_too_deep",
+             "json_is_an_array"],
+    )
+    def test_corrupt_json(self, tmp_path, write_bad_file):
         ide_dir = tmp_path / "ide"
         ide_dir.mkdir()
-        (ide_dir / "9999.lock").write_text("broken", encoding="utf-8")
+        write_bad_file(ide_dir / "9999.lock")
 
         assert list_ide_instances(tmp_path) == []
 
@@ -457,25 +363,17 @@ class TestAbbreviatePath:
 
 class TestFormatAge:
     def test_just_now(self):
-        from claude_swap.printer import format_age
-
         now_ms = int(time.time() * 1000)
         assert format_age(now_ms) == "just now"
 
     def test_minutes(self):
-        from claude_swap.printer import format_age
-
         ms = int((time.time() - 300) * 1000)  # 5 minutes ago
         assert format_age(ms) == "5m ago"
 
     def test_hours(self):
-        from claude_swap.printer import format_age
-
         ms = int((time.time() - 7200) * 1000)  # 2 hours ago
         assert format_age(ms) == "2h ago"
 
     def test_days(self):
-        from claude_swap.printer import format_age
-
         ms = int((time.time() - 172800) * 1000)  # 2 days ago
         assert format_age(ms) == "2d ago"

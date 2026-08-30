@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.models import Platform
-from claude_swap.service_backends import select_backend
 from claude_swap.protocols import ServiceHost
+from claude_swap.service_backends import select_backend
 
 
 def _require_supported_platform() -> None:

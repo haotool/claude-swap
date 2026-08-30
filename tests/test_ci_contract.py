@@ -26,7 +26,7 @@ def test_ci_windows_task_scheduler_job_is_blocking() -> None:
     # Scoped to this job so a justified waiver elsewhere stays possible.
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
-    job = re.search(r"^  windows-task-scheduler:.*?(?=^  \S|\Z)", workflow, re.M | re.S)
+    job = re.search(r"^  windows-task-scheduler:.*?(?=^  \S|\Z)", workflow, re.MULTILINE | re.DOTALL)
     assert job is not None
     assert "continue-on-error" not in job.group(0)
     assert "Start-Sleep" in job.group(0)

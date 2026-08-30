@@ -10,18 +10,13 @@ import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, cast
 
-# Cycle-safe only because __init__ binds __version__ before importing
-# switcher, whose import chain loads this module; keep that order.
-from claude_swap import __version__
 from claude_swap.printer import warning as print_warning
 
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
 OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-_USER_AGENT = f"claude-swap/{__version__}"
 
 _logger = logging.getLogger("claude-swap")
 
@@ -30,13 +25,12 @@ def extract_access_token(credentials: str) -> str | None:
     """Extract the OAuth access token from a credentials JSON string."""
     try:
         data = json.loads(credentials)
-        token = data.get("claudeAiOauth", {}).get("accessToken")
-        return token if isinstance(token, str) else None
+        return data.get("claudeAiOauth", {}).get("accessToken")
     except (json.JSONDecodeError, AttributeError):
         return None
 
 
-def extract_oauth_data(credentials: str) -> dict[str, Any] | None:
+def extract_oauth_data(credentials: str) -> dict | None:
     """Extract the Claude AI OAuth payload from a credentials JSON string."""
     try:
         data = json.loads(credentials)
@@ -99,16 +93,43 @@ class RefreshOutcome:
 
     credentials: str | None
     error: str | None
-    token_account: dict[str, Any] | None = None
+    token_account: dict | None = None
+    # Fingerprint of the generation actually consumed (POSTed). Set by the
+    # consume gate, which may substitute a fresher re-read or a session
+    # profile for the caller's snapshot — strike binding must follow the
+    # POSTed bytes, not the snapshot.
+    consumed_fp: str | None = None
+    # Did the consumed successor actually reach the stash? Only meaningful on
+    # a demoted (`transient` WITH credentials) outcome from the consume gate.
+    # False there means the `consume-gate-unpersisted` corner: BOTH the
+    # persist and the stash write failed, so the successor survives only in
+    # `credentials` and retrying POSTs the spent predecessor. Callers that
+    # tell the user what to do next must not promise a stash that never
+    # happened.
+    stashed: bool = False
 
 
-def try_refresh_oauth_credentials(credentials: str) -> RefreshOutcome:
-    """Refresh an OAuth access token via direct token endpoint POST."""
+def try_refresh_oauth_credentials(
+    credentials: str, timeout_s: float = 10.0
+) -> RefreshOutcome:
+    """Refresh an OAuth access token via direct token endpoint POST.
+
+    ``timeout_s`` bounds the network exchange. Callers that hold locks other
+    processes contend for should pass a budget comfortably inside the
+    contenders' acquire timeout (see ``_fetch_active_usage``).
+    """
+    # ``no_refresh_token`` is a PERMANENT verdict (it strikes at
+    # AUTH_DEAD_STRIKES=1), so it demands a structurally complete OAuth dict
+    # genuinely missing the field. An unparseable or non-dict blob is more
+    # likely a torn/partial read than a real credential shape — transient:
+    # the next pass re-reads and either succeeds or sees the true shape.
     try:
         data = json.loads(credentials)
     except json.JSONDecodeError:
-        return RefreshOutcome(None, "no_refresh_token")
-    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+        return RefreshOutcome(None, "transient")
+    if not isinstance(data, dict):
+        return RefreshOutcome(None, "transient")
+    oauth = data.get("claudeAiOauth")
     if not isinstance(oauth, dict) or not oauth.get("refreshToken"):
         return RefreshOutcome(None, "no_refresh_token")
 
@@ -124,11 +145,11 @@ def try_refresh_oauth_credentials(credentials: str) -> RefreshOutcome:
             data=body,
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": _USER_AGENT,
+                "User-Agent": "claude-swap/1.0",
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             resp_data = json.loads(resp.read().decode())
 
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -144,23 +165,37 @@ def try_refresh_oauth_credentials(credentials: str) -> RefreshOutcome:
             json.dumps(data), None, _parse_token_account(resp_data)
         )
     except urllib.error.HTTPError as e:
-        err_body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
-        _logger.debug("OAuth refresh failed: %r, body: %s", e, err_body[:500])
+        body = e.read().decode(errors="replace") if hasattr(e, "read") else ""
+        _logger.debug("OAuth refresh failed: %r, body: %s", e, body[:500])
         # Permanent only when the server itself rejected the grant: a 4xx AND
         # an explicit marker in the body. Anything ambiguous stays transient —
         # a misclassified transient costs one retry, a misclassified permanent
         # would wrongly quarantine a live token.
-        if e.code in (400, 401, 403) and (
-            "invalid_grant" in err_body or "invalid_client" in err_body
-        ):
-            return RefreshOutcome(None, "invalid_grant")
+        if e.code in (400, 401, 403):
+            # RFC 6749 §5.2: the verdict is the top-level ``error`` member of
+            # the JSON body. A substring scan misclassifies — the marker can
+            # appear inside another envelope's detail text, and a dead-token
+            # verdict at AUTH_DEAD_STRIKES=1 quarantines the slot on the
+            # spot. Unparseable bodies stay transient (a misclassified
+            # transient costs one retry; a misclassified permanent wrongly
+            # quarantines a live token).
+            try:
+                err = json.loads(body).get("error")
+            except (ValueError, AttributeError):
+                err = None
+            # invalid_grant: this slot's refresh lineage is dead.
+            # invalid_client: OUR client credential was rejected — systemic
+            # (client_id rotated/blocked), no evidence about any slot, so it
+            # keeps its own kind and lands no strike.
+            if err in ("invalid_grant", "invalid_client"):
+                return RefreshOutcome(None, err)
         return RefreshOutcome(None, "transient")
     except Exception as e:
         _logger.debug("OAuth refresh failed: %r", e)
         return RefreshOutcome(None, "transient")
 
 
-def _parse_token_account(resp_data: dict[str, Any]) -> dict[str, Any] | None:
+def _parse_token_account(resp_data: dict) -> dict | None:
     """Extract the optional account identity from a token-endpoint response.
 
     The refresh grant's response body may carry ``account`` / ``organization``
@@ -194,7 +229,7 @@ def refresh_oauth_credentials(credentials: str) -> str | None:
     return try_refresh_oauth_credentials(credentials).credentials
 
 
-def fetch_oauth_profile(access_token: str) -> dict[str, Any] | None:
+def fetch_oauth_profile(access_token: str) -> dict | None:
     """Resolve an OAuth access token to its account identity, or None.
 
     ``GET /api/oauth/profile`` answers the one question the credential bytes
@@ -306,7 +341,7 @@ def reset_clock_string(reset_utc: datetime, now_utc: datetime) -> str:
     return reset_local.strftime(f"%b {day} %H:%M")
 
 
-def fresh_reset_strings(window: dict[str, Any]) -> tuple[str, str] | None:
+def fresh_reset_strings(window: dict) -> tuple[str, str] | None:
     """``(countdown, clock)`` for one usage window, or None when unknown.
 
     Recomputed from ``resets_at`` at render time: the strings cached at fetch
@@ -326,18 +361,17 @@ def fresh_reset_strings(window: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
-def request_usage_data(access_token: str) -> dict[str, Any]:
+def request_usage_data(access_token: str) -> dict:
     """Request raw utilization data from the Anthropic usage API."""
     url = "https://api.anthropic.com/api/oauth/usage"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "anthropic-beta": OAUTH_BETA_HEADER,
-        "User-Agent": _USER_AGENT,
+        "User-Agent": "claude-swap/1.0",
     }
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
-        payload = json.loads(resp.read().decode())
-        return cast(dict[str, Any], payload)
+        return json.loads(resp.read().decode())
 
 
 def _classify_usage_error(e: Exception) -> tuple[str, float | None]:
@@ -381,20 +415,24 @@ def _log_usage_failure(
     where = f" {context}" if context else ""
     cause = kind if retry_after_s is None else f"{kind}, retry-after {retry_after_s:.0f}s"
     if kind == "http-429":
-        # The endpoint budgets requests per access token (see poll_policy):
-        # cumulative polling across cswap surfaces can saturate it, and
-        # backoff plus the adaptive cadence are the recovery.
-        cause += " (per-token usage budget reached; backing off)"
+        # Whether the budget counts per access token or per account depends
+        # on the org's 429 regime (both measured; see poll_policy), so the
+        # message stays scope-neutral. Under the account-scoped regime
+        # re-authenticating does not clear a block, and two machines holding
+        # different tokens for one account still compete for one budget —
+        # cumulative polling across surfaces and machines can saturate it,
+        # and backoff plus the adaptive cadence are the recovery.
+        cause += " (usage-endpoint budget reached; backing off)"
     _logger.warning("Usage fetch failed%s: %s", where, cause)
     _logger.debug("Usage fetch failure detail%s: %r", where, e)
 
 
 
-def build_usage_result(data: dict[str, Any]) -> dict[str, Any] | None:
+def build_usage_result(data: dict) -> dict | None:
     """Normalize raw usage API data into the structure used by the CLI."""
     _logger.debug("Usage API response: %s", json.dumps(data, indent=2))
 
-    result: dict[str, Any] = {}
+    result = {}
 
     h5 = data.get("five_hour")
     if h5:
@@ -423,7 +461,7 @@ def build_usage_result(data: dict[str, Any]) -> dict[str, Any] | None:
         utilization = eu.get("utilization")
         if used_credits is not None and monthly_limit is not None and utilization is not None:
             try:
-                spend_entry: dict[str, Any] = {
+                spend_entry: dict = {
                     "used": float(used_credits) / 100,
                     "limit": float(monthly_limit) / 100,
                     "pct": float(utilization),
@@ -443,7 +481,7 @@ def build_usage_result(data: dict[str, Any]) -> dict[str, Any] | None:
     # ``limits``) simply yield no ``scoped`` key.
     limits = data.get("limits")
     if isinstance(limits, list):
-        scoped: list[dict[str, Any]] = []
+        scoped: list[dict] = []
         for lim in limits:
             if not isinstance(lim, dict):
                 continue
@@ -453,7 +491,7 @@ def build_usage_result(data: dict[str, Any]) -> dict[str, Any] | None:
             pct = lim.get("percent")
             if not name or not isinstance(pct, (int, float)):
                 continue
-            scoped_entry: dict[str, Any] = {"name": name, "pct": float(pct)}
+            scoped_entry: dict = {"name": name, "pct": float(pct)}
             if lim.get("resets_at"):
                 scoped_entry["resets_at"] = lim["resets_at"]
                 scoped_entry["countdown"], scoped_entry["clock"] = format_reset(lim["resets_at"])
@@ -461,20 +499,11 @@ def build_usage_result(data: dict[str, Any]) -> dict[str, Any] | None:
         if scoped:
             result["scoped"] = scoped
 
-    if not result and data:
-        # Distinguishes a schema break from a transient network failure: the
-        # API answered, but nothing in the payload was recognized.
-        _logger.warning(
-            "usage API returned no recognized rate-limit windows "
-            "(keys: %s) — possible schema change",
-            sorted(data.keys()),
-        )
-
     return result if result else None
 
 
 def relevant_windows(
-    usage: dict[str, Any] | None, models: Sequence[str] = ()
+    usage: dict | None, models: Sequence[str] = ()
 ) -> list[tuple[str, float, str | None]]:
     """Every ``(label, pct, resets_at)`` window that gates this account.
 
@@ -512,7 +541,7 @@ def relevant_windows(
 
 
 def account_headroom(
-    usage: dict[str, Any] | None, models: Sequence[str] = ()
+    usage: dict | None, models: Sequence[str] = ()
 ) -> float | None:
     """Remaining percentage before this account hits a rate-limit window.
 
@@ -543,12 +572,16 @@ class UsageOutcome:
     failures). ``retry_after_s`` carries the server's Retry-After when sent.
     """
 
-    usage: dict[str, Any] | None
+    usage: dict | None
     error: str | None = None
     retry_after_s: float | None = None
+    # Fingerprint of the credential whose rt was POSTed when error is a
+    # permanent auth kind — lets the store bind the strike to that
+    # generation (see usage_store.FetchRecord.struck_fp).
+    struck_fp: str | None = None
 
 
-def fetch_usage(access_token: str) -> dict[str, Any] | None:
+def fetch_usage(access_token: str) -> dict | None:
     """Fetch 5-hour and 7-day utilization from the Anthropic usage API."""
     try:
         data = request_usage_data(access_token)
@@ -559,23 +592,38 @@ def fetch_usage(access_token: str) -> dict[str, Any] | None:
         return None
 
 
+# Refresh failures that will not resolve by retrying THIS pass, so the caller
+# must not fall through to the usage endpoint with the known-expired token.
+# `consume-busy` belongs here for a reason the other two make obvious only in
+# hindsight: the retry re-enters the same gate, finds it still held, and the
+# distinct kind arrives as generic "refresh-failed" — hiding it, and spending a
+# guaranteed 401 per pass to learn nothing.
+_DETERMINISTIC_REFRESH_ERRORS = (
+    "store-unmirrored", "invalid_client", "consume-busy", "stash-unreadable",
+)
+
+
 def try_fetch_usage_for_account(
     account_num: str,
     email: str,
     credentials: str,
     is_active: bool,
     persist_credentials: Callable[[str, str, str], None] | None = None,
-    *,
-    persist_mandatory: bool = False,
+    refresh_via: Callable[[str, str, str], RefreshOutcome] | None = None,
 ) -> UsageOutcome:
     """Fetch usage for an account, refreshing expired tokens for inactive accounts only.
 
     Active accounts are never refreshed — Claude Code owns those credentials.
+    ``refresh_via(account_num, email, snapshot)`` supersedes the direct POST
+    when given: the switcher passes its consume gate, which re-reads the
+    freshest copy under the slot lock, persists via fingerprint CAS, and
+    never consumes a superseded snapshot. ``persist_credentials`` is then
+    unused for the refresh (the gate persists internally).
     """
     context = f"for account {account_num}"  # no email: paste-safe for public issues
     oauth = extract_oauth_data(credentials)
     access_token = oauth.get("accessToken") if oauth else None
-    if not oauth or not access_token:
+    if not access_token:
         return UsageOutcome(None, error="no-access-token")
 
     working_credentials = credentials
@@ -585,24 +633,39 @@ def try_fetch_usage_for_account(
         and oauth.get("refreshToken")
         and is_oauth_token_expired(oauth.get("expiresAt"))
     ):
-        refresh = try_refresh_oauth_credentials(working_credentials)
+        if refresh_via is not None:
+            refresh = refresh_via(account_num, email, working_credentials)
+        else:
+            refresh = try_refresh_oauth_credentials(working_credentials)
         if refresh.credentials:
             working_credentials = refresh.credentials
-            _persist(
-                persist_credentials,
-                account_num,
-                email,
-                working_credentials,
-                persist_mandatory=persist_mandatory,
-            )
+            if refresh_via is None:
+                _persist(persist_credentials, account_num, email, working_credentials)
             oauth = extract_oauth_data(working_credentials) or oauth
             access_token = oauth.get("accessToken") or access_token
-        elif refresh.error == "invalid_grant":
-            # The refresh-token lineage is server-rejected — permanently dead.
-            # Don't hit the usage endpoint with a token we know is expired
-            # (that just adds a 401/429 to a lost cause): report the permanent
-            # failure distinctly so the store can quarantine the account.
-            return UsageOutcome(None, error="invalid_grant")
+        elif refresh.error in ("invalid_grant", "no_refresh_token"):
+            # The refresh-token lineage is server-rejected (or structurally
+            # absent) — permanently dead. Don't hit the usage endpoint with
+            # a token we know is expired (that just adds a 401/429 to a lost
+            # cause): report the permanent failure distinctly so the store
+            # can quarantine the account. The strike binds to the bytes the
+            # gate actually POSTed (it may have substituted a fresher
+            # re-read for our snapshot) — fall back to the snapshot's
+            # fingerprint only for the direct-POST path.
+            return UsageOutcome(
+                None, error=refresh.error,
+                struck_fp=(
+                    refresh.consumed_fp
+                    or credential_fingerprint(working_credentials)
+                ),
+            )
+        elif refresh.error in _DETERMINISTIC_REFRESH_ERRORS:
+            # Deterministic refusals (M4 parity guard; a systemic client_id
+            # rejection; another process holding the consume gate): hitting the
+            # usage endpoint with the known-expired token would 401 every pass.
+            # Surface the distinct kind instead — ERROR_NOTES renders the
+            # remedy for each.
+            return UsageOutcome(None, error=refresh.error)
         # A transient refresh failure falls through to try the (expired) token;
         # the 401 path below retries the refresh.
 
@@ -625,20 +688,31 @@ def try_fetch_usage_for_account(
         # is permanently dead — surface it distinctly (not the generic
         # "refresh-failed") so the store can quarantine instead of retrying a
         # dead token forever.
-        refresh = try_refresh_oauth_credentials(working_credentials)
+        if refresh_via is not None:
+            refresh = refresh_via(account_num, email, working_credentials)
+        else:
+            refresh = try_refresh_oauth_credentials(working_credentials)
         if not refresh.credentials:
             _log_usage_failure(context, e, kind)
-            dead = refresh.error == "invalid_grant"
-            return UsageOutcome(None, error="invalid_grant" if dead else "refresh-failed")
+            dead = refresh.error in ("invalid_grant", "no_refresh_token")
+            # Deterministic kinds keep their identity here too — collapsing
+            # them to "refresh-failed" would hide the ERROR_NOTES remedy
+            # exactly on the 401 path (a not-yet-locally-expired token the
+            # server already rotated past).
+            distinct = dead or refresh.error in _DETERMINISTIC_REFRESH_ERRORS
+            return UsageOutcome(
+                None,
+                error=refresh.error if distinct else "refresh-failed",
+                struck_fp=(
+                    (refresh.consumed_fp
+                     or credential_fingerprint(working_credentials))
+                    if dead else None
+                ),
+            )
 
         working_credentials = refresh.credentials
-        _persist(
-            persist_credentials,
-            account_num,
-            email,
-            working_credentials,
-            persist_mandatory=persist_mandatory,
-        )
+        if refresh_via is None:
+            _persist(persist_credentials, account_num, email, working_credentials)
         refreshed_oauth = extract_oauth_data(working_credentials)
         new_token = refreshed_oauth.get("accessToken") if refreshed_oauth else None
         if not new_token:
@@ -663,17 +737,10 @@ def fetch_usage_for_account(
     credentials: str,
     is_active: bool,
     persist_credentials: Callable[[str, str, str], None] | None = None,
-    *,
-    persist_mandatory: bool = False,
-) -> dict[str, Any] | None:
+) -> dict | None:
     """Usage dict or None (see try_fetch_usage_for_account for the cause)."""
     return try_fetch_usage_for_account(
-        account_num,
-        email,
-        credentials,
-        is_active,
-        persist_credentials,
-        persist_mandatory=persist_mandatory,
+        account_num, email, credentials, is_active, persist_credentials
     ).usage
 
 
@@ -682,8 +749,6 @@ def _persist(
     account_num: str,
     email: str,
     credentials: str,
-    *,
-    persist_mandatory: bool = False,
 ) -> None:
     """Call the persist callback, warning loudly on failure."""
     if not callback:
@@ -703,5 +768,3 @@ def _persist(
             f"Warning: failed to save refreshed token for account {account_num} ({email}). "
             f"If the next refresh fails, re-run `cswap --add-account` after logging in."
         )
-        if persist_mandatory:
-            raise

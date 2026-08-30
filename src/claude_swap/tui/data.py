@@ -18,7 +18,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Callable
 
 from claude_swap import oauth, printer, usage_store
 from claude_swap.exceptions import ClaudeSwitchError
@@ -37,7 +37,7 @@ class ActionResult:
 
     ok: bool
     output: str  # captured stdout+stderr, ANSI-colored (render with Text.from_ansi)
-    payload: dict[str, Any] | None = None  # structured result for json-capable actions
+    payload: dict | None = None  # structured result for json-capable actions
 
     @property
     def first_line(self) -> str:
@@ -51,7 +51,7 @@ class ActionResult:
         return ""
 
 
-def run_action(fn: Callable[[], dict[str, Any] | bool | None]) -> ActionResult:
+def run_action(fn: Callable[[], dict | None]) -> ActionResult:
     """Run a switcher action capturing stdout+stderr (color forced on).
 
     ``sys.stdin`` is swapped for an empty stream so an unexpected ``input()``
@@ -61,7 +61,7 @@ def run_action(fn: Callable[[], dict[str, Any] | bool | None]) -> ActionResult:
     because the TUI owns the terminal and nothing else prints while it runs.
     """
     buf = io.StringIO()
-    payload: dict[str, Any] | bool | None = None
+    payload: dict | None = None
     saved_stdin = sys.stdin
     sys.stdin = io.StringIO()
     try:
@@ -92,7 +92,7 @@ def sentinel_label(sentinel: str) -> str:
     return SENTINEL_NOTES.get(sentinel, sentinel)
 
 
-def window_pct(last_good: dict[str, Any] | None, key: str) -> float | None:
+def window_pct(last_good: dict | None, key: str) -> float | None:
     """Utilization pct of one window ("five_hour"/"seven_day"), if known."""
     if not isinstance(last_good, dict):
         return None
@@ -103,7 +103,7 @@ def window_pct(last_good: dict[str, Any] | None, key: str) -> float | None:
     return float(pct) if isinstance(pct, (int, float)) else None
 
 
-def reset_text(window: dict[str, Any] | None, now: float) -> str | None:
+def reset_text(window: dict | None, now: float) -> str | None:
     """Live countdown to one window's reset ("resets 2h 13m"), if known.
 
     Computed from ``resets_at`` at render time — the countdown the API sent
@@ -124,7 +124,7 @@ def reset_text(window: dict[str, Any] | None, now: float) -> str | None:
     return f"resets {format_duration(remaining)}"
 
 
-def reset_clock(window: dict[str, Any] | None, now: float) -> str | None:
+def reset_clock(window: dict | None, now: float) -> str | None:
     """Absolute local reset time ("20:39" / "Jul 14 09:00"), if known.
 
     None once the reset has elapsed — "resets now" needs no clock.
@@ -145,9 +145,7 @@ def reset_clock(window: dict[str, Any] | None, now: float) -> str | None:
     )
 
 
-def window_reset_text(
-    last_good: dict[str, Any] | None, key: str, now: float
-) -> str | None:
+def window_reset_text(last_good: dict | None, key: str, now: float) -> str | None:
     """`reset_text` for one of the top-level 5h/7d windows."""
     if not isinstance(last_good, dict):
         return None

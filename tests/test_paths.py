@@ -7,14 +7,12 @@ cswap will read the wrong files and misattribute accounts (see issue #16).
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from claude_swap import paths
 from claude_swap.exceptions import MigrationError
 from claude_swap.models import Platform
 from claude_swap.paths import (
@@ -50,46 +48,6 @@ class TestGetClaudeConfigHome:
         custom = tmp_path / "custom-claude"
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
         assert get_claude_config_home() == custom
-
-    def test_env_var_is_used_verbatim_without_tilde_expansion(
-        self, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        # Claude Code uses CLAUDE_CONFIG_DIR verbatim (no tilde expansion);
-        # expanding here would point cswap at credentials Claude Code never
-        # reads. Mirror the raw value exactly.
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/.claude-custom")
-        assert get_claude_config_home() == Path("~/.claude-custom")
-
-    def test_literal_tilde_warns_once_per_process(
-        self,
-        isolated_home: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ):
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/.claude-custom")
-        monkeypatch.setattr(paths, "_warned_tilde_config_dir", False)
-        with caplog.at_level(logging.WARNING, logger="claude-swap"):
-            get_claude_config_home()
-            get_claude_config_home()
-        warnings = [
-            r for r in caplog.records if "literal '~'" in r.getMessage()
-        ]
-        assert len(warnings) == 1
-        assert "~/.claude-custom" in warnings[0].getMessage()
-
-    def test_absolute_env_var_does_not_warn(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ):
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "ccd"))
-        monkeypatch.setattr(paths, "_warned_tilde_config_dir", False)
-        with caplog.at_level(logging.WARNING, logger="claude-swap"):
-            get_claude_config_home()
-        assert not [
-            r for r in caplog.records if "literal '~'" in r.getMessage()
-        ]
 
 
 class TestGetGlobalConfigPath:

@@ -7,7 +7,6 @@ JSON envelope. No encryption is built in — users compose their own
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import sys
@@ -22,17 +21,15 @@ from claude_swap.exceptions import (
     CredentialReadError,
     TransferError,
 )
-from claude_swap.locking import FileLock
+from claude_swap.fsutil import replace_with_retry
 from claude_swap.models import Platform, get_timestamp, normalize_alias
+from claude_swap.oauth import credential_fingerprint
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
 
 
 FORMAT_VERSION = 1
-
-# Cap import payloads so a huge/malicious file can't exhaust memory.
-_MAX_IMPORT_BYTES = 16 * 1024 * 1024  # 16 MiB
 
 _PLATFORM_TAG = {
     Platform.MACOS: "macos",
@@ -48,7 +45,7 @@ def _eprint(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def _parse_payload(text: str, label: str) -> dict[str, Any]:
+def _parse_payload(text: str, label: str) -> dict:
     """Parse a JSON string that should decode to an object."""
     try:
         parsed = json.loads(text)
@@ -59,9 +56,7 @@ def _parse_payload(text: str, label: str) -> dict[str, Any]:
     return parsed
 
 
-def _validate_imported_account(
-    switcher: ClaudeAccountSwitcher, account: dict[str, Any]
-) -> tuple[str, str]:
+def _validate_imported_account(switcher: ClaudeAccountSwitcher, account: dict) -> tuple[str, str]:
     """Validate per-account fields BEFORE any filename construction.
 
     Defends against path traversal: email + slot number flow into f-string
@@ -101,172 +96,40 @@ def _validate_imported_account(
     return email, str(raw_number)
 
 
-def _snapshot_overwrite_slot(
-    switcher: ClaudeAccountSwitcher,
-    data: dict[str, Any],
-    target_num: str,
-    email: str,
-) -> dict[str, Any]:
-    return {
-        "prev_creds": switcher._read_account_credentials(target_num, email) or None,
-        "prev_config": switcher._read_account_config(target_num, email) or None,
-        "prev_record": copy.deepcopy(data.get("accounts", {}).get(target_num)),
-        "prev_in_sequence": int(target_num) in data.get("sequence", []),
-    }
-
-
-def _rollback_imported_slot(
-    switcher: ClaudeAccountSwitcher, target_num: str, email: str
-) -> None:
-    switcher._delete_account_files(target_num, email)
-    data = switcher._get_sequence_data_migrated() or {
-        "activeAccountNumber": None,
-        "lastUpdated": get_timestamp(),
-        "sequence": [],
-        "accounts": {},
-    }
-    accounts = data.setdefault("accounts", {})
-    if target_num in accounts:
-        del accounts[target_num]
-    seq = data.setdefault("sequence", [])
-    num_int = int(target_num)
-    if num_int in seq:
-        seq.remove(num_int)
-    data["lastUpdated"] = get_timestamp()
-    switcher._write_json(switcher.sequence_file, data)
-
-
-def _rollback_overwritten_slot(
-    switcher: ClaudeAccountSwitcher,
-    target_num: str,
-    email: str,
-    snap: dict[str, Any],
-) -> None:
-    prev_creds = snap.get("prev_creds")
-    if prev_creds:
-        switcher._write_account_credentials(target_num, email, prev_creds)
-    else:
-        switcher._delete_account_credentials(target_num, email)
-    prev_config = snap.get("prev_config")
-    if prev_config:
-        switcher._write_account_config(target_num, email, prev_config)
-    else:
-        config_file = (
-            switcher.configs_dir / f".claude-config-{target_num}-{email}.json"
-        )
-        if config_file.exists():
-            config_file.unlink()
-    data = switcher._get_sequence_data_migrated() or {
-        "activeAccountNumber": None,
-        "lastUpdated": get_timestamp(),
-        "sequence": [],
-        "accounts": {},
-    }
-    prev_record = snap.get("prev_record")
-    if prev_record is not None:
-        data.setdefault("accounts", {})[target_num] = prev_record
-    elif target_num in data.get("accounts", {}):
-        del data["accounts"][target_num]
-    seq = data.setdefault("sequence", [])
-    num_int = int(target_num)
-    if snap.get("prev_in_sequence"):
-        if num_int not in seq:
-            seq.append(num_int)
-            seq.sort()
-    elif num_int in seq:
-        seq.remove(num_int)
-    data["lastUpdated"] = get_timestamp()
-    switcher._write_json(switcher.sequence_file, data)
-
-
-def _undo_incomplete_import_write(
-    switcher: ClaudeAccountSwitcher,
-    target_num: str,
-    email: str,
-    *,
-    creds_done: bool,
-    config_done: bool,
-) -> None:
-    if not creds_done and not config_done:
-        return
-    switcher._delete_account_files(target_num, email)
-
-
-def _undo_incomplete_overwrite(
-    switcher: ClaudeAccountSwitcher,
-    target_num: str,
-    email: str,
-    snap: dict[str, Any],
-    *,
-    creds_done: bool,
-    config_done: bool,
-) -> None:
-    if not creds_done and not config_done:
-        return
-    if creds_done:
-        prev_creds = snap.get("prev_creds")
-        if prev_creds:
-            switcher._write_account_credentials(target_num, email, prev_creds)
-        else:
-            switcher._delete_account_credentials(target_num, email)
-    if config_done:
-        prev_config = snap.get("prev_config")
-        if prev_config:
-            switcher._write_account_config(target_num, email, prev_config)
-        else:
-            config_file = (
-                switcher.configs_dir / f".claude-config-{target_num}-{email}.json"
-            )
-            if config_file.exists():
-                config_file.unlink()
-
-
-def _rollback_import_writes(
-    switcher: ClaudeAccountSwitcher, writes: list[dict[str, Any]]
-) -> list[str]:
-    """Undo completed writes from this import, newest first. Returns rollback failures."""
-    failures: list[str] = []
-    for write in reversed(writes):
-        try:
-            if write["outcome"] == "imported":
-                _rollback_imported_slot(
-                    switcher, write["target_num"], write["email"]
-                )
-            else:
-                _rollback_overwritten_slot(
-                    switcher,
-                    write["target_num"],
-                    write["email"],
-                    write["snap"],
-                )
-        except Exception:
-            failures.append(write["email"])
-    return failures
-
-
 def _atomic_write_file(path: Path, content: str) -> None:
-    """Write text atomically with 0600 perms.
+    """Write text atomically with 0600 perms, never exposing plaintext content
+    at a world-readable mode.
 
-    Uses ``mkstemp`` so the temp file is owner-only from creation — a full
-    export contains credentials, so there must be no world-readable window
-    between write and chmod.
+    Uses ``tempfile.mkstemp`` (0600 from creation, per the process umask being
+    irrelevant to it) rather than ``Path.write_text`` + a follow-up ``chmod``:
+    the export payload carries live OAuth refresh tokens, and a write-then-
+    chmod sequence leaves the temp file at the umask-derived default mode
+    (typically world-readable) for the window between creation and the chmod
+    call. Same pattern as ``credentials.py``/``settings.py``/``migrations.py``.
     """
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    if path.is_dir():
+        raise TransferError(
+            f"export destination must be a file path, not a directory: {path}"
+        )
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
-        os.replace(tmp, path)
+        os.write(fd, content.encode("utf-8"))
+        os.close(fd)
+        fd = -1
+        replace_with_retry(tmp_path, str(path))
         if sys.platform != "win32":
-            os.chmod(path, 0o600)
+            os.chmod(str(path), 0o600)
     except BaseException:
+        if fd >= 0:
+            os.close(fd)
         try:
-            os.unlink(tmp)
+            os.unlink(tmp_path)
         except OSError:
             pass
         raise
 
 
-def _slim_config(config_obj: dict[str, Any], label: str) -> dict[str, Any]:
+def _slim_config(config_obj: dict, label: str) -> dict:
     """Reduce a parsed ~/.claude.json to just the keys a switch will consume.
 
     Today, only `oauthAccount` is read back during a switch. Stripping the
@@ -282,6 +145,22 @@ def _slim_config(config_obj: dict[str, Any], label: str) -> dict[str, Any]:
     return {"oauthAccount": oauth}
 
 
+def _slim_credentials(creds_obj: dict) -> dict:
+    """Reduce an OAuth credential object to the account's own login.
+
+    The siblings of ``claudeAiOauth`` are either machine-shared MCP/plugin
+    OAuth state — owned by whichever machine the export lands on and
+    replaced from the live credential at activation anyway (#135) — or
+    device-bound (``trustedDeviceToken``), meaningless off-device. Both are
+    secret surface with no cross-machine value. Legacy shapes without
+    ``claudeAiOauth`` export verbatim; ``--full`` (same-PC backup) skips
+    this and keeps the whole blob.
+    """
+    if "claudeAiOauth" not in creds_obj:
+        return creds_obj
+    return {"claudeAiOauth": creds_obj["claudeAiOauth"]}
+
+
 def export_accounts(
     switcher: ClaudeAccountSwitcher,
     destination: str,
@@ -294,8 +173,10 @@ def export_accounts(
         switcher: Initialized ClaudeAccountSwitcher.
         destination: File path, or "-" for stdout.
         account: Optional NUM|EMAIL to limit export to a single account.
-        full: When True, include the entire ~/.claude.json snapshot per
-            account (same-PC backup). Default False writes only oauthAccount.
+        full: When True, include the entire ~/.claude.json snapshot and the
+            entire credential object per account (same-PC backup). Default
+            False writes only oauthAccount and the account's own
+            claudeAiOauth login.
 
     Raises:
         TransferError: malformed/missing data, unknown account.
@@ -312,7 +193,7 @@ def export_accounts(
     # in the all-accounts case we skip broken slots with a warning so one
     # damaged slot doesn't poison the whole backup.
     explicit_account = account is not None
-    if account is not None:
+    if explicit_account:
         resolved = switcher._resolve_account_identifier(account)
         if resolved is None or resolved not in accounts_map:
             raise TransferError(f"account not found: {account}")
@@ -372,6 +253,12 @@ def export_accounts(
         # not OAuth JSON — carry it verbatim (and tag the kind) so the JSON parse
         # below doesn't choke and import can restore it as-is.
         is_api_key = looks_like_api_key(creds_text)
+        if is_api_key:
+            creds_payload: Any = creds_text.strip()
+        else:
+            creds_payload = _parse_payload(creds_text, f"credentials for {email}")
+            if not full:
+                creds_payload = _slim_credentials(creds_payload)
         entry: dict[str, Any] = {
             "number": int(num),
             "email": email,
@@ -379,11 +266,7 @@ def export_accounts(
             "organizationUuid": org_uuid,
             "organizationName": record.get("organizationName", "") or "",
             "added": record.get("added", ""),
-            "credentials": (
-                creds_text.strip()
-                if is_api_key
-                else _parse_payload(creds_text, f"credentials for {email}")
-            ),
+            "credentials": creds_payload,
             "config": config_obj,
         }
         if is_api_key:
@@ -430,22 +313,30 @@ def export_accounts(
     _eprint(f"Exported {len(accounts_payload)} account(s) to {out_path}")
 
 
-def _read_import_envelope(source: str) -> dict[str, Any]:
+def import_accounts(
+    switcher: ClaudeAccountSwitcher,
+    source: str,
+    force: bool = False,
+) -> None:
+    """Import accounts from a JSON file or stdin.
+
+    Args:
+        switcher: Initialized ClaudeAccountSwitcher.
+        source: File path, or "-" for stdin.
+        force: When True, overwrites the existing matching slot in place.
+            Without it, existing accounts are skipped — unless the slot is
+            quarantined as refresh-token-dead, which a plain import replaces
+            (auto-heal, issue #136).
+
+    Raises:
+        TransferError: malformed file, version mismatch, encrypted payload.
+    """
     if source == "-":
-        # Bound memory: read one byte past the cap to detect oversize input.
-        text = sys.stdin.read(_MAX_IMPORT_BYTES + 1)
-        if len(text) > _MAX_IMPORT_BYTES:
-            raise TransferError(
-                f"import payload exceeds the {_MAX_IMPORT_BYTES // (1024 * 1024)} MiB limit"
-            )
+        text = sys.stdin.read()
     else:
         in_path = Path(source).expanduser()
         if not in_path.exists():
             raise TransferError(f"import file not found: {in_path}")
-        if in_path.stat().st_size > _MAX_IMPORT_BYTES:
-            raise TransferError(
-                f"import file exceeds the {_MAX_IMPORT_BYTES // (1024 * 1024)} MiB limit"
-            )
         text = in_path.read_text(encoding="utf-8")
 
     try:
@@ -472,12 +363,6 @@ def _read_import_envelope(source: str) -> dict[str, Any]:
     if not isinstance(accounts, list) or not accounts:
         raise TransferError("export file has no accounts to import")
 
-    return envelope
-
-
-def _normalize_import_accounts(
-    switcher: ClaudeAccountSwitcher, accounts: list[Any]
-) -> list[dict[str, Any]]:
     # Pass 1: validate every account before any writes. A malformed account
     # later in the list must not leave earlier accounts half-imported.
     local_data = switcher._get_sequence_data_migrated() or {}
@@ -500,9 +385,7 @@ def _normalize_import_accounts(
             raise TransferError(f"config for {email} must be a JSON object")
         # API-key accounts carry the credential as a raw string; OAuth accounts
         # carry a JSON object.
-        is_api_key = raw.get("kind") == "api_key" or (
-            isinstance(creds_obj, str) and looks_like_api_key(creds_obj)
-        )
+        is_api_key = raw.get("kind") == "api_key" or isinstance(creds_obj, str)
         if is_api_key:
             if not (isinstance(creds_obj, str) and looks_like_api_key(creds_obj)):
                 raise TransferError(
@@ -552,122 +435,121 @@ def _normalize_import_accounts(
                 "config_text": json.dumps(config_obj, indent=2),
             }
         )
-    return normalized
 
+    # Pass 2: writes. Validation is complete; remaining failures (disk I/O,
+    # keyring) are environmental and don't reflect on the file's integrity.
+    switcher._setup_directories()
+    switcher._init_sequence_file()
 
-def _empty_sequence_data() -> dict[str, Any]:
-    return {
-        "activeAccountNumber": None,
-        "lastUpdated": get_timestamp(),
-        "sequence": [],
-        "accounts": {},
-    }
+    imported = 0
+    skipped = 0
+    overwritten = 0
+    replaced = 0
+    written_slots: set[str] = set()
 
-
-def _resolve_import_target(
-    switcher: ClaudeAccountSwitcher,
-    entry: dict[str, Any],
-    data: dict[str, Any],
-    *,
-    force: bool,
-) -> tuple[str, str, dict[str, Any] | None] | None:
-    existing_slot = switcher._find_account_slot(
-        data, entry["email"], entry["org_uuid"]
+    # Track where the envelope's active account ended up locally. We can't
+    # just look up envelope_active in the final account map afterwards: the
+    # destination may already have an unrelated account at that slot number,
+    # while the envelope's active account got allocated to a different slot.
+    envelope_active = envelope.get("activeAccountNumber")
+    envelope_active_str = (
+        str(envelope_active) if isinstance(envelope_active, int) else None
     )
-    if existing_slot is not None:
-        if not force:
-            _eprint(
-                f"Skipped {entry['email']} (already exists, use --force)"
-            )
-            return None
-        target_num = existing_slot
-        outcome = "overwrote"
-        live_pids = switcher._live_session_pids(target_num, entry["email"])
-        if live_pids:
-            _eprint(
-                f"Warning: {entry['email']} (slot {target_num}) has a live "
-                f"session-mode instance (PID {', '.join(map(str, live_pids))}); "
-                "its session profile keeps the pre-import credentials until "
-                "it is restarted via 'cswap run'."
-            )
-    else:
-        if entry["exported_num"] not in data.get("accounts", {}):
-            target_num = entry["exported_num"]
-        else:
-            target_num = str(switcher._get_next_account_number())
-        outcome = "imported"
+    resolved_active_slot: str | None = None
 
-    overwrite_snap: dict[str, Any] | None = None
-    if outcome == "overwrote":
-        overwrite_snap = _snapshot_overwrite_slot(
-            switcher, data, target_num, entry["email"]
+    for entry in normalized:
+        is_envelope_active = (
+            envelope_active_str is not None
+            and entry["exported_num"] == envelope_active_str
         )
-    return target_num, outcome, overwrite_snap
 
+        # Re-read sequence each iteration so per-account writes see prior updates
+        data = switcher._get_sequence_data_migrated() or {
+            "activeAccountNumber": None,
+            "lastUpdated": get_timestamp(),
+            "sequence": [],
+            "accounts": {},
+        }
+        existing_slot = switcher._find_account_slot(
+            data, entry["email"], entry["org_uuid"]
+        )
 
-def _raise_import_write_failure(
-    switcher: ClaudeAccountSwitcher,
-    entry: dict[str, Any],
-    completed_writes: list[dict[str, Any]],
-    exc: Exception,
-) -> None:
-    succeeded = [w["email"] for w in completed_writes]
-    rollback_failures = _rollback_import_writes(switcher, completed_writes)
-    if rollback_failures:
-        kept = [
-            email
-            for email in succeeded
-            if email not in rollback_failures
-        ]
-        raise TransferError(
-            "import failed on "
-            f"{entry['email']}: {exc}; "
-            f"partial import kept "
-            f"{', '.join(kept) if kept else 'none'}; "
-            f"could not roll back "
-            f"{', '.join(rollback_failures)}"
-        ) from exc
-    if succeeded:
-        raise TransferError(
-            "import failed on "
-            f"{entry['email']}: {exc}; "
-            f"rolled back {len(succeeded)} account(s) from this import"
-        ) from exc
-    raise TransferError(
-        f"import failed on {entry['email']}: {exc}"
-    ) from exc
+        if existing_slot is not None:
+            if force:
+                outcome = "overwrote"
+                # Snapshot the row before the write path's clear_dead_token
+                # wipes it, so the "Overwrote" print can say the strike was
+                # lifted. Silence here is how issue #218 read a lifted-then-
+                # honestly-re-condemned strike as a clear that never happened.
+                # Identity-guarded: a foreign row reads blank, so only this
+                # account's own verdict narrates.
+                row = switcher._usage_store.entries(
+                    {existing_slot: (entry["email"], entry["org_uuid"])}
+                )[existing_slot]
+                had_strike = row.auth_dead_strikes > 0
+                same_generation = (
+                    row.struck_fingerprint is not None
+                    and credential_fingerprint(entry["creds_text"])
+                    == row.struck_fingerprint
+                )
+            elif switcher._slot_token_dead(existing_slot, entry["email"]):
+                # Narrow auto-heal (issue #136): a plain import replaces a
+                # slot iff its identity-matched usage row is quarantined as
+                # refresh-token-dead. The verdict normally postdates the
+                # slot's last credential write, so the heal targets creds that
+                # failed after being stored (known exception and full
+                # trade-off: INVESTIGATION-import-dead-token.md). Identity-
+                # guarded — a stale row for a different account returns an
+                # empty entry — so healthy slots still require --force. Never
+                # triggered by the live store's "no credentials" state, which
+                # isn't attributable to the backup.
+                outcome = "replaced"
+            else:
+                _eprint(
+                    f"Skipped {entry['email']} (already exists, use --force)"
+                )
+                skipped += 1
+                # Even when skipped, the envelope's active account exists
+                # locally — record where so we can seed activeAccountNumber.
+                if is_envelope_active:
+                    resolved_active_slot = existing_slot
+                continue
+            target_num = existing_slot
+            # The credential write below invalidates the slot's non-live
+            # session profile (chokepoint in _write_account_credentials), so
+            # the next `cswap run` re-bootstraps from the imported creds. A
+            # live session keeps running on its own copy — warn about it.
+            live_pids = switcher._live_session_pids(target_num, entry["email"])
+            if live_pids:
+                _eprint(
+                    f"Warning: {entry['email']} (slot {target_num}) has a live "
+                    f"session-mode instance (PID {', '.join(map(str, live_pids))}); "
+                    "its session profile keeps the pre-import credentials until "
+                    "it is restarted via 'cswap run'."
+                )
+        else:
+            if entry["exported_num"] not in data.get("accounts", {}):
+                target_num = entry["exported_num"]
+            else:
+                target_num = str(switcher._get_next_account_number())
+            outcome = "imported"
 
-
-def _import_one_entry(
-    switcher: ClaudeAccountSwitcher,
-    entry: dict[str, Any],
-    *,
-    force: bool,
-    is_envelope_active: bool,
-    completed_writes: list[dict[str, Any]],
-) -> tuple[dict[str, Any] | None, str | None]:
-    data = switcher._get_sequence_data_migrated() or _empty_sequence_data()
-    resolved = _resolve_import_target(switcher, entry, data, force=force)
-    if resolved is None:
-        if is_envelope_active:
-            existing_slot = switcher._find_account_slot(
-                data, entry["email"], entry["org_uuid"]
-            )
-            return None, existing_slot
-        return None, None
-
-    target_num, outcome, overwrite_snap = resolved
-    creds_done = False
-    config_done = False
-    try:
         switcher._write_account_credentials(
             target_num, entry["email"], entry["creds_text"]
         )
-        creds_done = True
         switcher._write_account_config(
             target_num, entry["email"], entry["config_text"]
         )
-        config_done = True
+        # Every successful import write introduces credential material whose
+        # previous auth verdict is no longer authoritative, so lift any
+        # dead-token quarantine on this slot (mirrors add_account / the
+        # add-token paths). This clears for both "imported" and "overwrote":
+        # account removal doesn't prune usage.json, so re-importing a removed
+        # identity into the same slot would otherwise stay quarantined and
+        # never re-fetch to prove the imported token — issue #138.
+        switcher._usage_store.clear_dead_token(
+            [target_num], {target_num: (entry["email"], entry["org_uuid"])}
+        )
 
         data.setdefault("accounts", {})
         data.setdefault("sequence", [])
@@ -688,52 +570,42 @@ def _import_one_entry(
             data["sequence"].sort()
         data["lastUpdated"] = get_timestamp()
         switcher._write_json(switcher.sequence_file, data)
-    except Exception as exc:
-        if outcome == "imported":
-            try:
-                _undo_incomplete_import_write(
-                    switcher,
-                    target_num,
-                    entry["email"],
-                    creds_done=creds_done,
-                    config_done=config_done,
-                )
-            except Exception:
-                pass
-        elif overwrite_snap is not None:
-            try:
-                _undo_incomplete_overwrite(
-                    switcher,
-                    target_num,
-                    entry["email"],
-                    overwrite_snap,
-                    creds_done=creds_done,
-                    config_done=config_done,
-                )
-            except Exception:
-                pass
-        _raise_import_write_failure(
-            switcher, entry, completed_writes, exc
-        )
 
-    write = {
-        "outcome": outcome,
-        "target_num": target_num,
-        "email": entry["email"],
-        "snap": overwrite_snap,
-    }
-    if outcome == "overwrote":
-        _eprint(f"Overwrote {entry['email']} (slot {target_num})")
-    else:
-        _eprint(f"Imported {entry['email']} → slot {target_num}")
+        if is_envelope_active:
+            resolved_active_slot = target_num
+        written_slots.add(target_num)
 
-    resolved_active = target_num if is_envelope_active else None
-    return write, resolved_active
+        if outcome == "overwrote":
+            _eprint(f"Overwrote {entry['email']} (slot {target_num})")
+            if had_strike:
+                # Store-fact wording on purpose: import rewrites the backup,
+                # so for the active slot the next poll may still exercise the
+                # live credentials — promise only what actually happened.
+                _eprint("  └ cleared this slot's stored dead-token strike")
+                if same_generation:
+                    # "credential generation" / "permanent auth failure", not
+                    # "refresh-token generation" / "invalid_grant": strikes
+                    # also come from no_refresh_token, where the condemned
+                    # blob has no refresh token and fingerprints by content.
+                    _eprint(
+                        "  └ this import holds the same credential "
+                        "generation the strike condemned; another permanent "
+                        "auth failure will quarantine it again — recover "
+                        "with a newer export or a re-login"
+                    )
+            overwritten += 1
+        elif outcome == "replaced":
+            # Describe the observed trigger (the quarantine verdict), not the
+            # token itself — a stale verdict can sit over newer working creds.
+            _eprint(
+                f"Replaced {entry['email']} (slot {target_num} was "
+                "quarantined: refresh token dead)"
+            )
+            replaced += 1
+        else:
+            _eprint(f"Imported {entry['email']} → slot {target_num}")
+            imported += 1
 
-
-def _finalize_import_active_slot(
-    switcher: ClaudeAccountSwitcher, resolved_active_slot: str | None
-) -> None:
     # Migration UX: if the destination has no recorded active account
     # (clean home, no prior preference), seed activeAccountNumber from the
     # *resolved* slot of the envelope's active account — not the envelope's
@@ -749,89 +621,21 @@ def _finalize_import_active_slot(
         final["lastUpdated"] = get_timestamp()
         switcher._write_json(switcher.sequence_file, final)
 
-
-def import_accounts(
-    switcher: ClaudeAccountSwitcher,
-    source: str,
-    force: bool = False,
-) -> None:
-    """Import accounts from a JSON file or stdin.
-
-    Args:
-        switcher: Initialized ClaudeAccountSwitcher.
-        source: File path, or "-" for stdin.
-        force: When True, overwrites the existing matching slot in place.
-
-    Raises:
-        TransferError: malformed file, version mismatch, encrypted payload,
-            or an environmental failure during import (writes from this run
-            are rolled back when possible).
-    """
-    envelope = _read_import_envelope(source)
-    normalized = _normalize_import_accounts(switcher, envelope["accounts"])
-
-    # Pass 2: writes. Validation is complete; remaining failures (disk I/O,
-    # keyring) are environmental and don't reflect on the file's integrity.
-    switcher._setup_directories()
-    switcher._init_sequence_file()
-
-    imported = 0
-    skipped = 0
-    overwritten = 0
-
-    # Track where the envelope's active account ended up locally. We can't
-    # just look up envelope_active in the final account map afterwards: the
-    # destination may already have an unrelated account at that slot number,
-    # while the envelope's active account got allocated to a different slot.
-    envelope_active = envelope.get("activeAccountNumber")
-    envelope_active_str = (
-        str(envelope_active) if isinstance(envelope_active, int) else None
-    )
-    resolved_active_slot: str | None = None
-    completed_writes: list[dict[str, Any]] = []
-
-    # Hold the cross-process lock for the whole import so its many sequence.json
-    # read-modify-write cycles stay atomic against a concurrent switch/add.
-    with FileLock(switcher.lock_file):
-        for entry in normalized:
-            is_envelope_active = (
-                envelope_active_str is not None
-                and entry["exported_num"] == envelope_active_str
-            )
-            write, active_slot = _import_one_entry(
-                switcher,
-                entry,
-                force=force,
-                is_envelope_active=is_envelope_active,
-                completed_writes=completed_writes,
-            )
-            if write is None:
-                skipped += 1
-                if active_slot is not None:
-                    resolved_active_slot = active_slot
-                continue
-
-            completed_writes.append(write)
-            if active_slot is not None:
-                resolved_active_slot = active_slot
-            if write["outcome"] == "overwrote":
-                overwritten += 1
-            else:
-                imported += 1
-
-        _finalize_import_active_slot(switcher, resolved_active_slot)
-
-    _eprint(
+    # "replaced" gets its own count — the user must be able to distinguish
+    # "I forced this" from "cswap healed this". Appended only when it
+    # happened, keeping the common-case summary stable.
+    summary = (
         f"Done: {imported} imported, {overwritten} overwritten, {skipped} skipped"
     )
+    if replaced:
+        summary += f", {replaced} replaced (dead token)"
+    _eprint(summary)
 
     # If we just rewrote the stored backup for the account that is the current
     # live login, a plain switch would back the (possibly stale) live
     # credentials up over it (issue #79) — point at the explicit activation
     # path instead.
-    written_slots = {write["target_num"] for write in completed_writes}
     identity = switcher._get_current_account()
-    final = switcher._get_sequence_data()
     if identity is not None and final is not None:
         live_slot = switcher._find_account_slot(final, identity[0], identity[1])
         if live_slot is not None and live_slot in written_slots:

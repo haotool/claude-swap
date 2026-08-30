@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -9,13 +10,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING
 
 from claude_swap.usage_store import UsageEntry
 
 if TYPE_CHECKING:
     from claude_swap.switcher import ClaudeAccountSwitcher
-
 
 _WSL_PROC_PATHS = (Path("/proc/version"), Path("/proc/sys/kernel/osrelease"))
 
@@ -111,8 +111,7 @@ class Platform(Enum):
             if is_wsl():
                 return cls.WSL
             return cls.LINUX
-        else:
-            return cls.UNKNOWN
+        return cls.UNKNOWN
 
 
 @dataclass
@@ -138,7 +137,7 @@ class AccountInfo:
         return f"{self.email} [{tag}]"
 
     @classmethod
-    def from_dict(cls, number: int, data: dict[str, Any]) -> AccountInfo:
+    def from_dict(cls, number: int, data: dict) -> AccountInfo:
         """Create AccountInfo from dictionary."""
         return cls(
             email=data.get("email", ""),
@@ -149,7 +148,7 @@ class AccountInfo:
             number=number,
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             "email": self.email,
@@ -179,6 +178,7 @@ class AccountSnapshot:
     switchable: bool
     usage: UsageEntry
     alias: str = ""
+    disabled: bool = False  # held out of auto-rotation (still a valid explicit target)
 
     @property
     def display_tag(self) -> str:
@@ -248,49 +248,3 @@ class SwitchTransaction:
 def get_timestamp() -> str:
     """Get current UTC timestamp in ISO format."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-@dataclass(frozen=True)
-class ManualSwitchIntent:
-    """Interactive manual rotation (round-robin)."""
-
-    quiet: ClassVar[bool] = False
-    force_refresh: ClassVar[bool] = False
-
-
-@dataclass(frozen=True)
-class CliSwitchIntent:
-    """CLI ``--switch`` path (strategy / JSON)."""
-
-    quiet: bool = False
-    force_refresh: bool = False
-
-
-SwitchIntent = ManualSwitchIntent | CliSwitchIntent
-
-# Shared by the interactive switch() path and the JSON/strategy CLI path so the
-# single-account no-op reads the same everywhere. Lives here (not in switcher)
-# so switch_cli never has to import switcher at runtime.
-ONLY_ONE_ACCOUNT_MSG = (
-    "Only one account is managed. Add more accounts to switch between."
-)
-
-
-class SwitchPreconditionKind(Enum):
-    """Outcome of shared switch() / _switch_cli() preamble classification."""
-
-    FRESH_MACHINE = auto()
-    UNMANAGED = auto()
-    SINGLE_ACCOUNT = auto()
-    READY = auto()
-
-
-@dataclass(frozen=True)
-class SwitchPreconditions:
-    """Neutral switch preamble snapshot — classification only, no actions."""
-
-    kind: SwitchPreconditionKind
-    identity: tuple[str, str] | None = None
-    data: dict[str, Any] | None = None
-    sequence: list[Any] | None = None
-    current_slot: str | None = None

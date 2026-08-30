@@ -11,8 +11,7 @@ from __future__ import annotations
 
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.models import Platform
-from claude_swap.protocols import ServiceBackend, ServiceState
-from claude_swap.protocols import ServiceHost
+from claude_swap.protocols import ServiceBackend, ServiceHost, ServiceState
 
 _UNSUPPORTED_MSG = (
     "cswap service is not supported on this platform yet. "

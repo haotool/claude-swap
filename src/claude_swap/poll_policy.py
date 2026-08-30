@@ -1,25 +1,56 @@
 """Cadence policy for the ``/api/oauth/usage`` endpoint — every number in one place.
 
-The endpoint enforces a per-access-token budget on non-first-party clients:
-a **rolling ~60-minute window of ~28-30 requests per token × UA-class**
-(measured 2026-07-11, probe3, two runs: a rested token admitted 30 requests
-before the first 429; the post-drain 429 oscillation ended exactly when the
-drain burst aged 60 minutes; steady 1/180 s polling then ran 96 minutes from
-a rested window with zero 429s). It is NOT a bucket with a refill rate:
-capacity returns only as old requests age out of the trailing hour, so a
-burst saturates the token for up to a full hour — pausing does not restore
-headroom early, and earlier "refill rate" estimates were artifacts of
-measuring while saturated. Error bars: the horizon is bracketed to ~55-64
-minutes from a single transition event, the exact edge algorithm (likely a
-Cloudflare sliding-window approximation) is undocumented, and Anthropic can
-retune it any day — so the constants below lean only on the robust parts:
-a sustained rate safely under the cap, and an ~hour recovery horizon. The
-budget target is an **average of at most ~1 request / 3 minutes per token**
-(20/hour vs the ~28-30/hour cap), leaving ~8-10 requests/hour of headroom
-for manual commands, wake-from-sleep catch-up, and the bounded urgent mode
-below. Health invariant to watch in the logs: steady state shows zero
-http-429, and any post-burst 429 clears within ≤60 minutes — an episode
-outlasting an hour at modest rates means this model needs revisiting.
+The endpoint enforces a budget on non-first-party clients: a **~60-minute
+window of ~28-30 requests per identity × UA-class** (measured 2026-07-11,
+probe3, two runs: a rested identity admitted 30 requests before the first
+429; the post-drain 429 oscillation ended exactly when the drain burst aged
+60 minutes; steady 1/180 s polling then ran 96 minutes from a rested window
+with zero 429s). It is NOT a bucket with a refill rate: capacity returns
+only as old requests age out of the trailing hour, so a burst saturates the
+identity for up to a full hour — pausing does not restore headroom early,
+and earlier "refill rate" estimates were artifacts of measuring while
+saturated.
+
+What that identity is depends on which 429 regime the org is on — the two
+regimes coexist across orgs (see the Retry-After discussion in
+``usage_store``). Under the fixed-deadline regime it is the **account/org**
+(measured 2026-07-28: a freshly minted token was blocked 135 s after issue,
+which a per-token counter cannot produce). Under the saturated-edge
+(``Retry-After: 0``) regime it is the **access token** (measured 2026-07-29,
+probe4: at saturation, a freshly minted token of the same lineage was
+admitted while the old token stayed blocked, requests interleaved). Plan for
+the account-scoped case — it is the conservative one: re-authenticating
+cannot be relied on to clear a block, and two machines holding different
+tokens for one account may share one budget, which is what
+``POST_429_BACKOFF_MULT`` below exists to converge.
+
+Error bars: the horizon is bracketed to ~55-64 minutes from a single
+transition event, the exact edge algorithm (likely a Cloudflare
+sliding-window approximation) is undocumented, and Anthropic can retune it
+any day — so the constants below lean only on the robust parts: a sustained
+rate safely under the cap, and an ~hour recovery horizon. The budget target
+is an **average of at most ~1 request / 3 minutes** (20/hour vs the ~28-30/
+hour cap), leaving ~8-10 requests/hour of headroom for manual commands,
+wake-from-sleep catch-up, and the bounded urgent mode below.
+
+Health invariant to watch in the logs: steady state shows zero http-429.
+A post-burst 429 does NOT reliably clear at its stated horizon — measured
+over one machine's full log (re-measured 2026-08-03; re-derive rather than
+trust this verbatim, it ages as the log grows — method recorded next to
+``usage_store.RETRY_AFTER_MARGIN_S``), 20 of 35 lapsed blocks re-blocked
+within 900s of their own deadline (+2s..+887s), each for a fresh full hour
+("of 35", not 38 raw gaps: 3 are negative — NOT a uniform mechanism (one has
+no within-block revision at all, one is revised BACKWARD mid-block, one is
+unchanged — see usage_store.RETRY_AFTER_MARGIN_S's comment for the per-gap
+detail) — excluded from both numerator and denominator; round 8 switched
+from the prior "21 of 36"/"2 of 38" figures here to these, on the OTHER of
+two equally-reproducing readings — see usage_store.RETRY_AFTER_MARGIN_S's
+comment for which reading and why).
+The prior "10 of 23" figure here did not reproduce under any of 40 method
+variants swept and is superseded. That is why the wait is Retry-After plus
+``usage_store.RETRY_AFTER_MARGIN_S`` and not Retry-After alone. What would
+mean this model needs revisiting is a 429 episode at modest rates that
+outlasts an hour *past* that margin.
 
 Plans computed here are persisted per account in the usage store
 (``nextPollAt``/``pollIntervalS``) by whichever collector fetched, so every
@@ -31,8 +62,6 @@ module only.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 import random
 from collections.abc import Callable
@@ -64,6 +93,15 @@ ACTIVE_MAX_INTERVAL_S = 300.0
 CANDIDATE_DEFAULT_INTERVAL_S = 300.0
 CANDIDATE_MAX_INTERVAL_S = 600.0
 
+# Exhaustion is stable enough to poll slowly, but not to stop polling until a
+# reported reset. Quota grants and provider-side corrections can make an
+# account usable before that timestamp, and decision-grade status must not age
+# into "unavailable" while the scheduler is deliberately waiting. Ten-minute
+# polling (six requests/hour) stays below the measured budget and
+# detects recovery promptly; a nearer reported reset still pulls the next poll
+# forward.
+EXHAUSTED_INTERVAL_S = 600.0
+
 # A window whose binding pct moved at least this much between polls is being
 # consumed somewhere (this machine, another PC, session mode) → tighten; an
 # unmoved one backs off toward its ceiling.
@@ -84,6 +122,21 @@ EDGE_BACKOFF_S = 300.0
 POST_429_MIN_INTERVAL_S = 360.0
 RECENT_429_WINDOW_S = 3600.0
 
+# AIMD on a contended budget. The budget is shared across every machine
+# polling the same account (under the account-scoped regime a machine with its
+# own token is no less a competitor — see the module docstring on scope),
+# none of them can see the others, and the endpoint
+# exposes no remaining-request count — only a Retry-After once already
+# blocked. So while 429s recur, each successful poll multiplicatively grows the
+# interval (×POST_429_BACKOFF_MULT) toward POST_429_MAX_INTERVAL_S — wider than
+# the normal candidate ceiling so several machines can each back off far enough
+# that their combined rate fits under the budget. Movement (a real success run
+# with no recent 429) decays it back down. This is TCP-style congestion control:
+# the budget gets fair-shared by reaction alone, with no machine count or
+# shared state to configure.
+POST_429_BACKOFF_MULT = 1.5
+POST_429_MAX_INTERVAL_S = 1800.0
+
 # The engine escalates to a full candidate refresh when the active account is
 # within this margin of the threshold (decision policy, but the urgent-mode
 # cadence keys on the same band, so it lives with the cadence numbers).
@@ -94,16 +147,14 @@ ESCALATION_MARGIN_PCT = 15.0
 RESET_SLACK_S = 60.0
 
 
-def binding_pct(
-    usage: dict[str, Any] | None, models: tuple[str, ...] = ()
-) -> float | None:
+def binding_pct(usage: dict | None, models: tuple[str, ...] = ()) -> float | None:
     """Utilization of the binding (worst) relevant window, or None."""
     headroom = oauth.account_headroom(usage, models)
     return None if headroom is None else 100.0 - headroom
 
 
 def limiting_reset_ts(
-    usage: dict[str, Any] | None, models: tuple[str, ...] = ()
+    usage: dict | None, models: tuple[str, ...] = ()
 ) -> float | None:
     """Epoch when the last of the ≥100% relevant windows resets (account
     usable again)."""
@@ -118,7 +169,7 @@ def limiting_reset_ts(
 
 
 def earliest_future_reset_ts(
-    usage: dict[str, Any] | None, now: float, models: tuple[str, ...] = ()
+    usage: dict | None, now: float, models: tuple[str, ...] = ()
 ) -> float | None:
     """Epoch of the next relevant-window reset ahead of ``now``, any
     utilization."""
@@ -144,8 +195,8 @@ def parse_reset_ts(resets_at: str | None) -> float | None:
 def plan_after_fetch(
     *,
     prev_interval_s: float | None,
-    prev_usage: dict[str, Any] | None,
-    new_usage: dict[str, Any] | None,
+    prev_usage: dict | None,
+    new_usage: dict | None,
     is_active: bool,
     threshold: float,
     models: tuple[str, ...],
@@ -163,8 +214,9 @@ def plan_after_fetch(
     the cadence at ``POST_429_MIN_INTERVAL_S`` (and suppresses urgent mode)
     until ``RECENT_429_WINDOW_S`` has passed. The scheduled time gets
     ``JITTER_FRAC`` noise, is never later than the account's next window
-    reset (+ ``RESET_SLACK_S``), and an at-limit account skips straight to
-    the reset that frees it (the learned interval is kept for its return).
+    reset (+ ``RESET_SLACK_S``). An at-limit account keeps a bounded slow
+    poll instead of sleeping until that reset, so an early provider-side
+    quota grant is observed and its decision-grade status stays current.
     """
     default = MIN_INTERVAL_S if is_active else CANDIDATE_DEFAULT_INTERVAL_S
     ceiling = ACTIVE_MAX_INTERVAL_S if is_active else CANDIDATE_MAX_INTERVAL_S
@@ -192,14 +244,25 @@ def plan_after_fetch(
     ):
         interval = URGENT_INTERVAL_S
     if recent_429:
-        interval = max(interval, POST_429_MIN_INTERVAL_S)
+        # AIMD additive-increase: grow the interval multiplicatively from the
+        # last one toward the wider 429 ceiling, so machines sharing a
+        # contended token each retreat until their combined rate fits the
+        # budget. Floored at POST_429_MIN_INTERVAL_S for the first 429.
+        increased = max(base * POST_429_BACKOFF_MULT, POST_429_MIN_INTERVAL_S)
+        interval = min(POST_429_MAX_INTERVAL_S, max(interval, increased))
 
-    next_poll = now + interval * (1.0 + JITTER_FRAC * (2.0 * rng() - 1.0))
     headroom = oauth.account_headroom(new_usage, models)
     if headroom is not None and headroom <= 0:
+        # Keep probing exhausted accounts: Anthropic can grant/reset quota
+        # before the previously advertised timestamp. Preserve a wider
+        # post-429 interval if congestion control already selected one.
+        interval = max(interval, EXHAUSTED_INTERVAL_S)
+
+    next_poll = now + interval * (1.0 + JITTER_FRAC * (2.0 * rng() - 1.0))
+    if headroom is not None and headroom <= 0:
         reset_ts = limiting_reset_ts(new_usage, models)
-        if reset_ts is not None and reset_ts > next_poll:
-            next_poll = reset_ts
+        if reset_ts is not None and reset_ts > now:
+            next_poll = min(next_poll, reset_ts + RESET_SLACK_S)
     else:
         reset_ts = earliest_future_reset_ts(new_usage, now, models)
         if reset_ts is not None:

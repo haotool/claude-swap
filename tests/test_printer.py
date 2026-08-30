@@ -4,20 +4,11 @@ from __future__ import annotations
 
 import sys
 from io import StringIO
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
 from claude_swap import printer
-
-
-@pytest.fixture(autouse=True)
-def _reset_color_cache():
-    """Reset the color detection cache before each test."""
-    printer._colors_enabled = None
-    yield
-    printer._colors_enabled = None
+from tests.conftest import _deterministic_colour
 
 
 class TestColorDetection:
@@ -60,52 +51,6 @@ class TestColorDetection:
         # Even after removing FORCE_COLOR, cached value persists
         monkeypatch.delenv("FORCE_COLOR")
         assert printer.colors_enabled() is True
-
-
-def _fake_ctypes(*, get_mode_rc: int, set_mode_rc: int) -> tuple[object, MagicMock]:
-    """In-memory kernel32 so the VT-enable branch runs on any test host."""
-    kernel32 = MagicMock()
-    kernel32.GetStdHandle.return_value = 7
-    kernel32.GetConsoleMode.return_value = get_mode_rc
-    kernel32.SetConsoleMode.return_value = set_mode_rc
-    fake = SimpleNamespace(
-        windll=SimpleNamespace(kernel32=kernel32),
-        c_ulong=lambda: SimpleNamespace(value=0),
-        byref=lambda obj: obj,
-    )
-    return fake, kernel32
-
-
-class TestEnableWindowsVt:
-    """SetConsoleMode can refuse VT (legacy conhost); that must read False."""
-
-    def test_true_when_console_accepts_vt(self, monkeypatch):
-        fake, kernel32 = _fake_ctypes(get_mode_rc=1, set_mode_rc=1)
-        monkeypatch.setattr(printer.sys, "platform", "win32")
-        monkeypatch.setattr(printer, "ctypes", fake)
-        assert printer._enable_windows_vt() is True
-        kernel32.SetConsoleMode.assert_called_once()
-
-    def test_false_when_set_console_mode_fails(self, monkeypatch):
-        # Pretending success here made every style call emit bare escape
-        # codes on consoles without VT support.
-        fake, _ = _fake_ctypes(get_mode_rc=1, set_mode_rc=0)
-        monkeypatch.setattr(printer.sys, "platform", "win32")
-        monkeypatch.setattr(printer, "ctypes", fake)
-        assert printer._enable_windows_vt() is False
-
-    def test_false_when_get_console_mode_fails(self, monkeypatch):
-        fake, kernel32 = _fake_ctypes(get_mode_rc=0, set_mode_rc=1)
-        monkeypatch.setattr(printer.sys, "platform", "win32")
-        monkeypatch.setattr(printer, "ctypes", fake)
-        assert printer._enable_windows_vt() is False
-        # A failed read means the mode value is garbage; it must never be
-        # written back or the console loses its existing flags.
-        kernel32.SetConsoleMode.assert_not_called()
-
-    def test_true_on_non_windows(self, monkeypatch):
-        monkeypatch.setattr(printer.sys, "platform", "linux")
-        assert printer._enable_windows_vt() is True
 
 
 class TestStyling:
@@ -155,6 +100,34 @@ class TestStyling:
         assert "\033[1m" in result
         assert "\033[38;5;173m" in result
         assert "(active)" in result
+
+
+class TestThemePalette:
+    """Tests for set_theme and the per-theme color palette."""
+
+    def test_light_theme_changes_accent(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        printer._colors_enabled = None
+        printer.set_theme("light")
+        assert "38;2;149;76;42" in printer.accent("x")   # #954c2a
+        printer.set_theme("dark")
+        assert "38;5;173" in printer.accent("x")
+
+    def test_light_theme_error_uses_light_red(self, monkeypatch, capsys):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        printer._colors_enabled = None
+        printer.set_theme("light")
+        printer.error("boom")
+        assert "38;2;173;49;40" in capsys.readouterr().err   # #ad3128
+
+    def test_unknown_theme_falls_back_to_dark(self, monkeypatch):
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        printer._colors_enabled = None
+        printer.set_theme("bogus")
+        assert "38;5;173" in printer.accent("x")
 
 
 class TestLinePrinters:
@@ -227,3 +200,109 @@ class TestForceUtf8Output:
         monkeypatch.setattr(sys, "stdout", StringIO())
         monkeypatch.setattr(sys, "stderr", StringIO())
         printer.force_utf8_output()  # must not raise
+
+
+class TestColourEnvDoesNotLeakIntoTests:
+    """A developer's terminal must not decide whether the suite passes.
+
+    See ``_deterministic_colour`` in conftest for the measurement. These
+    assert on OUTPUT: checking only ``"FORCE_COLOR" not in os.environ``
+    passes for free on any box that never exported it, which is most
+    boxes and every CI runner.
+
+    ASSERTING ON OUTPUT IS NOT ENOUGH ON ITS OWN, which is what ``_exported``
+    below is for. With BOTH ``delenv`` lines deleted from the fixture and
+    neither variable exported, the whole suite stays fully green — so in the
+    environment CI actually runs in, the two scrubs were dead code no test
+    could kill. Their coverage existed only on a box whose developer had
+    exported the variable, i.e. only under the condition this change exists to
+    remove. A guard is not covered by a test that needs the bug to be
+    happening already. (The class below closes that hole directly, via
+    ``TestEntryAssertionsCatchAPoisonedGlobal`` in this same file — the same
+    argument applied to ``_deterministic_colour``'s own entry assertions.)
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _exported(self):
+        """Export both variables BEFORE ``_deterministic_colour`` runs.
+
+        A test cannot set them in its own body: the fixture has already
+        scrubbed by then, so the assignment lands after the thing under test
+        and proves nothing. Class scope is what buys the ordering — pytest
+        instantiates higher-scoped fixtures first, so this runs ahead of the
+        function-scoped conftest one. (A module-level FUNCTION-scoped autouse
+        fixture would run after it instead, which is the same trap one level
+        down.)
+
+        Scoped to this class, not the module, so the export cannot reach a
+        test that is not about it.
+        """
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("FORCE_COLOR", "3")
+            mp.setenv("NO_COLOR", "1")
+            yield
+
+    def test_styled_output_is_plain(self, monkeypatch):
+        """The reduced form of the 11 test_switcher failures.
+
+        Guards the FORCE_COLOR scrub: without it this returns the styled
+        string on any machine that exported the variable.
+
+        stdout is pinned to a StringIO, as the rest of this file does. The
+        fixture guarantees the variables are gone, not that stdout is not a
+        tty — so under ``pytest -s`` on a terminal, detection correctly falls
+        through to isatty() and returns True. Asserting unconditionally made
+        the outcome depend on how the developer invoked pytest, which is the
+        failure class this whole change exists to remove.
+        """
+        monkeypatch.setattr(sys, "stdout", StringIO())
+        assert printer.accent("Skipping") == "Skipping"
+        assert "\x1b[" not in printer.muted("usage")
+
+    def test_detection_reaches_isatty_rather_than_an_override(self, monkeypatch):
+        """Guards the NO_COLOR scrub, which the test above cannot see.
+
+        Both scrubs land on the same OUTPUT — plain — so a fixture that
+        cleared only FORCE_COLOR would still pass the test above while
+        leaving NO_COLOR free to steer any suite asserting that styling IS
+        present. What separates them is WHY the answer is plain: with the
+        variables gone, detection has to fall through to the captured-stdout
+        ``isatty()`` check, so forcing that to report a TTY must flip it.
+        A surviving NO_COLOR would pin it False regardless.
+
+        TERM is pinned for the same reason the fixture scrubs the other two:
+        detection consults it AFTER isatty(), so on a ``TERM=dumb`` terminal —
+        Emacs M-x shell, some CI shells — this assertion fails for a reason
+        that has nothing to do with what it is guarding. Removing one
+        environment dependency from the suite while adding a narrower one is
+        the same defect in a smaller coat.
+        """
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+        assert printer.colors_enabled() is True
+
+
+class TestEntryAssertionsCatchAPoisonedGlobal:
+    """The two `assert inherited[...]` lines in `_deterministic_colour`,
+    mutation-killed directly rather than via test ordering.
+
+    Calling the fixture body with a scratch `MonkeyPatch` needs no ordering
+    trick and never touches this test's own fixture instance: poison the
+    global, invoke the guard, and it must raise. Delete either assertion and
+    the matching test below dies (measured).
+    """
+
+    @staticmethod
+    def _invoke_guard():
+        with pytest.MonkeyPatch.context() as mp:
+            _deterministic_colour.__wrapped__(mp)
+
+    def test_kills_colors_enabled_assertion(self, monkeypatch):
+        monkeypatch.setattr(printer, "_colors_enabled", True)
+        with pytest.raises(AssertionError, match="latched the colour cache"):
+            self._invoke_guard()
+
+    def test_kills_theme_assertion(self, monkeypatch):
+        monkeypatch.setattr(printer, "_theme", "light")
+        with pytest.raises(AssertionError, match="latched the theme"):
+            self._invoke_guard()

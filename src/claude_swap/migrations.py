@@ -29,18 +29,19 @@ import os
 import sys
 import tempfile
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING
 
 from claude_swap import macos_keychain
 from claude_swap.exceptions import MigrationIncomplete
+from claude_swap.fsutil import replace_with_retry
 from claude_swap.locking import FileLock
 from claude_swap.models import Platform, get_timestamp
 from claude_swap.settings import (
-    THRESHOLD_MAX,
-    THRESHOLD_MIN,
     load_settings,
     save_settings,
+    setting_spec,
     settings_path,
 )
 from claude_swap.switcher import KEYRING_SERVICE
@@ -57,11 +58,11 @@ STATE_VERSION = 1
 # ---------------------------------------------------------------------------
 
 
-def _state_path(switcher: "ClaudeAccountSwitcher") -> Path:
+def _state_path(switcher: ClaudeAccountSwitcher) -> Path:
     return switcher.backup_dir / STATE_FILENAME
 
 
-def _load_applied(switcher: "ClaudeAccountSwitcher") -> dict[str, str]:
+def _load_applied(switcher: ClaudeAccountSwitcher) -> dict:
     """Return the ``{migration_id: timestamp}`` map; {} if missing or corrupt.
 
     A missing or unparseable state file is treated as "nothing applied" so a
@@ -78,7 +79,7 @@ def _load_applied(switcher: "ClaudeAccountSwitcher") -> dict[str, str]:
     return applied if isinstance(applied, dict) else {}
 
 
-def _mark_applied(switcher: "ClaudeAccountSwitcher", migration_id: str) -> None:
+def _mark_applied(switcher: ClaudeAccountSwitcher, migration_id: str) -> None:
     """Record ``migration_id`` as applied, written atomically.
 
     Preserves any previously-recorded migrations. Mirrors the mkstemp +
@@ -96,7 +97,7 @@ def _mark_applied(switcher: "ClaudeAccountSwitcher", migration_id: str) -> None:
         os.write(fd, content.encode("utf-8"))
         os.close(fd)
         fd = -1
-        os.replace(tmp_path, str(path))
+        replace_with_retry(tmp_path, str(path))
         if sys.platform != "win32":
             os.chmod(str(path), 0o600)
     except BaseException:
@@ -115,10 +116,7 @@ def _mark_applied(switcher: "ClaudeAccountSwitcher", migration_id: str) -> None:
 
 
 def _delete_keyring_quietly(
-    keyring: Any,
-    switcher: "ClaudeAccountSwitcher",
-    username: str,
-    context: str = "windows_keyring_to_files",
+    keyring, switcher, username: str, context: str = "windows_keyring_to_files"
 ) -> None:
     """Best-effort delete of a keyring entry; never raises.
 
@@ -141,7 +139,7 @@ def _delete_keyring_quietly(
         )
 
 
-def migrate_windows_keyring_to_files(switcher: "ClaudeAccountSwitcher") -> bool:
+def migrate_windows_keyring_to_files(switcher: ClaudeAccountSwitcher) -> bool:
     """Copy Windows backup credentials from Credential Manager to files.
 
     Windows now stores per-account backup credentials as base64 files (like
@@ -172,10 +170,10 @@ def migrate_windows_keyring_to_files(switcher: "ClaudeAccountSwitcher") -> bool:
         return True  # Readable sequence, nothing to migrate → done.
 
     try:
-        import keyring  # noqa: PLC0415 - only needed on the migration path
+        import keyring
         # Touch the attribute we rely on so a broken backend surfaces here.
         keyring.errors.PasswordDeleteError  # noqa: B018
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # An inaccessible backend is NOT "nothing to migrate" — that would
         # permanently skip real entries. Force a retry next run.
         raise MigrationIncomplete(
@@ -278,7 +276,28 @@ def migrate_windows_keyring_to_files(switcher: "ClaudeAccountSwitcher") -> bool:
     return True
 
 
-def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool:
+def _keyring_backend_unavailable(keyring, exc: Exception) -> bool:
+    """Whether ``exc`` from a keyring call means the backend is *unusable* (vs. a
+    locked/denied Keychain).
+
+    Only an unusable backend justifies the ``security`` fallback — `security` is a
+    real alternative path to the same data. A locked/denied Keychain would hit
+    `security` identically, so that must stay a genuine failure (retry), not a
+    fallback that just re-prompts.
+    """
+    errs = getattr(keyring, "errors", None)
+    candidates = tuple(
+        c
+        for c in (
+            getattr(errs, "NoKeyringError", None),
+            getattr(errs, "InitError", None),
+        )
+        if isinstance(c, type)
+    )
+    return bool(candidates) and isinstance(exc, candidates)
+
+
+def migrate_macos_keyring_to_security(switcher: ClaudeAccountSwitcher) -> bool:
     """Move macOS backup credentials from the ``keyring`` service to the
     ``security`` service.
 
@@ -296,15 +315,11 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
     :class:`MigrationIncomplete` if any account could not be safely relocated, so
     the runner retries on the next launch rather than marking it done.
 
-    Source reads use the same ``security`` CLI wrapper as the destination backend.
-    This avoids keyring's in-process Security.framework access path, which can
-    repeatedly trigger Keychain authorization prompts when the Python interpreter
-    identity changes across tool upgrades.
-
-    If ``keyring`` is importable it is used only for best-effort deletion of the
-    old legacy item after a verified copy. A failed or denied delete is harmless:
-    the migrated item already lives in the new service and the leftover can be
-    cleaned up later.
+    Source reads prefer ``keyring`` (silent, same-app). They fall back to the
+    ``security`` CLI *only* when ``keyring`` is genuinely unavailable (not
+    installed / no usable backend) — where ``security`` is a real alternative and
+    may prompt once. This branch is dormant while ``keyring`` is a dependency; it
+    exists so a future ``keyring`` removal can't strand a long-absent user.
     """
     if switcher.platform != Platform.MACOS:
         return False
@@ -348,21 +363,37 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
     # account-None-{email} maps to a slot only when its email is unique.
     email_counts = Counter(info.get("email", "") for info in accounts.values())
 
-    # Import keyring only for best-effort deletion of legacy items after a
-    # verified copy. Reads intentionally do NOT go through keyring on macOS.
+    # Source backend: keyring if importable, else None → security fallback.
     keyring = None
     try:
-        import keyring as _keyring  # noqa: PLC0415 - only on the migration path
+        import keyring as _keyring
 
         keyring = _keyring
     except Exception as e:  # noqa: BLE001
         switcher._logger.warning(
-            "macos_keyring_to_security: keyring unavailable for legacy delete "
-            f"cleanup; legacy reads still use security directly: {e}"
+            "macos_keyring_to_security: keyring unavailable, using security "
+            f"fallback for legacy reads (may prompt once): {e}"
         )
 
     def _read_old(username: str) -> str:
-        """Read a legacy ``KEYRING_SERVICE`` item via the security CLI wrapper."""
+        """Read a legacy ``KEYRING_SERVICE`` item: ``""`` if absent, else its value.
+
+        Prefers ``keyring``; downgrades to ``security`` only if the keyring backend
+        is unusable. Raises on a genuine read failure (e.g. locked Keychain).
+        """
+        nonlocal keyring
+        if keyring is not None:
+            try:
+                creds = keyring.get_password(KEYRING_SERVICE, username)
+                return creds or ""
+            except Exception as e:
+                if not _keyring_backend_unavailable(keyring, e):
+                    raise  # locked/denied → real failure, security can't help
+                switcher._logger.warning(
+                    "macos_keyring_to_security: keyring backend unusable, "
+                    f"falling back to security (may prompt once): {e}"
+                )
+                keyring = None  # subsequent reads use security too
         creds = macos_keychain.get_password(KEYRING_SERVICE, username)
         return creds or ""
 
@@ -472,7 +503,7 @@ def migrate_macos_keyring_to_security(switcher: "ClaudeAccountSwitcher") -> bool
 
 
 def migrate_autoswitch_config_to_settings(
-    switcher: "ClaudeAccountSwitcher",
+    switcher: ClaudeAccountSwitcher,
 ) -> bool:
     """Move the legacy ``autoSwitch`` section of ``sequence.json`` into
     ``settings.json``.
@@ -492,6 +523,11 @@ def migrate_autoswitch_config_to_settings(
         if not isinstance(raw, dict) or "autoSwitch" not in raw:
             return False
         legacy = raw.pop("autoSwitch")
+        threshold_spec = setting_spec("autoswitch.threshold")
+        if threshold_spec.lo is None or threshold_spec.hi is None:
+            raise RuntimeError("autoswitch.threshold bounds unset")
+        threshold_lo = threshold_spec.lo
+        threshold_hi = threshold_spec.hi
 
         threshold: float | None = None
         if isinstance(legacy, dict):
@@ -500,13 +536,13 @@ def migrate_autoswitch_config_to_settings(
             except (TypeError, ValueError):
                 threshold = None
         if threshold is not None:
-            clamped = min(max(threshold, THRESHOLD_MIN), THRESHOLD_MAX)
+            clamped = min(max(threshold, threshold_lo), threshold_hi)
             if clamped != threshold:
                 switcher._logger.warning(
                     "Migrated auto-switch threshold %s%% is outside the engine's "
                     "%s–%s%% range; clamped to %s%%. Adjust with "
                     "`cswap config set autoswitch.threshold <pct>`.",
-                    threshold, THRESHOLD_MIN, THRESHOLD_MAX, clamped,
+                    threshold, threshold_lo, threshold_hi, clamped,
                 )
             already_set = False
             try:
@@ -544,7 +580,7 @@ def migrate_autoswitch_config_to_settings(
 
 
 # Registry of (id, fn). Order matters if migrations ever depend on each other.
-MIGRATIONS: list[tuple[str, Callable[["ClaudeAccountSwitcher"], bool]]] = [
+MIGRATIONS: list[tuple[str, Callable[[ClaudeAccountSwitcher], bool]]] = [
     ("windows_keyring_to_files", migrate_windows_keyring_to_files),
     ("macos_keyring_to_security", migrate_macos_keyring_to_security),
     ("autoswitch_config_to_settings", migrate_autoswitch_config_to_settings),
@@ -556,7 +592,7 @@ MIGRATIONS: list[tuple[str, Callable[["ClaudeAccountSwitcher"], bool]]] = [
 # ---------------------------------------------------------------------------
 
 
-def run_migrations(switcher: "ClaudeAccountSwitcher") -> None:
+def run_migrations(switcher: ClaudeAccountSwitcher) -> None:
     """Run any not-yet-applied migrations. Never raises.
 
     A no-op on fresh installs (backup dir not yet materialized — preserves the
