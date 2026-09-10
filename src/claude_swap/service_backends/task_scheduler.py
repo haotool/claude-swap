@@ -123,14 +123,9 @@ def _build_task_xml(switcher: ServiceHost) -> str:
 
     triggers = ET.SubElement(root, f"{{{_TASK_NS}}}Triggers")
     logon = ET.SubElement(triggers, f"{{{_TASK_NS}}}LogonTrigger")
-    # Task Scheduler has no supervisor semantics for exit codes: once the
-    # process launched successfully, any exit status counts as success and
-    # RestartOnFailure never fires — it only covers actions that failed to
-    # start at all. The standard watchdog pattern is a repeating trigger:
-    # re-fire every five minutes with no end, and let
-    # MultipleInstancesPolicy=IgnoreNew drop the re-fire while an engine
-    # instance is still alive. Net effect: a dead engine is back within
-    # five minutes; a healthy one is never disturbed.
+    # The repeating trigger is the explicit watchdog. IgnoreNew only prevents
+    # another instance of this same scheduled task while its action is still
+    # running; it is not a process-wide singleton for every `cswap auto` entry.
     repetition = ET.SubElement(logon, f"{{{_TASK_NS}}}Repetition")
     ET.SubElement(repetition, f"{{{_TASK_NS}}}Interval").text = "PT5M"
     ET.SubElement(repetition, f"{{{_TASK_NS}}}StopAtDurationEnd").text = "false"
@@ -140,12 +135,8 @@ def _build_task_xml(switcher: ServiceHost) -> str:
     # user's InteractiveToken and litters the task history with noise.
     ET.SubElement(logon, f"{{{_TASK_NS}}}UserId").text = user
     # The logon trigger's repetition only arms on an actual logon;
-    # Start-ScheduledTask (the install-time kick) arms no trigger at all, so
-    # in the install session a dead engine would stay dead until the next
-    # logon — exactly when a crash is most likely to go unnoticed. This TimeTrigger
-    # anchors the same 5-minute watchdog at install time (no Duration =
-    # repeats forever); Settings/StartWhenAvailable covers the boundary
-    # already being in the past once registration completes.
+    # Start-ScheduledTask (the install-time kick) arms no trigger at all. This
+    # TimeTrigger anchors the same periodic retry in the install session.
     time_trigger = ET.SubElement(triggers, f"{{{_TASK_NS}}}TimeTrigger")
     time_repetition = ET.SubElement(time_trigger, f"{{{_TASK_NS}}}Repetition")
     ET.SubElement(time_repetition, f"{{{_TASK_NS}}}Interval").text = "PT5M"
@@ -177,9 +168,8 @@ def _build_task_xml(switcher: ServiceHost) -> str:
     ET.SubElement(settings, f"{{{_TASK_NS}}}ExecutionTimeLimit").text = "PT0S"
     ET.SubElement(settings, f"{{{_TASK_NS}}}DisallowStartIfOnBatteries").text = "false"
     ET.SubElement(settings, f"{{{_TASK_NS}}}StopIfGoingOnBatteries").text = "false"
-    # RestartOnFailure only covers launch failures (bad credentials, ACLs);
-    # it does NOT react to exit codes — the repeating triggers above are the
-    # watchdog. Kept for the launch-failure case.
+    # RestartOnFailure is supplemental; the periodic triggers above are the
+    # behavior this backend relies on for recurring supervision.
     restart = ET.SubElement(settings, f"{{{_TASK_NS}}}RestartOnFailure")
     ET.SubElement(restart, f"{{{_TASK_NS}}}Interval").text = "PT1M"
     ET.SubElement(restart, f"{{{_TASK_NS}}}Count").text = "3"
@@ -213,19 +203,71 @@ def _installed_version(switcher: ServiceHost) -> str | None:
     return _installed_version_from_xml(text)
 
 
-def _unregister_task(*, check: bool = False) -> subprocess.CompletedProcess[str]:
-    name = _task_name_literal()
-    # Unregister-ScheduledTask does not stop a running instance (deleting a
-    # task never interrupts its process). Without the Stop, uninstall leaves
-    # the old engine alive until logoff and reinstall orphans it — parity
-    # with launchd bootout / systemd disable --now, which both kill the
-    # process.
-    script = (
-        f"Stop-ScheduledTask -TaskName '{name}' -ErrorAction SilentlyContinue; "
-        f"Unregister-ScheduledTask -TaskName '{name}' -Confirm:$false "
-        f"-ErrorAction SilentlyContinue"
+def _task_error(action: str, proc: subprocess.CompletedProcess[str]) -> ClaudeSwitchError:
+    detail = (proc.stderr or proc.stdout or "").strip()
+    return ClaudeSwitchError(
+        f"Task Scheduler {action} failed (rc={proc.returncode})"
+        + (f": {detail}" if detail else "")
     )
-    return _powershell(script, check=check)
+
+
+def _query_task_state() -> tuple[bool, str]:
+    """Return ``(exists, state)``; raise when Task Scheduler cannot be queried.
+
+    The root task collection must be read successfully before absence can be
+    concluded. This avoids treating a suppressed CIM/Task Scheduler failure as
+    the same thing as a successful lookup with no matching task.
+    """
+    name = _task_name_literal()
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$tasks = @(Get-ScheduledTask -TaskPath '\\*' -ErrorAction Stop | "
+        f"Where-Object {{ $_.TaskName -eq '{name}' }}); "
+        "if ($tasks.Count -eq 0) { exit 2 }; "
+        "if ($tasks.Count -ne 1) { Write-Error 'multiple root tasks matched'; exit 3 }; "
+        "$tasks[0].State"
+    )
+    proc = _powershell(script, check=False)
+    if proc.returncode == 2:
+        return False, ""
+    if proc.returncode != 0:
+        raise _task_error("query", proc)
+    return True, proc.stdout.strip()
+
+
+def _remove_task() -> bool:
+    """Stop and unregister the task, returning whether one was present.
+
+    A missing task is an idempotent success. Running instances are stopped;
+    ready/disabled tasks have nothing to stop and go straight to unregister.
+    Task Scheduler can take a moment to drop a registration, so the same
+    manager operation polls that postcondition for up to five seconds.
+    """
+    name = _task_name_literal()
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$tasks = @(Get-ScheduledTask -TaskPath '\\*' -ErrorAction Stop | "
+        f"Where-Object {{ $_.TaskName -eq '{name}' }}); "
+        "if ($tasks.Count -eq 0) { exit 2 }; "
+        "if ($tasks.Count -ne 1) { Write-Error 'multiple root tasks matched'; exit 3 }; "
+        "$task = $tasks[0]; "
+        "if ($task.State -eq 'Running') { Stop-ScheduledTask -InputObject $task -ErrorAction Stop }; "
+        "Unregister-ScheduledTask -InputObject $task -Confirm:$false -ErrorAction Stop; "
+        "$removed = $false; "
+        "for ($i = 0; $i -lt 50; $i++) { "
+        "  $remaining = @(Get-ScheduledTask -TaskPath '\\*' -ErrorAction Stop | "
+        f"Where-Object {{ $_.TaskName -eq '{name}' }}); "
+        "  if ($remaining.Count -eq 0) { $removed = $true; break }; "
+        "  Start-Sleep -Milliseconds 100 "
+        "}; "
+        "if (-not $removed) { Write-Error 'task is still registered after 5 seconds'; exit 3 }"
+    )
+    proc = _powershell(script, check=False)
+    if proc.returncode == 2:
+        return False
+    if proc.returncode != 0:
+        raise _task_error("removal", proc)
+    return True
 
 
 def _register_task(xml_path: Path) -> None:
@@ -239,34 +281,9 @@ def _register_task(xml_path: Path) -> None:
 
 
 def _start_task() -> None:
-    """Best-effort immediate start so the engine runs without waiting for the
-    next logon (parity with launchd ``bootstrap`` / systemd ``enable --now``).
-
-    Non-fatal: the task is already registered with ``MultipleInstancesPolicy``
-    ``IgnoreNew``, and the ``LogonTrigger`` still covers subsequent logons.
-    """
+    """Start the registered task immediately or surface the failure."""
     name = _task_name_literal()
-    _powershell(f"Start-ScheduledTask -TaskName '{name}'", check=False)
-
-
-def _query_task_state() -> tuple[bool, str]:
-    """Return ``(exists, state)`` where *state* is the Task Scheduler state string.
-
-    Exit 2 is the script's own not-found signal; any other non-zero exit
-    means the query itself failed and proves nothing, so it must not be
-    reported as an existing (loaded) task.
-    """
-    name = _task_name_literal()
-    script = (
-        f"$t = Get-ScheduledTask -TaskName '{name}' -ErrorAction SilentlyContinue; "
-        f"if ($null -eq $t) {{ exit 2 }}; "
-        f"$t.State"
-    )
-    proc = _powershell(script, check=False)
-    if proc.returncode != 0:
-        return False, ""
-    state = proc.stdout.strip()
-    return True, state
+    _powershell(f"Start-ScheduledTask -TaskName '{name}'")
 
 
 class TaskSchedulerBackend:
@@ -280,9 +297,24 @@ class TaskSchedulerBackend:
         os.chmod(log_dir, 0o700)
         xml_path = _task_xml_path(switcher)
         xml_path.write_text(_build_task_xml(switcher), encoding="utf-8")
-        _unregister_task(check=False)
+
+        # Reinstall is idempotent, but replacing the previous registration is a
+        # real lifecycle transition; manager failures must stop the install.
+        _remove_task()
         _register_task(xml_path)
-        _start_task()
+        try:
+            _start_task()
+        except ClaudeSwitchError as start_error:
+            # Registration succeeded but the promised immediate start did not.
+            # Remove the new future-triggering task before surfacing failure.
+            try:
+                _remove_task()
+            except ClaudeSwitchError as cleanup_error:
+                raise ClaudeSwitchError(
+                    f"{start_error}; cleanup also failed: {cleanup_error}"
+                ) from start_error
+            raise
+
         config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
         if config_dir:
             # launchd/systemd forward CLAUDE_CONFIG_DIR to the engine, but
@@ -307,8 +339,12 @@ class TaskSchedulerBackend:
 
     def uninstall(self, switcher: ServiceHost) -> int:
         xml_path = _task_xml_path(switcher)
-        existed = xml_path.exists() or _query_task_state()[0]
-        _unregister_task(check=False)
+        registered, _ = _query_task_state()
+        existed = registered or xml_path.exists()
+        if registered:
+            _remove_task()
+        # Only discard the local definition after the manager has confirmed
+        # the task absent. On failure it remains useful for diagnosis/retry.
         xml_path.unlink(missing_ok=True)
         service_spec.print_uninstall_result(
             switcher,
@@ -364,5 +400,3 @@ class TaskSchedulerBackend:
             return 0
         print(f"  {muted(f'State: {task_state}')}")
         return 0
-
-
