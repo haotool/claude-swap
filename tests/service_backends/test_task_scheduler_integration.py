@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from claude_swap import service_spec
+from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.service_backends import task_scheduler
 
 pytestmark = [
@@ -59,5 +60,10 @@ def test_register_query_unregister_roundtrip(tmp_path, monkeypatch):
         exists_after, _ = task_scheduler._query_task_state()
         assert not exists_after, "uninstall must remove the task"
     finally:
-        # Failure-path cleanup: a broken assertion must not leave a task behind.
-        task_scheduler._unregister_task(check=False)
+        # Failure-path cleanup must not hide the assertion or manager error that
+        # brought us here. Production lifecycle calls still surface the same
+        # ClaudeSwitchError rather than swallowing it.
+        try:
+            task_scheduler._remove_task()
+        except ClaudeSwitchError:
+            pass

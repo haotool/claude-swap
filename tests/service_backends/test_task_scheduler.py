@@ -122,10 +122,9 @@ class TestBuildTaskXml:
         assert "<Arguments>-m claude_swap auto</Arguments>" in xml
 
     def test_logon_trigger_repeats_as_watchdog(self, temp_home: Path):
-        # Task Scheduler's RestartOnFailure ignores exit codes (it only fires
-        # when the action fails to launch), so exit 75 alone would never be
-        # retried. The repeating trigger re-launches the task periodically and
-        # MultipleInstancesPolicy=IgnoreNew de-duplicates while it is alive.
+        # The repeating trigger is the explicit watchdog this backend relies
+        # on. IgnoreNew de-duplicates overlapping runs of this scheduled task;
+        # RestartOnFailure remains supplemental rather than defining this test.
         switcher = ClaudeAccountSwitcher()
         xml = ts_backend._build_task_xml(switcher)
         assert "<Repetition>" in xml
@@ -135,10 +134,9 @@ class TestBuildTaskXml:
         assert xml.index("<Repetition>") < xml.index("</LogonTrigger>")
 
     def test_time_trigger_covers_the_install_session(self, temp_home: Path):
-        # A logon trigger's repetition only arms on an actual logon, and
-        # Start-ScheduledTask arms no trigger at all — so without this
-        # TimeTrigger a monitor dying in the install session (before the next
-        # logon) would never be pulled back.
+        # Start-ScheduledTask starts the action immediately but does not create
+        # a repeating schedule. The TimeTrigger supplies the periodic retry in
+        # the install session instead of waiting for a later logon.
         switcher = ClaudeAccountSwitcher()
         xml = ts_backend._build_task_xml(switcher)
         assert "<LogonTrigger>" in xml
@@ -532,15 +530,16 @@ class TestQueryTaskState:
         monkeypatch.setattr(subprocess, "run", _stub_run(stdout="Ready\r\n"))
         assert ts_backend._query_task_state() == (True, "Ready")
 
-    def test_query_failure_is_not_reported_as_loaded(
+    def test_query_failure_is_not_reported_as_absent(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        # rc=1 means PowerShell itself failed; it used to come back as
-        # (True, "") and state() then reported the task loaded.
+        # rc=1 means PowerShell itself failed. That proves neither presence
+        # nor absence, so status must surface the operational failure.
         monkeypatch.setattr(
             subprocess, "run", _stub_run(returncode=1, stderr="boom")
         )
-        assert ts_backend._query_task_state() == (False, "")
+        with pytest.raises(ClaudeSwitchError, match="query failed"):
+            ts_backend._query_task_state()
 
 
 class TestStatus:
