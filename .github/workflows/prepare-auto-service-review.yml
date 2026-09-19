@@ -16,113 +16,133 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Prepare two exact edits without moving any branch
+      - name: Install isolated formatter for new files only
+        run: |
+          python -m venv "$RUNNER_TEMP/format-env"
+          "$RUNNER_TEMP/format-env/bin/pip" install ruff==0.16.8
+      - name: Prepare exact fixes without moving a branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
-          import ast, base64, json, os, pathlib, subprocess, urllib.request
-          root = pathlib.Path('.')
-          cli = root / 'src/claude_swap/cli.py'
-          old = cli.read_text()
-          assert subprocess.check_output(['git', 'hash-object', str(cli)], text=True).strip() == '461205d5d14a8c2b495a98334e401964f900f1b2'
-          start = old.index('def _auto_command(')
-          end = old.index('\ndef _config_command(', start)
-          block = old[start:end]
-          anchor = '    args = parser.parse_args(argv)\n'
-          assert block.count(anchor) == 1
-          flags = '''    service = parser.add_mutually_exclusive_group()
-              service.add_argument(
-                  "--install-service", action="store_true",
-                  help="Install and start the per-user Windows background task",
-              )
-              service.add_argument(
-                  "--service-status", action="store_true",
-                  help="Report the Windows background task's scheduler state",
-              )
-              service.add_argument(
-                  "--uninstall-service", action="store_true",
-                  help="Stop and remove the Windows background task (retain logs)",
-              )
-              args = parser.parse_args(argv)
-              if args.install_service or args.service_status or args.uninstall_service:
-                  # Reject even explicitly supplied default values. Management does
-                  # not persist runtime flags; the loop reads settings.json instead.
-                  if len(argv) != 1:
-                      parser.error("service operations cannot be combined with auto runtime options")
-                  try:
-                      sys.exit(_auto_service(args))
-                  except ClaudeSwitchError as exc:
-                      error(f"Error: {exc}")
-                      sys.exit(1)
-                  return  # tests can replace sys.exit; never fall through to auto
-          '''
-          block = block.replace(anchor, flags, 1)
-          helper = '''def _auto_service(args) -> int:
-              """Route the Windows service flags without constructing a switcher."""
-              from claude_swap import task_scheduler
+          import base64, json, os, pathlib, subprocess, urllib.request
+          def replace(path, old, new):
+              p=pathlib.Path(path); s=p.read_text()
+              assert s.count(old)==1, (path, old)
+              p.write_text(s.replace(old,new))
+          task='src/claude_swap/task_scheduler.py'
+          runner='src/claude_swap/_auto_service.py'
+          replace(task, 'if value == {"found": False}:', 'if set(value) == {"found"} and value["found"] is False:')
+          replace(task, 'value.get("found") is not True or value.get("state") not in _STATES', 'value.get("found") is not True\n        or not isinstance(value.get("state"), str)\n        or value["state"] not in _STATES')
+          replace(task, 'An existing task is not owned by this auto service; nothing was changed.', 'An existing task is not owned by this auto service; refusing to modify it.')
+          replace(task, '        if verdict not in (0, 0x80):\n            raise ClaudeSwitchError("Another auto-service management operation is busy.")', '''        if verdict == 0x102:  # WAIT_TIMEOUT is contention, not an OS failure.
+                      raise ClaudeSwitchError("Another auto-service management operation is busy.")
+                  if verdict not in (0, 0x80):
+                      raise ClaudeSwitchError("Windows could not acquire the auto-service management lock.")''')
+          replace(task, 'datetime.now().replace(microsecond=0).isoformat()', 'datetime.now().astimezone().replace(microsecond=0).isoformat()')
+          replace(task, '            except Exception as cleanup:', '            except Exception as cleanup:  # noqa: BLE001 -- preserve both failure causes')
+          replace(task, 'Assert-Task $task\nStart-ScheduledTask', 'Assert-Task $task\nEnable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null\nStart-ScheduledTask')
+          replace(task, '    config = os.environ.get("CLAUDE_CONFIG_DIR")\n', '''    config = os.environ.get("CLAUDE_CONFIG_DIR")
+              if config and "\\x00" in config:
+                  raise ClaudeSwitchError("CLAUDE_CONFIG_DIR contains a NUL character.")
+          ''')
+          replace(task, '        ("MultipleInstancesPolicy", "IgnoreNew"),', '''        # Commit disabled: an ambiguous register failure cannot arm a future
+                  # trigger. Only our verified start path enables this attempt.
+                  ("Enabled", "false"),
+                  ("MultipleInstancesPolicy", "IgnoreNew"),''')
+          replace(runner, 'class _LogStream(io.TextIOBase):', '''class _ServiceLogHandler(RotatingFileHandler):
+              """A failed output sink must not log back into its own redirected stderr."""
 
-              if args.uninstall_service:
-                  result = task_scheduler.uninstall()
-                  print("Auto service removed." if result["removed"] else "Auto service was not installed.")
-                  print(dimmed("Diagnostic logs and account data are retained."))
-                  return 0
-
-              result = task_scheduler.install() if args.install_service else task_scheduler.status()
-              if not result["installed"]:
-                  print("Auto service is not installed.")
-                  print(dimmed("Install it with: cswap auto --install-service"))
-                  return 0
-              verb = "installed" if args.install_service else "state"
-              print(f"Auto service {verb}: {result['state']} (Task Scheduler).")
-              print(f"  task:   {result['task_name']}")
-              print(f"  log:    {result['log']}")
-              print(f"  output: {result['output_log']}")
-              return 0
+              def handleError(self, record: logging.LogRecord) -> None:
+                  failure = sys.exception()
+                  if failure is None:
+                      raise RuntimeError("Output handler called without an active exception")
+                  raise failure
 
 
-          '''
-          new = old[:start] + helper + block + old[end:]
-          ast.parse(new)
-          readme = root / 'README.md'
-          readme_old = readme.read_text()
-          anchor = '### Run multiple accounts at the same time (session mode)'
-          assert readme_old.count(anchor) == 1
-          docs = '''#### Background automatic switching on Windows
+          class _LogStream(io.TextIOBase):''')
+          replace(runner, 'handler = RotatingFileHandler(', 'handler = _ServiceLogHandler(')
+          replace(runner, 'logger = logging.Logger("claude-swap.auto-service", logging.INFO)', '''logger = logging.getLogger("claude-swap.auto-service")
+              logger.setLevel(logging.INFO)
+              logger.propagate = False''')
+          replace(runner, '        handler.close()', '        logger.removeHandler(handler)\n        handler.close()')
+          tests='tests/test_auto_service.py'
+          replace(tests, 'import io\n', '')
+          replace(tests, 'logger = logging.Logger("service-test")', '''logger = logging.getLogger("service-test")
+              logger.setLevel(logging.INFO)
+              logger.propagate = False''')
+          replace(tests, '        handler.close()', '        logger.removeHandler(handler)\n        handler.close()')
+          p=pathlib.Path('tests/test_task_scheduler.py')
+          p.write_text(p.read_text()+'''
 
-          Autoswitch settings take effect only while an auto engine is running. To keep
-          the existing loop running without an open terminal on Windows:
+          def test_invalid_runtime_context_is_refused_before_mutation(monkeypatch):
+              monkeypatch.setattr(ts.os, "environ", {"CLAUDE_CONFIG_DIR": "bad\\x00path"})
+              with pytest.raises(ClaudeSwitchError, match="NUL"):
+                  ts._runtime_context()
 
-          ```bash
-          cswap auto --install-service
-          cswap auto --service-status
-          cswap auto --uninstall-service
-          ```
 
-          This opts the current Windows user into a Task Scheduler job: start now and
-          at logon, with a five-minute trigger that retries after the action exits.
-          It uses the interactive login token at least privilege and stores no password.
-          It does not run after logout, wake a sleeping computer, or recover a hung
-          process. `IgnoreNew` prevents overlapping instances of this task, not a second
-          manually started `cswap auto`, TUI, or menu-bar engine.
+          def test_registration_is_disabled_until_verified_start(tmp_path, monkeypatch):
+              task = record(tmp_path)
+              root = ET.fromstring(task["xml"])
+              assert root.findtext("t:Settings/t:Enabled", namespaces=NS) == "false"
+              run = Mock(return_value={"running": True})
+              monkeypatch.setattr(ts, "_powershell", run)
+              ts._start_task("probe", SID, DESCRIPTION)
+              body = run.call_args.args[0]
+              assert body.index("Assert-Task") < body.index("Enable-ScheduledTask") < body.index("Start-ScheduledTask")
+          ''')
+          paths=[task,runner,tests,'tests/test_task_scheduler.py','tests/test_auto_service_cli.py','tests/windows_task_scheduler_check.py']
+          ruff=str(pathlib.Path(os.environ['RUNNER_TEMP'])/'format-env/bin/ruff')
+          subprocess.run([ruff,'check','--isolated','--select','E,F,I','--ignore','E501','--fix',*paths],check=True)
+          subprocess.run([ruff,'format','--isolated',*paths],check=True)
+          ci=pathlib.Path('.github/workflows/ci.yml')
+          assert '  windows-task-scheduler:' not in ci.read_text()
+          ci.write_text(ci.read_text()+'''
 
-          Installation records the current `CLAUDE_CONFIG_DIR` choice (including unset)
-          and home directory. Set engine options through `cswap config`; service flags
-          cannot be combined with foreground auto options. Reinstall to select another
-          profile or Python installation. The task points to that installation's
-          `pythonw.exe`; do not delete the environment while using the service.
-
-          Status reports the scheduler's state, not credential health or a successful
-          switch. It prints the existing `claude-swap.log` and the bounded
-          `auto-service.log` that captures the background CLI output. Uninstall removes
-          the task and stops its action; diagnostic logs and account data are retained.
-
-          '''
-          outputs = {'src/claude_swap/cli.py': new, 'README.md': readme_old.replace(anchor, docs + anchor)}
-          for path, content in outputs.items():
-              payload = json.dumps({'content': base64.b64encode(content.encode()).decode(), 'encoding': 'base64'}).encode()
-              request = urllib.request.Request('https://api.github.com/repos/haotool/claude-swap/git/blobs', data=payload, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}, method='POST')
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  blob = json.load(response)
-              print('PREPARED_BLOB ' + json.dumps({'path': path, 'sha': blob['sha'], 'bytes': len(content.encode())}))
+            windows-task-scheduler:
+              runs-on: windows-latest
+              timeout-minutes: 15
+              permissions:
+                contents: read
+              steps:
+                - uses: actions/checkout@v4
+                  with:
+                    persist-credentials: false
+                - uses: astral-sh/setup-uv@v6
+                  with:
+                    python-version: '3.12'
+                - name: Install dependencies
+                  run: uv sync --locked
+                - name: Install the wheel into a path containing spaces
+                  shell: pwsh
+                  run: |
+                    uv build --wheel --out-dir "$env:RUNNER_TEMP/cswap-wheel"
+                    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+                    uv venv "$env:RUNNER_TEMP/cswap path with spaces"
+                    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+                    $wheel = Get-ChildItem "$env:RUNNER_TEMP/cswap-wheel/*.whl" | Select-Object -First 1
+                    uv pip install --python "$env:RUNNER_TEMP/cswap path with spaces/Scripts/python.exe" $wheel.FullName
+                    exit $LASTEXITCODE
+                - name: Exercise native lifecycle and recovery serially
+                  shell: pwsh
+                  run: |
+                    uv run python tests/windows_task_scheduler_check.py --folder "$env:RUNNER_TEMP/cswap-native-$env:GITHUB_RUN_ID" --python "$env:RUNNER_TEMP/cswap path with spaces/Scripts/python.exe" --recovery
+                    exit $LASTEXITCODE
+                - name: Verify cleanup even after a failed check
+                  if: always()
+                  shell: pwsh
+                  run: |
+                    $folder = "$env:RUNNER_TEMP/cswap-native-$env:GITHUB_RUN_ID"
+                    if (Test-Path "$folder/receipt.json") {
+                      & .venv/Scripts/python.exe tests/windows_task_scheduler_check.py --folder $folder --cleanup
+                      exit $LASTEXITCODE
+                    }
+          ''')
+          paths.append(str(ci))
+          for path in paths:
+              content=pathlib.Path(path).read_bytes()
+              data=json.dumps({'content':base64.b64encode(content).decode(),'encoding':'base64'}).encode()
+              req=urllib.request.Request('https://api.github.com/repos/haotool/claude-swap/git/blobs',data=data,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json'},method='POST')
+              with urllib.request.urlopen(req,timeout=30) as response: blob=json.load(response)
+              print('PREPARED_BLOB '+json.dumps({'path':path,'sha':blob['sha'],'bytes':len(content)}))
           PY
