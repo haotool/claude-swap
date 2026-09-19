@@ -1,0 +1,128 @@
+name: Prepare auto service review blobs
+on:
+  push:
+    branches: [feat/auto-task-scheduler]
+    paths: [.github/workflows/prepare-auto-service-review.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.repository == 'haotool/claude-swap'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare two exact edits without moving any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import ast, base64, json, os, pathlib, subprocess, urllib.request
+          root = pathlib.Path('.')
+          cli = root / 'src/claude_swap/cli.py'
+          old = cli.read_text()
+          assert subprocess.check_output(['git', 'hash-object', str(cli)], text=True).strip() == '461205d5d14a8c2b495a98334e401964f900f1b2'
+          start = old.index('def _auto_command(')
+          end = old.index('\ndef _config_command(', start)
+          block = old[start:end]
+          anchor = '    args = parser.parse_args(argv)\n'
+          assert block.count(anchor) == 1
+          flags = '''    service = parser.add_mutually_exclusive_group()
+              service.add_argument(
+                  "--install-service", action="store_true",
+                  help="Install and start the per-user Windows background task",
+              )
+              service.add_argument(
+                  "--service-status", action="store_true",
+                  help="Report the Windows background task's scheduler state",
+              )
+              service.add_argument(
+                  "--uninstall-service", action="store_true",
+                  help="Stop and remove the Windows background task (retain logs)",
+              )
+              args = parser.parse_args(argv)
+              if args.install_service or args.service_status or args.uninstall_service:
+                  # Reject even explicitly supplied default values. Management does
+                  # not persist runtime flags; the loop reads settings.json instead.
+                  if len(argv) != 1:
+                      parser.error("service operations cannot be combined with auto runtime options")
+                  try:
+                      sys.exit(_auto_service(args))
+                  except ClaudeSwitchError as exc:
+                      error(f"Error: {exc}")
+                      sys.exit(1)
+                  return  # tests can replace sys.exit; never fall through to auto
+          '''
+          block = block.replace(anchor, flags, 1)
+          helper = '''def _auto_service(args) -> int:
+              """Route the Windows service flags without constructing a switcher."""
+              from claude_swap import task_scheduler
+
+              if args.uninstall_service:
+                  result = task_scheduler.uninstall()
+                  print("Auto service removed." if result["removed"] else "Auto service was not installed.")
+                  print(dimmed("Diagnostic logs and account data are retained."))
+                  return 0
+
+              result = task_scheduler.install() if args.install_service else task_scheduler.status()
+              if not result["installed"]:
+                  print("Auto service is not installed.")
+                  print(dimmed("Install it with: cswap auto --install-service"))
+                  return 0
+              verb = "installed" if args.install_service else "state"
+              print(f"Auto service {verb}: {result['state']} (Task Scheduler).")
+              print(f"  task:   {result['task_name']}")
+              print(f"  log:    {result['log']}")
+              print(f"  output: {result['output_log']}")
+              return 0
+
+
+          '''
+          new = old[:start] + helper + block + old[end:]
+          ast.parse(new)
+          readme = root / 'README.md'
+          readme_old = readme.read_text()
+          anchor = '### Run multiple accounts at the same time (session mode)'
+          assert readme_old.count(anchor) == 1
+          docs = '''#### Background automatic switching on Windows
+
+          Autoswitch settings take effect only while an auto engine is running. To keep
+          the existing loop running without an open terminal on Windows:
+
+          ```bash
+          cswap auto --install-service
+          cswap auto --service-status
+          cswap auto --uninstall-service
+          ```
+
+          This opts the current Windows user into a Task Scheduler job: start now and
+          at logon, with a five-minute trigger that retries after the action exits.
+          It uses the interactive login token at least privilege and stores no password.
+          It does not run after logout, wake a sleeping computer, or recover a hung
+          process. `IgnoreNew` prevents overlapping instances of this task, not a second
+          manually started `cswap auto`, TUI, or menu-bar engine.
+
+          Installation records the current `CLAUDE_CONFIG_DIR` choice (including unset)
+          and home directory. Set engine options through `cswap config`; service flags
+          cannot be combined with foreground auto options. Reinstall to select another
+          profile or Python installation. The task points to that installation's
+          `pythonw.exe`; do not delete the environment while using the service.
+
+          Status reports the scheduler's state, not credential health or a successful
+          switch. It prints the existing `claude-swap.log` and the bounded
+          `auto-service.log` that captures the background CLI output. Uninstall removes
+          the task and stops its action; diagnostic logs and account data are retained.
+
+          '''
+          outputs = {'src/claude_swap/cli.py': new, 'README.md': readme_old.replace(anchor, docs + anchor)}
+          for path, content in outputs.items():
+              payload = json.dumps({'content': base64.b64encode(content.encode()).decode(), 'encoding': 'base64'}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/haotool/claude-swap/git/blobs', data=payload, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              print('PREPARED_BLOB ' + json.dumps({'path': path, 'sha': blob['sha'], 'bytes': len(content.encode())}))
+          PY
