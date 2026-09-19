@@ -22,7 +22,7 @@ jobs:
         shell: pwsh
         run: |
           @'
-          import base64, csv, ctypes, hashlib, io, json, os, pathlib, subprocess, sys, time, uuid, zipfile
+          import base64, csv, hashlib, io, json, os, pathlib, subprocess, sys, time, uuid, zipfile
           import xml.etree.ElementTree as ET
           P = pathlib.Path
           root = P(os.environ['RUNNER_TEMP']) / ('cswap launcher ' + uuid.uuid4().hex)
@@ -44,12 +44,12 @@ jobs:
                   raise RuntimeError((r.stderr or r.stdout)[-4000:])
               return r.stdout
           def shell(body, payload=None):
-              script = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); try { $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json; " + body + " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+              script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); try { $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json; " + body + " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
               return run([ps, '-NoProfile', '-NonInteractive', '-EncodedCommand', enc(script)], input=data(payload or {}))
           sid = shell('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value').strip()
-          find = "function Find-Task { $t=@(Get-ScheduledTask -TaskPath '\\*' -ErrorAction Stop | Where-Object { $_.TaskPath -eq '\\' -and $_.TaskName -eq $p.name }); if($t.Count -gt 1){throw 'ambiguous'}; if($t.Count){return $t[0]}; return $null }; "
+          find = "function Find-Task { $t=@(Get-ScheduledTask -TaskPath '\\*' -ErrorAction Stop | Where-Object { $_.TaskPath -eq '\\' -and $_.TaskName -eq $p.name }); if($t.Count -gt 1){throw 'ambiguous'}; if($t.Count){return $t[0]}; return $null }; function Assert-Owner($t) { $u=[string]$t.Principal.UserId; if($u -notmatch '^S-1-'){ $u=[Security.Principal.NTAccount]::new($u).Translate([Security.Principal.SecurityIdentifier]).Value }; if($t.Description -ne $p.marker -or $u -ne $p.sid){throw ('foreign task: principal='+$t.Principal.UserId)} }; "
           def remove(req):
-              shell(find + "$t=Find-Task; if($null -eq $t){return}; if($t.Description -ne $p.marker -or $t.Principal.UserId -ne $p.sid){throw 'foreign task'}; Disable-ScheduledTask -InputObject $t | Out-Null; if($t.State -eq 'Running'){Stop-ScheduledTask -InputObject $t}; Unregister-ScheduledTask -InputObject $t -Confirm:$false; $sw=[Diagnostics.Stopwatch]::StartNew(); while($null -ne (Find-Task)){if($sw.Elapsed.TotalSeconds -gt 10){throw 'removal timeout'}; Start-Sleep -Milliseconds 100}", req)
+              shell(find + "$t=Find-Task; if($null -eq $t){return}; Assert-Owner $t; Disable-ScheduledTask -InputObject $t | Out-Null; $sw=[Diagnostics.Stopwatch]::StartNew(); do { $t=Find-Task; if($null -eq $t){return}; Assert-Owner $t; if($t.State -eq 'Running'){Stop-ScheduledTask -InputObject $t}; if($t.State -in @('Ready','Disabled')){break}; if($sw.Elapsed.TotalSeconds -gt 5){throw 'stop timeout'}; Start-Sleep -Milliseconds 100 } while($true); Unregister-ScheduledTask -InputObject $t -Confirm:$false; $sw.Restart(); while($null -ne (Find-Task)){if($sw.Elapsed.TotalSeconds -gt 5){throw 'removal timeout'}; Start-Sleep -Milliseconds 100}", req)
           source = '''import base64, ctypes, json, os, sys, time
           from pathlib import Path
           BUILD = BUILD_VALUE
@@ -121,19 +121,21 @@ jobs:
                                       if time.monotonic()>deadline: raise RuntimeError('no report')
                                       time.sleep(.2)
                                   observed=json.loads(report.read_text()); assert observed['nonce']==nonce and observed['build']==build and observed['config']==config, observed
-                                  state=shell(find+'$t=Find-Task; [string]$t.State',req).strip(); assert state=='Running',state
+                                  state=shell(find+'$t=Find-Task; Assert-Owner $t; [string]$t.State',req).strip(); assert state=='Running',state
                                   row.update(ok=True,observation=observed)
                               except Exception as exc: row.update(ok=False,error=str(exc))
                               finally:
                                   try:
                                       remove(req)
                                       if observed:
-                                          time.sleep(.2)
-                                          alive=shell("@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$p.pid) -ErrorAction Stop).Count",{'pid':observed['pid']}).strip()
-                                          if alive!='0': raise RuntimeError('child survived removal')
+                                          deadline=time.monotonic()+5
+                                          while shell("@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$p.pid) -ErrorAction Stop).Count",{'pid':observed['pid']}).strip()!='0':
+                                              if time.monotonic()>deadline: raise RuntimeError('child survived removal')
+                                              time.sleep(.1)
                                       row['cleanup']='verified'
                                   except Exception as exc: row.update(ok=False,cleanup=str(exc))
                               rows.append(row); print(json.dumps(row),flush=True)
+                              if row.get('cleanup')!='verified': raise RuntimeError('cleanup failed; refusing to accumulate tasks')
           finally:
               for req in receipts:
                   try: remove(req)
