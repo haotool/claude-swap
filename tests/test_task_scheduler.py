@@ -1,12 +1,12 @@
 """The manager must distinguish absence, failure, and an unrelated task."""
 
-from contextlib import nullcontext
 import base64
 import json
+import xml.etree.ElementTree as ET
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
-import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -21,8 +21,13 @@ NS = {"t": ts._NAMESPACE}
 def record(tmp_path, *, description=DESCRIPTION, state="Ready", sid=SID):
     context = {"version": 1, "home": str(tmp_path), "config": None}
     return {
-        "found": True, "state": state, "sid": sid, "description": description,
-        "xml": ts._build_task_xml(sid, description, str(tmp_path / "pythonw.exe"), context),
+        "found": True,
+        "state": state,
+        "sid": sid,
+        "description": description,
+        "xml": ts._build_task_xml(
+            sid, description, str(tmp_path / "pythonw.exe"), context
+        ),
     }
 
 
@@ -32,9 +37,15 @@ def manager(monkeypatch, tmp_path):
     monkeypatch.setattr(ts, "_require_windows", lambda: None)
     monkeypatch.setattr(ts, "_current_user_sid", lambda: SID)
     monkeypatch.setattr(ts, "_resolve_program", lambda: str(tmp_path / "pythonw.exe"))
-    monkeypatch.setattr(ts, "_runtime_context", lambda: {
-        "version": 1, "home": str(tmp_path), "config": None,
-    })
+    monkeypatch.setattr(
+        ts,
+        "_runtime_context",
+        lambda: {
+            "version": 1,
+            "home": str(tmp_path),
+            "config": None,
+        },
+    )
     monkeypatch.setattr(ts, "_management_lock", lambda name: nullcontext())
     monkeypatch.setattr(ts, "_query_task", lambda name: state["task"])
     monkeypatch.setattr("claude_swap.paths.get_backup_root", lambda: tmp_path)
@@ -43,8 +54,13 @@ def manager(monkeypatch, tmp_path):
         state["calls"].append("register")
         root = ET.fromstring(xml)
         state["task"] = {
-            "found": True, "state": "Ready", "sid": SID, "xml": xml,
-            "description": root.findtext("t:RegistrationInfo/t:Description", namespaces=NS),
+            "found": True,
+            "state": "Ready",
+            "sid": SID,
+            "xml": xml,
+            "description": root.findtext(
+                "t:RegistrationInfo/t:Description", namespaces=NS
+            ),
         }
 
     def start(name, sid, description):
@@ -72,7 +88,9 @@ def test_install_starts_now_and_reinstall_replaces_one_task(manager):
 
 
 def test_start_failure_leaves_no_future_trigger(manager, monkeypatch):
-    monkeypatch.setattr(ts, "_start_task", Mock(side_effect=ClaudeSwitchError("start denied")))
+    monkeypatch.setattr(
+        ts, "_start_task", Mock(side_effect=ClaudeSwitchError("start denied"))
+    )
     with pytest.raises(ClaudeSwitchError, match="start denied"):
         ts.install()
     assert manager["task"] is None
@@ -99,7 +117,9 @@ def test_interrupt_after_register_is_compensated(manager, monkeypatch):
     assert manager["task"] is None
 
 
-def test_failed_reinstall_restores_previous_definition_and_running_state(manager, monkeypatch, tmp_path):
+def test_failed_reinstall_restores_previous_definition_and_running_state(
+    manager, monkeypatch, tmp_path
+):
     previous = record(tmp_path, state="Running")
     manager["task"] = previous.copy()
     original = ts._start_task
@@ -117,15 +137,21 @@ def test_failed_reinstall_restores_previous_definition_and_running_state(manager
 
 
 def test_recovery_error_keeps_both_causes(manager, monkeypatch):
-    monkeypatch.setattr(ts, "_start_task", Mock(side_effect=ClaudeSwitchError("start failed")))
-    monkeypatch.setattr(ts, "_remove_task", Mock(side_effect=ClaudeSwitchError("remove denied")))
+    monkeypatch.setattr(
+        ts, "_start_task", Mock(side_effect=ClaudeSwitchError("start failed"))
+    )
+    monkeypatch.setattr(
+        ts, "_remove_task", Mock(side_effect=ClaudeSwitchError("remove denied"))
+    )
     with pytest.raises(ClaudeSwitchError, match="start failed.*remove denied"):
         ts.install()
     assert manager["task"] is not None
 
 
 @pytest.mark.parametrize("operation", [ts.install, ts.uninstall, ts.status])
-@pytest.mark.parametrize("changed", [{"sid": "S-1-5-99"}, {"description": "unrelated task"}])
+@pytest.mark.parametrize(
+    "changed", [{"sid": "S-1-5-99"}, {"description": "unrelated task"}]
+)
 def test_foreign_task_is_untouched(operation, changed, manager, tmp_path):
     foreign = record(tmp_path)
     foreign.update(changed)
@@ -161,22 +187,32 @@ def test_uninstall_is_idempotent(manager):
 def test_removal_error_is_not_reported_as_success(manager, monkeypatch, tmp_path):
     previous = record(tmp_path, state="Running")
     manager["task"] = previous
-    monkeypatch.setattr(ts, "_remove_task", Mock(side_effect=ClaudeSwitchError("stop denied")))
+    monkeypatch.setattr(
+        ts, "_remove_task", Mock(side_effect=ClaudeSwitchError("stop denied"))
+    )
     with pytest.raises(ClaudeSwitchError, match="stop denied"):
         ts.uninstall()
     assert manager["task"] is previous
 
 
 def test_status_does_not_construct_a_switcher(manager, monkeypatch):
-    monkeypatch.setattr("claude_swap.switcher.ClaudeAccountSwitcher", Mock(side_effect=AssertionError))
+    monkeypatch.setattr(
+        "claude_swap.switcher.ClaudeAccountSwitcher", Mock(side_effect=AssertionError)
+    )
     assert ts.status()["installed"] is False
     assert manager["calls"] == []
 
 
-@pytest.mark.parametrize("response", [
-    {}, {"found": 0}, {"found": False, "error": "denied"},
-    {"found": True}, {"found": True, "state": []},
-])
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"found": 0},
+        {"found": False, "error": "denied"},
+        {"found": True},
+        {"found": True, "state": []},
+    ],
+)
 def test_malformed_query_is_not_absence(response, monkeypatch):
     monkeypatch.setattr(ts, "_powershell", lambda *args: response)
     with pytest.raises(ClaudeSwitchError):
@@ -189,7 +225,9 @@ def test_only_confirmed_absence_returns_none(monkeypatch):
 
 
 def test_query_preserves_manager_failure(monkeypatch):
-    monkeypatch.setattr(ts, "_powershell", Mock(side_effect=ClaudeSwitchError("CIM unavailable")))
+    monkeypatch.setattr(
+        ts, "_powershell", Mock(side_effect=ClaudeSwitchError("CIM unavailable"))
+    )
     with pytest.raises(ClaudeSwitchError, match="CIM unavailable"):
         ts._query_task("probe")
 
@@ -221,7 +259,11 @@ def test_removal_disables_triggers_before_stopping_and_unregistering(monkeypatch
     monkeypatch.setattr(ts, "_query_task", lambda name: None)
     ts._remove_task("probe", SID, DESCRIPTION)
     body, payload = run.call_args.args
-    assert body.index("Disable-ScheduledTask") < body.index("Stop-ScheduledTask") < body.index("Unregister-ScheduledTask")
+    assert (
+        body.index("Disable-ScheduledTask")
+        < body.index("Stop-ScheduledTask")
+        < body.index("Unregister-ScheduledTask")
+    )
     assert "Assert-Task $task" in body
     assert "while ($null -ne (Find-Task))" in body
     assert payload["timeout"] > 0
@@ -231,7 +273,9 @@ def test_removal_disables_triggers_before_stopping_and_unregistering(monkeypatch
 def test_powershell_passes_data_separately_and_surfaces_nonzero(monkeypatch):
     monkeypatch.setattr(ts, "_powershell_path", lambda: "powershell.exe")
     monkeypatch.setattr(ts.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
-    run = Mock(return_value=SimpleNamespace(returncode=1, stdout="", stderr="access denied"))
+    run = Mock(
+        return_value=SimpleNamespace(returncode=1, stdout="", stderr="access denied")
+    )
     monkeypatch.setattr(ts.subprocess, "run", run)
     payload = {"name": "apostrophe ' & Unicode 空白"}
     with pytest.raises(ClaudeSwitchError, match="access denied"):
@@ -247,7 +291,11 @@ def test_powershell_passes_data_separately_and_surfaces_nonzero(monkeypatch):
 def test_powershell_rejects_invalid_success_output(monkeypatch, stdout):
     monkeypatch.setattr(ts, "_powershell_path", lambda: "powershell.exe")
     monkeypatch.setattr(ts.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
-    monkeypatch.setattr(ts.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout=stdout, stderr=""))
+    monkeypatch.setattr(
+        ts.subprocess,
+        "run",
+        lambda *a, **kw: SimpleNamespace(returncode=0, stdout=stdout, stderr=""),
+    )
     with pytest.raises(ClaudeSwitchError, match="invalid response"):
         ts._powershell("probe")
 
@@ -275,17 +323,29 @@ def test_relative_context_is_frozen_at_install(monkeypatch, tmp_path):
 
 
 def test_xml_encodes_context_and_resident_task_policy(tmp_path):
-    context = {"version": 1, "home": str(tmp_path), "config": str(tmp_path / "空白 o'brien & profile")}
+    context = {
+        "version": 1,
+        "home": str(tmp_path),
+        "config": str(tmp_path / "空白 o'brien & profile"),
+    }
     program = str(tmp_path / "with spaces" / "pythonw.exe")
     root = ET.fromstring(ts._build_task_xml(SID, DESCRIPTION, program, context))
+
     def text(path):
         return root.findtext(path, namespaces=NS)
+
     assert text("t:Principals/t:Principal/t:UserId") == SID
     assert text("t:Principals/t:Principal/t:LogonType") == "InteractiveToken"
     assert text("t:Principals/t:Principal/t:RunLevel") == "LeastPrivilege"
     assert text("t:Triggers/t:LogonTrigger/t:UserId") == SID
     assert text("t:Triggers/t:TimeTrigger/t:Repetition/t:Interval") == "PT5M"
-    for key, value in {"ExecutionTimeLimit": "PT0S", "MultipleInstancesPolicy": "IgnoreNew", "StartWhenAvailable": "true", "DisallowStartIfOnBatteries": "false", "StopIfGoingOnBatteries": "false"}.items():
+    for key, value in {
+        "ExecutionTimeLimit": "PT0S",
+        "MultipleInstancesPolicy": "IgnoreNew",
+        "StartWhenAvailable": "true",
+        "DisallowStartIfOnBatteries": "false",
+        "StopIfGoingOnBatteries": "false",
+    }.items():
         assert text("t:Settings/t:" + key) == value
     assert text("t:Settings/t:RestartOnFailure/t:Interval") == "PT1M"
     assert text("t:Settings/t:RestartOnFailure/t:Count") == "3"
@@ -302,3 +362,24 @@ def test_off_windows_refuses_before_any_manager_call(monkeypatch):
     with pytest.raises(ClaudeSwitchError, match="only available on Windows"):
         ts.install()
     run.assert_not_called()
+
+
+def test_invalid_runtime_context_is_refused_before_mutation(monkeypatch):
+    monkeypatch.setattr(ts.os, "environ", {"CLAUDE_CONFIG_DIR": "bad\x00path"})
+    with pytest.raises(ClaudeSwitchError, match="NUL"):
+        ts._runtime_context()
+
+
+def test_registration_is_disabled_until_verified_start(tmp_path, monkeypatch):
+    task = record(tmp_path)
+    root = ET.fromstring(task["xml"])
+    assert root.findtext("t:Settings/t:Enabled", namespaces=NS) == "false"
+    run = Mock(return_value={"running": True})
+    monkeypatch.setattr(ts, "_powershell", run)
+    ts._start_task("probe", SID, DESCRIPTION)
+    body = run.call_args.args[0]
+    assert (
+        body.index("Assert-Task")
+        < body.index("Enable-ScheduledTask")
+        < body.index("Start-ScheduledTask")
+    )

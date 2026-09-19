@@ -11,20 +11,33 @@ from claude_swap.exceptions import ClaudeSwitchError
 
 @pytest.fixture
 def surface(monkeypatch):
-    switcher = Mock(side_effect=AssertionError("service management constructed a switcher"))
+    switcher = Mock(
+        side_effect=AssertionError("service management constructed a switcher")
+    )
     monkeypatch.setattr(cli, "ClaudeAccountSwitcher", switcher)
     return switcher
 
 
-@pytest.mark.parametrize("flag,operation", [
-    ("--install-service", "install"),
-    ("--service-status", "status"),
-    ("--uninstall-service", "uninstall"),
-])
-def test_service_flag_routes_only_to_manager(flag, operation, surface, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "flag,operation",
+    [
+        ("--install-service", "install"),
+        ("--service-status", "status"),
+        ("--uninstall-service", "uninstall"),
+    ],
+)
+def test_service_flag_routes_only_to_manager(
+    flag, operation, surface, monkeypatch, capsys
+):
     calls = {}
-    result = {"installed": True, "state": "Running", "task_name": "probe",
-              "removed": True, "log": "log", "output_log": "output"}
+    result = {
+        "installed": True,
+        "state": "Running",
+        "task_name": "probe",
+        "removed": True,
+        "log": "log",
+        "output_log": "output",
+    }
     for name in ("install", "status", "uninstall"):
         calls[name] = Mock(return_value=result)
         monkeypatch.setattr(task_scheduler, name, calls[name])
@@ -37,14 +50,28 @@ def test_service_flag_routes_only_to_manager(flag, operation, surface, monkeypat
     assert "Auto service" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("runtime", [
-    ["--once"], ["--dry-run"], ["--json"], ["--debug"],
-    ["--threshold", "90"], ["--interval", "60"], ["--cooldown", "0"],
-    ["--model", "Fable"], ["--strategy", "best"],
-    ["--include-api-key-accounts"], ["--no-include-api-key-accounts"],
-])
-@pytest.mark.parametrize("service", ["--install-service", "--service-status", "--uninstall-service"])
-def test_service_rejects_runtime_options_even_default_values(runtime, service, surface, capsys):
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        ["--once"],
+        ["--dry-run"],
+        ["--json"],
+        ["--debug"],
+        ["--threshold", "90"],
+        ["--interval", "60"],
+        ["--cooldown", "0"],
+        ["--model", "Fable"],
+        ["--strategy", "best"],
+        ["--include-api-key-accounts"],
+        ["--no-include-api-key-accounts"],
+    ],
+)
+@pytest.mark.parametrize(
+    "service", ["--install-service", "--service-status", "--uninstall-service"]
+)
+def test_service_rejects_runtime_options_even_default_values(
+    runtime, service, surface, capsys
+):
     with pytest.raises(SystemExit) as exc:
         cli._auto_command([service, *runtime])
     assert exc.value.code == 2
@@ -52,11 +79,14 @@ def test_service_rejects_runtime_options_even_default_values(runtime, service, s
     surface.assert_not_called()
 
 
-@pytest.mark.parametrize("pair", [
-    ["--install-service", "--service-status"],
-    ["--install-service", "--uninstall-service"],
-    ["--service-status", "--uninstall-service"],
-])
+@pytest.mark.parametrize(
+    "pair",
+    [
+        ["--install-service", "--service-status"],
+        ["--install-service", "--uninstall-service"],
+        ["--service-status", "--uninstall-service"],
+    ],
+)
 def test_service_operations_are_mutually_exclusive(pair, surface):
     with pytest.raises(SystemExit) as exc:
         cli._auto_command(pair)
@@ -64,13 +94,22 @@ def test_service_operations_are_mutually_exclusive(pair, surface):
     surface.assert_not_called()
 
 
-@pytest.mark.parametrize("flag,operation", [
-    ("--install-service", "install"),
-    ("--service-status", "status"),
-    ("--uninstall-service", "uninstall"),
-])
-def test_manager_failure_never_prints_success(flag, operation, surface, monkeypatch, capsys):
-    monkeypatch.setattr(task_scheduler, operation, Mock(side_effect=ClaudeSwitchError("manager refused")))
+@pytest.mark.parametrize(
+    "flag,operation",
+    [
+        ("--install-service", "install"),
+        ("--service-status", "status"),
+        ("--uninstall-service", "uninstall"),
+    ],
+)
+def test_manager_failure_never_prints_success(
+    flag, operation, surface, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        task_scheduler,
+        operation,
+        Mock(side_effect=ClaudeSwitchError("manager refused")),
+    )
     with pytest.raises(SystemExit) as exc:
         cli._auto_command([flag])
     assert exc.value.code == 1

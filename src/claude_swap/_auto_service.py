@@ -42,6 +42,16 @@ def _apply_context(context: dict) -> None:
         os.environ["CLAUDE_CONFIG_DIR"] = context["config"]
 
 
+class _ServiceLogHandler(RotatingFileHandler):
+    """A failed output sink must not log back into its own redirected stderr."""
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        failure = sys.exception()
+        if failure is None:
+            raise RuntimeError("Output handler called without an active exception")
+        raise failure
+
+
 class _LogStream(io.TextIOBase):
     """Line-buffered text sink with a bound even on unterminated writes."""
 
@@ -61,7 +71,7 @@ class _LogStream(io.TextIOBase):
         size = len(text)
         # Do not retain an unbounded partial line or create an oversized record.
         for offset in range(0, size, 4096):
-            self._pending += text[offset:offset + 4096]
+            self._pending += text[offset : offset + 4096]
             while "\n" in self._pending:
                 line, self._pending = self._pending.split("\n", 1)
                 if line:
@@ -84,11 +94,16 @@ def run(encoded: str) -> None:
 
     log = paths.get_backup_root() / "auto-service.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
-        log, maxBytes=1024 * 1024, backupCount=3, encoding="utf-8",
+    handler = _ServiceLogHandler(
+        log,
+        maxBytes=1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
     )
     handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
-    logger = logging.Logger("claude-swap.auto-service", logging.INFO)
+    logger = logging.getLogger("claude-swap.auto-service")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
     logger.addHandler(handler)
     output = _LogStream(logger)
     old_argv, old_stdin = sys.argv, sys.stdin
@@ -107,6 +122,7 @@ def run(encoded: str) -> None:
         sys.argv, sys.stdin = old_argv, old_stdin
         output.flush()
         output.close()
+        logger.removeHandler(handler)
         handler.close()
 
 

@@ -91,17 +91,28 @@ def _powershell(body: str, payload: dict | None = None) -> dict:
         "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
         "try { $p = [Text.Encoding]::UTF8.GetString("
         "[Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json; "
-        + _TASK_FUNCTIONS + body
+        + _TASK_FUNCTIONS
+        + body
         + " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
     )
     encoded_script = base64.b64encode(script.encode("utf-16-le")).decode()
     try:
         result = subprocess.run(
-            [_powershell_path(), "-NoProfile", "-NonInteractive",
-             "-EncodedCommand", encoded_script],
-            input=_encoded(payload or {}), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=_COMMAND_TIMEOUT,
-            creationflags=subprocess.CREATE_NO_WINDOW, check=False,
+            [
+                _powershell_path(),
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                encoded_script,
+            ],
+            input=_encoded(payload or {}),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_COMMAND_TIMEOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise ClaudeSwitchError(
@@ -163,8 +174,14 @@ def _management_lock(name: str):
     try:
         verdict = wait(handle, 5000)
         # WAIT_ABANDONED grants ownership too; reread OS state under the lock.
+        if verdict == 0x102:  # WAIT_TIMEOUT is contention, not an OS failure.
+            raise ClaudeSwitchError(
+                "Another auto-service management operation is busy."
+            )
         if verdict not in (0, 0x80):
-            raise ClaudeSwitchError("Another auto-service management operation is busy.")
+            raise ClaudeSwitchError(
+                "Windows could not acquire the auto-service management lock."
+            )
         acquired = True
         yield
     finally:
@@ -180,18 +197,25 @@ def _query_task(name: str) -> dict | None:
         "@{found=$true; state=[string]$task.State; sid=(Get-OwnerSid $task); "
         "description=[string]$task.Description; "
         "xml=(Export-ScheduledTask -InputObject $task -ErrorAction Stop)} "
-        "| ConvertTo-Json -Compress", {"name": name},
+        "| ConvertTo-Json -Compress",
+        {"name": name},
     )
-    if value == {"found": False}:
+    if set(value) == {"found"} and value["found"] is False:
         return None
     if (
-        value.get("found") is not True or value.get("state") not in _STATES
-        or any(not isinstance(value.get(key), str) for key in ("sid", "description", "xml"))
+        value.get("found") is not True
+        or not isinstance(value.get("state"), str)
+        or value["state"] not in _STATES
+        or any(
+            not isinstance(value.get(key), str) for key in ("sid", "description", "xml")
+        )
     ):
         raise ClaudeSwitchError("Task Scheduler returned an incomplete task record.")
     try:
         root = ET.fromstring(value["xml"])
-        description = root.findtext(f"{{{_NAMESPACE}}}RegistrationInfo/{{{_NAMESPACE}}}Description")
+        description = root.findtext(
+            f"{{{_NAMESPACE}}}RegistrationInfo/{{{_NAMESPACE}}}Description"
+        )
     except ET.ParseError as exc:
         raise ClaudeSwitchError("Task Scheduler returned invalid task XML.") from exc
     if description != value["description"]:
@@ -200,14 +224,19 @@ def _query_task(name: str) -> dict | None:
 
 
 def _assert_owned(task: dict, sid: str) -> None:
-    if task["sid"] != sid or not re.fullmatch(re.escape(_OWNER) + r"[0-9a-f]{32}", task["description"]):
-        raise ClaudeSwitchError("An existing task is not owned by this auto service; nothing was changed.")
+    if task["sid"] != sid or not re.fullmatch(
+        re.escape(_OWNER) + r"[0-9a-f]{32}", task["description"]
+    ):
+        raise ClaudeSwitchError(
+            "An existing task is not owned by this auto service; refusing to modify it."
+        )
 
 
 def _remove_task(name: str, sid: str, description: str) -> None:
     # Disable triggers first: a watchdog must not re-fire between Stop and
     # Unregister. Queued/unknown states are observed, not guessed to be stopped.
-    value = _powershell(r"""
+    value = _powershell(
+        r"""
 $task = Find-Task
 if ($null -eq $task) { @{removed=$true} | ConvertTo-Json -Compress; return }
 Assert-Task $task
@@ -229,8 +258,15 @@ while ($null -ne (Find-Task)) {
     Start-Sleep -Milliseconds $p.poll
 }
 @{removed=$true} | ConvertTo-Json -Compress
-""", {"name": name, "sid": sid, "description": description,
-        "timeout": _SETTLE_SECONDS, "poll": int(_POLL_SECONDS * 1000)})
+""",
+        {
+            "name": name,
+            "sid": sid,
+            "description": description,
+            "timeout": _SETTLE_SECONDS,
+            "poll": int(_POLL_SECONDS * 1000),
+        },
+    )
     if value.get("removed") is not True or _query_task(name) is not None:
         raise ClaudeSwitchError("Could not verify that the auto service was removed.")
 
@@ -248,9 +284,11 @@ def _register_task(name: str, xml: str) -> None:
 
 
 def _start_task(name: str, sid: str, description: str) -> None:
-    value = _powershell(r"""
+    value = _powershell(
+        r"""
 $task = Find-Task
 Assert-Task $task
+Enable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null
 Start-ScheduledTask -InputObject $task -ErrorAction Stop
 $clock = [Diagnostics.Stopwatch]::StartNew()
 do {
@@ -260,24 +298,40 @@ do {
     if ($clock.Elapsed.TotalSeconds -ge $p.timeout) { throw 'The auto-service action did not start' }
     Start-Sleep -Milliseconds $p.poll
 } while ($true)
-""", {"name": name, "sid": sid, "description": description,
-        "timeout": _SETTLE_SECONDS, "poll": int(_POLL_SECONDS * 1000)})
+""",
+        {
+            "name": name,
+            "sid": sid,
+            "description": description,
+            "timeout": _SETTLE_SECONDS,
+            "poll": int(_POLL_SECONDS * 1000),
+        },
+    )
     if value.get("running") is not True:
-        raise ClaudeSwitchError("Could not verify that the auto-service action started.")
+        raise ClaudeSwitchError(
+            "Could not verify that the auto-service action started."
+        )
 
 
 def _runtime_context() -> dict:
     config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config and "\x00" in config:
+        raise ClaudeSwitchError("CLAUDE_CONFIG_DIR contains a NUL character.")
     # Unset and an explicit ~/.claude are NOT equivalent: paths.py resolves
     # .claude.json differently. Freeze relative paths without resolving links.
-    return {"version": 1, "home": os.path.abspath(Path.home()),
-            "config": os.path.abspath(config) if config else None}
+    return {
+        "version": 1,
+        "home": os.path.abspath(Path.home()),
+        "config": os.path.abspath(config) if config else None,
+    }
 
 
 def _resolve_program() -> str:
     program = Path(os.path.abspath(sys.executable)).with_name("pythonw.exe")
     if not program.is_file():
-        raise ClaudeSwitchError("This Python installation has no pythonw.exe; the auto service was not changed.")
+        raise ClaudeSwitchError(
+            "This Python installation has no pythonw.exe; the auto service was not changed."
+        )
     return str(program)
 
 
@@ -299,7 +353,11 @@ def _build_task_xml(sid: str, description: str, program: str, context: dict) -> 
     repeat = add(timed, "Repetition")
     add(repeat, "Interval", "PT5M")
     add(repeat, "StopAtDurationEnd", "false")
-    add(timed, "StartBoundary", datetime.now().replace(microsecond=0).isoformat())
+    add(
+        timed,
+        "StartBoundary",
+        datetime.now().astimezone().replace(microsecond=0).isoformat(),
+    )
     add(timed, "Enabled", "true")
     principal = add(add(root, "Principals"), "Principal")
     principal.set("id", "Owner")
@@ -310,8 +368,13 @@ def _build_task_xml(sid: str, description: str, program: str, context: dict) -> 
     # IgnoreNew is local to THIS task, not a machine-wide auto-engine lock.
     # The defaults otherwise stop resident actions after 72h or on battery.
     for name, value in (
-        ("MultipleInstancesPolicy", "IgnoreNew"), ("StartWhenAvailable", "true"),
-        ("ExecutionTimeLimit", "PT0S"), ("DisallowStartIfOnBatteries", "false"),
+        # Commit disabled: an ambiguous register failure cannot arm a future
+        # trigger. Only our verified start path enables this attempt.
+        ("Enabled", "false"),
+        ("MultipleInstancesPolicy", "IgnoreNew"),
+        ("StartWhenAvailable", "true"),
+        ("ExecutionTimeLimit", "PT0S"),
+        ("DisallowStartIfOnBatteries", "false"),
         ("StopIfGoingOnBatteries", "false"),
     ):
         add(settings, name, value)
@@ -322,9 +385,13 @@ def _build_task_xml(sid: str, description: str, program: str, context: dict) -> 
     actions.set("Context", "Owner")
     execute = add(actions, "Exec")
     add(execute, "Command", program)
-    add(execute, "Arguments", subprocess.list2cmdline(
-        ["-E", "-P", "-m", "claude_swap._auto_service", _encoded(context)]
-    ))
+    add(
+        execute,
+        "Arguments",
+        subprocess.list2cmdline(
+            ["-E", "-P", "-m", "claude_swap._auto_service", _encoded(context)]
+        ),
+    )
     add(execute, "WorkingDirectory", context["home"])
     return ET.tostring(root, encoding="unicode")
 
@@ -332,10 +399,13 @@ def _build_task_xml(sid: str, description: str, program: str, context: dict) -> 
 def _result(name: str, task: dict | None) -> dict:
     from claude_swap import paths
 
-    return {"task_name": name, "installed": task is not None,
-            "state": task["state"] if task else None,
-            "log": str(paths.get_backup_root() / "claude-swap.log"),
-            "output_log": str(paths.get_backup_root() / "auto-service.log")}
+    return {
+        "task_name": name,
+        "installed": task is not None,
+        "state": task["state"] if task else None,
+        "log": str(paths.get_backup_root() / "claude-swap.log"),
+        "output_log": str(paths.get_backup_root() / "auto-service.log"),
+    }
 
 
 def install() -> dict:
@@ -355,7 +425,11 @@ def install() -> dict:
             _register_task(name, xml)
             _start_task(name, sid, description)
             current = _query_task(name)
-            if current is None or current["description"] != description or current["state"] != "Running":
+            if (
+                current is None
+                or current["description"] != description
+                or current["state"] != "Running"
+            ):
                 raise ClaudeSwitchError("The newly installed action is not running.")
             _assert_owned(current, sid)
         except BaseException as original:
@@ -372,7 +446,7 @@ def install() -> dict:
                     _register_task(name, previous["xml"])
                     if previous["state"] == "Running":
                         _start_task(name, sid, previous["description"])
-            except Exception as cleanup:
+            except Exception as cleanup:  # noqa: BLE001 -- preserve both failure causes
                 raise ClaudeSwitchError(
                     f"Auto-service installation failed ({original}); recovery also failed ({cleanup}). "
                     "Inspect the task in Task Scheduler before retrying."

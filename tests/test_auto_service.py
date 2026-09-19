@@ -1,12 +1,11 @@
 """The private runner restores context before entering the ordinary CLI."""
 
 import base64
-import io
 import json
 import logging
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -22,11 +21,19 @@ def context(tmp_path, config=None):
     return {"version": 1, "home": str(tmp_path), "config": config}
 
 
-@pytest.mark.parametrize("patch", [
-    {"version": True}, {"version": 2}, {"home": "relative"},
-    {"config": "relative"}, {"config": 123}, {"home": None},
-    {"home": "bad\x00path"}, {"extra": "not permitted"},
-])
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"version": True},
+        {"version": 2},
+        {"home": "relative"},
+        {"config": "relative"},
+        {"config": 123},
+        {"home": None},
+        {"home": "bad\x00path"},
+        {"extra": "not permitted"},
+    ],
+)
 def test_invalid_context_is_rejected(tmp_path, patch):
     value = context(tmp_path)
     value.update(patch)
@@ -81,9 +88,13 @@ def test_unterminated_output_has_bounded_records_and_buffer():
     assert max(map(len, records)) <= 8192
 
 
-def test_output_failure_does_not_recurse_through_redirected_stderr(tmp_path, monkeypatch):
+def test_output_failure_does_not_recurse_through_redirected_stderr(
+    tmp_path, monkeypatch
+):
     handler = runner._ServiceLogHandler(tmp_path / "output.log", delay=True)
-    logger = logging.Logger("service-test")
+    logger = logging.getLogger("service-test")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
     logger.addHandler(handler)
     output = runner._LogStream(logger)
     monkeypatch.setattr(handler, "_open", Mock(side_effect=OSError("disk unavailable")))
@@ -93,10 +104,13 @@ def test_output_failure_does_not_recurse_through_redirected_stderr(tmp_path, mon
             output.write("message\n")
     finally:
         output.close()
+        logger.removeHandler(handler)
         handler.close()
 
 
-def test_runner_calls_normal_cli_with_context_and_restores_streams(tmp_path, monkeypatch):
+def test_runner_calls_normal_cli_with_context_and_restores_streams(
+    tmp_path, monkeypatch
+):
     from claude_swap import cli, paths
 
     for name in ("HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR"):
@@ -138,7 +152,9 @@ def test_runner_does_not_relabel_cli_failure_as_success(tmp_path, monkeypatch):
     assert result.value.code == 1
 
 
-def test_default_and_explicit_default_keep_distinct_global_config_paths(tmp_path, monkeypatch):
+def test_default_and_explicit_default_keep_distinct_global_config_paths(
+    tmp_path, monkeypatch
+):
     from claude_swap import paths
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
