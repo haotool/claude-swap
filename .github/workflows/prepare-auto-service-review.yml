@@ -16,129 +16,208 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install isolated formatter for new files only
+      - name: Install isolated formatter
         run: |
           python -m venv "$RUNNER_TEMP/format-env"
           "$RUNNER_TEMP/format-env/bin/pip" install ruff==0.16.8
-      - name: Prepare exact fixes without moving a branch
+      - name: Prepare reviewed blobs without moving a branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
           import base64, json, os, pathlib, subprocess, urllib.request
-          def replace(path, old, new):
-              p=pathlib.Path(path); s=p.read_text()
-              assert s.count(old)==1, (path, old)
-              p.write_text(s.replace(old,new))
-          task='src/claude_swap/task_scheduler.py'
-          runner='src/claude_swap/_auto_service.py'
-          replace(task, 'if value == {"found": False}:', 'if set(value) == {"found"} and value["found"] is False:')
-          replace(task, 'value.get("found") is not True or value.get("state") not in _STATES', 'value.get("found") is not True\n        or not isinstance(value.get("state"), str)\n        or value["state"] not in _STATES')
-          replace(task, 'An existing task is not owned by this auto service; nothing was changed.', 'An existing task is not owned by this auto service; refusing to modify it.')
-          replace(task, '        if verdict not in (0, 0x80):\n            raise ClaudeSwitchError("Another auto-service management operation is busy.")', '''        if verdict == 0x102:  # WAIT_TIMEOUT is contention, not an OS failure.
-                      raise ClaudeSwitchError("Another auto-service management operation is busy.")
-                  if verdict not in (0, 0x80):
-                      raise ClaudeSwitchError("Windows could not acquire the auto-service management lock.")''')
-          replace(task, 'datetime.now().replace(microsecond=0).isoformat()', 'datetime.now().astimezone().replace(microsecond=0).isoformat()')
-          replace(task, '            except Exception as cleanup:', '            except Exception as cleanup:  # noqa: BLE001 -- preserve both failure causes')
-          replace(task, 'Assert-Task $task\nStart-ScheduledTask', 'Assert-Task $task\nEnable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null\nStart-ScheduledTask')
-          replace(task, '    config = os.environ.get("CLAUDE_CONFIG_DIR")\n', '''    config = os.environ.get("CLAUDE_CONFIG_DIR")
-              if config and "\\x00" in config:
-                  raise ClaudeSwitchError("CLAUDE_CONFIG_DIR contains a NUL character.")
-          ''')
-          replace(task, '        ("MultipleInstancesPolicy", "IgnoreNew"),', '''        # Commit disabled: an ambiguous register failure cannot arm a future
-                  # trigger. Only our verified start path enables this attempt.
-                  ("Enabled", "false"),
-                  ("MultipleInstancesPolicy", "IgnoreNew"),''')
-          replace(runner, 'class _LogStream(io.TextIOBase):', '''class _ServiceLogHandler(RotatingFileHandler):
-              """A failed output sink must not log back into its own redirected stderr."""
+          root=pathlib.Path('.')
+          p=root/'src/claude_swap/_auto_service.py'
+          assert subprocess.check_output(['git','hash-object',str(p)],text=True).strip()=='3bacbe21ded1c1e1f33308278110bfc702057215'
+          s=p.read_text().replace('import sys\n','import sys\nimport threading\n')
+          s=s.replace('        self._pending = ""\n','        self._pending = ""\n        self._lock = threading.RLock()\n',1)
+          a=s.index('    def write(self, text: str) -> int:'); b=s.index('\n\ndef run(',a)
+          s=s[:a]+'''    def write(self, text: str) -> int:
+                  with self._lock:
+                      size = len(text)
+                      # Bound partial lines as well as individual log records. Logging's
+                      # handler lock does not protect this stream's own shared buffer.
+                      for offset in range(0, size, 4096):
+                          self._pending += text[offset : offset + 4096]
+                          while "\\n" in self._pending:
+                              line, self._pending = self._pending.split("\\n", 1)
+                              if line:
+                                  self._logger.info("%s", line)
+                          if len(self._pending) >= 4096:
+                              self.flush()
+                      return size
 
-              def handleError(self, record: logging.LogRecord) -> None:
-                  failure = sys.exception()
-                  if failure is None:
-                      raise RuntimeError("Output handler called without an active exception")
-                  raise failure
+              def flush(self) -> None:
+                  with self._lock:
+                      if self._pending:
+                          pending, self._pending = self._pending, ""
+                          self._logger.info("%s", pending)
+          '''+s[b:]
+          s=s.replace('        output.flush()\n        output.close()\n        logger.removeHandler(handler)\n        handler.close()', '''        try:
+                      output.close()
+                  finally:
+                      logger.removeHandler(handler)
+                      handler.close()''')
+          p.write_text(s)
+          p=root/'src/claude_swap/task_scheduler.py'; s=p.read_text()
+          assert subprocess.check_output(['git','hash-object',str(p)],text=True).strip()=='7a5d537ac31c5c46bac17236e9261780a869ba2a'
+          a=s.index('def _result('); b=s.index('\n\ndef install(',a)
+          s=s[:a]+'''def _result(name: str, task: dict | None) -> dict:
+              from claude_swap import paths
+              from claude_swap._auto_service import _decode_context
 
-
-          class _LogStream(io.TextIOBase):''')
-          replace(runner, 'handler = RotatingFileHandler(', 'handler = _ServiceLogHandler(')
-          replace(runner, 'logger = logging.Logger("claude-swap.auto-service", logging.INFO)', '''logger = logging.getLogger("claude-swap.auto-service")
-              logger.setLevel(logging.INFO)
-              logger.propagate = False''')
-          replace(runner, '        handler.close()', '        logger.removeHandler(handler)\n        handler.close()')
-          tests='tests/test_auto_service.py'
-          replace(tests, 'import io\n', '')
-          replace(tests, 'logger = logging.Logger("service-test")', '''logger = logging.getLogger("service-test")
-              logger.setLevel(logging.INFO)
-              logger.propagate = False''')
-          replace(tests, '        handler.close()', '        logger.removeHandler(handler)\n        handler.close()')
-          p=pathlib.Path('tests/test_task_scheduler.py')
+              backup = paths.get_backup_root()
+              if task is not None:
+                  # The action pins its home at install time. A status caller's current
+                  # environment must not send the user to another installation's logs.
+                  try:
+                      root = ET.fromstring(task["xml"])
+                      arguments = root.findtext(
+                          f"{{{_NAMESPACE}}}Actions/{{{_NAMESPACE}}}Exec/{{{_NAMESPACE}}}Arguments"
+                      )
+                      argv = arguments.split() if arguments else []
+                      if len(argv) != 5 or argv[:4] != ["-E", "-P", "-m", "claude_swap._auto_service"]:
+                          raise ValueError("Unrecognized auto-service action")
+                      context = _decode_context(argv[4])
+                      backup = Path(context["home"]) / paths.LEGACY_BACKUP_DIRNAME
+                  except (ValueError, ET.ParseError) as exc:
+                      raise ClaudeSwitchError("The installed auto-service runtime context is unreadable.") from exc
+              return {
+                  "task_name": name,
+                  "installed": task is not None,
+                  "state": task["state"] if task else None,
+                  "log": str(backup / "claude-swap.log"),
+                  "output_log": str(backup / "auto-service.log"),
+              }
+          '''+s[b:]
+          p.write_text(s)
+          p=root/'tests/test_task_scheduler.py'
           p.write_text(p.read_text()+'''
 
-          def test_invalid_runtime_context_is_refused_before_mutation(monkeypatch):
-              monkeypatch.setattr(ts.os, "environ", {"CLAUDE_CONFIG_DIR": "bad\\x00path"})
-              with pytest.raises(ClaudeSwitchError, match="NUL"):
-                  ts._runtime_context()
+          def test_status_reports_the_installed_home_not_the_callers_home(manager, monkeypatch, tmp_path):
+              task = record(tmp_path / "installed")
+              manager["task"] = task
+              monkeypatch.setattr("claude_swap.paths.get_backup_root", lambda: tmp_path / "other-home")
+              result = ts.status()
+              assert result["output_log"] == str(tmp_path / "installed" / ".claude-swap-backup" / "auto-service.log")
+              assert result["log"] == str(tmp_path / "installed" / ".claude-swap-backup" / "claude-swap.log")
 
 
-          def test_registration_is_disabled_until_verified_start(tmp_path, monkeypatch):
+          def test_status_refuses_an_unreadable_installed_context(manager, tmp_path):
               task = record(tmp_path)
               root = ET.fromstring(task["xml"])
-              assert root.findtext("t:Settings/t:Enabled", namespaces=NS) == "false"
-              run = Mock(return_value={"running": True})
-              monkeypatch.setattr(ts, "_powershell", run)
-              ts._start_task("probe", SID, DESCRIPTION)
-              body = run.call_args.args[0]
-              assert body.index("Assert-Task") < body.index("Enable-ScheduledTask") < body.index("Start-ScheduledTask")
+              root.find("t:Actions/t:Exec/t:Arguments", NS).text = "unexpected action"
+              task["xml"] = ET.tostring(root, encoding="unicode")
+              manager["task"] = task
+              with pytest.raises(ClaudeSwitchError, match="runtime context"):
+                  ts.status()
           ''')
-          paths=[task,runner,tests,'tests/test_task_scheduler.py','tests/test_auto_service_cli.py','tests/windows_task_scheduler_check.py']
+          p=root/'tests/test_auto_service.py'
+          p.write_text(p.read_text()+'''
+
+          def test_failed_partial_flush_does_not_retry_the_same_record_on_close():
+              logger = Mock()
+              logger.info.side_effect = OSError("sink failed")
+              output = runner._LogStream(logger)
+              output.write("partial")
+              with pytest.raises(OSError, match="sink failed"):
+                  output.flush()
+              output.close()
+              assert logger.info.call_count == 1
+
+
+          def test_flush_and_write_do_not_duplicate_a_partial_line():
+              import threading
+
+              entered = threading.Event()
+              release = threading.Event()
+              second_started = threading.Event()
+              second_finished = threading.Event()
+              records = []
+
+              def emit(format_, text):
+                  records.append(text)
+                  if text == "first":
+                      entered.set()
+                      if not release.wait(2):
+                          raise AssertionError("test failed to release output sink")
+
+              logger = Mock()
+              logger.info.side_effect = emit
+              output = runner._LogStream(logger)
+              output.write("first")
+              first = threading.Thread(target=output.flush)
+
+              def write():
+                  second_started.set()
+                  output.write("second\\n")
+                  second_finished.set()
+
+              second = threading.Thread(target=write)
+              first.start()
+              try:
+                  assert entered.wait(2)
+                  second.start()
+                  assert second_started.wait(2)
+                  # On the old stream this write completed while flush still owned
+                  # "first", duplicating it. A serialized write waits until release.
+                  second_finished.wait(0.1)
+              finally:
+                  release.set()
+                  first.join(2)
+                  if second.ident is not None:
+                      second.join(2)
+                  output.close()
+              assert not first.is_alive() and not second.is_alive()
+              assert records == ["first", "second"]
+          ''')
+          p=root/'tests/windows_task_scheduler_check.py'; s=p.read_text()
+          anchor='        assert not (home / ".claude-swap-backup" / "sequence.json").exists()'
+          assert s.count(anchor)==1
+          addition='''        # A same-name task is not ours merely because it belongs to the same
+                  # Windows user. Keep a disabled fixture intact through all public verbs.
+                  foreign = "cswap-auto-ci-foreign-" + uuid.uuid4().hex
+                  data = json.loads(receipt.read_text(encoding="utf-8"))
+                  data["descriptions"].append(foreign)
+                  receipt.write_text(json.dumps(data), encoding="utf-8")
+                  fixture = ts._build_task_xml(
+                      sid, foreign, ts._resolve_program(),
+                      {"version": 1, "home": str(home), "config": None},
+                  )
+                  ts._register_task(name, fixture)
+                  before = ts._query_task(name)
+                  for flag in ("--install-service", "--service-status", "--uninstall-service"):
+                      rejected = cli(flag, expected=1)
+                      assert "not owned" in rejected.stdout + rejected.stderr
+                      assert ts._query_task(name)["xml"] == before["xml"]
+
+                  # Pin the provider's create-only behaviour too, not just our precheck.
+                  # Pretend the precheck raced with another creator, leaving the real
+                  # native Register-ScheduledTask call to encounter the occupied name.
+                  powershell = ts._powershell
+                  def stale_absence(body, payload=None):
+                      return powershell("function Find-Task { return $null }\\n" + body, payload)
+                  refused = False
+                  ts._powershell = stale_absence
+                  try:
+                      ts._register_task(name, ts._build_task_xml(
+                          sid, ts._OWNER + uuid.uuid4().hex, ts._resolve_program(),
+                          {"version": 1, "home": str(home), "config": None},
+                      ))
+                  except ts.ClaudeSwitchError:
+                      refused = True
+                  finally:
+                      ts._powershell = powershell
+                  assert refused, "The native registration overwrote an occupied task name"
+                  assert ts._query_task(name)["xml"] == before["xml"]
+                  ts._remove_task(name, sid, foreign)
+                  checks.append("foreign task: all CLI verbs refuse; native name collision preserves definition")
+          '''
+          p.write_text(s.replace(anchor,addition+anchor))
+          paths=['src/claude_swap/task_scheduler.py','src/claude_swap/_auto_service.py','tests/test_task_scheduler.py','tests/test_auto_service.py','tests/windows_task_scheduler_check.py']
           ruff=str(pathlib.Path(os.environ['RUNNER_TEMP'])/'format-env/bin/ruff')
           subprocess.run([ruff,'check','--isolated','--select','E,F,I','--ignore','E501','--fix',*paths],check=True)
           subprocess.run([ruff,'format','--isolated',*paths],check=True)
-          ci=pathlib.Path('.github/workflows/ci.yml')
-          assert '  windows-task-scheduler:' not in ci.read_text()
-          ci.write_text(ci.read_text()+'''
-
-            windows-task-scheduler:
-              runs-on: windows-latest
-              timeout-minutes: 15
-              permissions:
-                contents: read
-              steps:
-                - uses: actions/checkout@v4
-                  with:
-                    persist-credentials: false
-                - uses: astral-sh/setup-uv@v6
-                  with:
-                    python-version: '3.12'
-                - name: Install dependencies
-                  run: uv sync --locked
-                - name: Install the wheel into a path containing spaces
-                  shell: pwsh
-                  run: |
-                    uv build --wheel --out-dir "$env:RUNNER_TEMP/cswap-wheel"
-                    if ($LASTEXITCODE) { exit $LASTEXITCODE }
-                    uv venv "$env:RUNNER_TEMP/cswap path with spaces"
-                    if ($LASTEXITCODE) { exit $LASTEXITCODE }
-                    $wheel = Get-ChildItem "$env:RUNNER_TEMP/cswap-wheel/*.whl" | Select-Object -First 1
-                    uv pip install --python "$env:RUNNER_TEMP/cswap path with spaces/Scripts/python.exe" $wheel.FullName
-                    exit $LASTEXITCODE
-                - name: Exercise native lifecycle and recovery serially
-                  shell: pwsh
-                  run: |
-                    uv run python tests/windows_task_scheduler_check.py --folder "$env:RUNNER_TEMP/cswap-native-$env:GITHUB_RUN_ID" --python "$env:RUNNER_TEMP/cswap path with spaces/Scripts/python.exe" --recovery
-                    exit $LASTEXITCODE
-                - name: Verify cleanup even after a failed check
-                  if: always()
-                  shell: pwsh
-                  run: |
-                    $folder = "$env:RUNNER_TEMP/cswap-native-$env:GITHUB_RUN_ID"
-                    if (Test-Path "$folder/receipt.json") {
-                      & .venv/Scripts/python.exe tests/windows_task_scheduler_check.py --folder $folder --cleanup
-                      exit $LASTEXITCODE
-                    }
-          ''')
-          paths.append(str(ci))
           for path in paths:
               content=pathlib.Path(path).read_bytes()
               data=json.dumps({'content':base64.b64encode(content).decode(),'encoding':'base64'}).encode()
