@@ -20,7 +20,7 @@ jobs:
           uv export --locked --format requirements-txt --no-hashes --no-emit-project > "$RUNNER_TEMP/review-snapshot/requirements.txt"
           uv venv --seed "$RUNNER_TEMP/exporter"
           "$RUNNER_TEMP/exporter/bin/python" -m pip download --only-binary=:all: -r "$RUNNER_TEMP/review-snapshot/requirements.txt" -d "$RUNNER_TEMP/review-snapshot/wheels"
-          "$RUNNER_TEMP/exporter/bin/python" -m pip download --only-binary=:all: ruff -d "$RUNNER_TEMP/review-snapshot/wheels"
+          "$RUNNER_TEMP/exporter/bin/python" -m pip download --only-binary=:all: ruff hatchling -d "$RUNNER_TEMP/review-snapshot/wheels"
           git rev-parse HEAD > "$RUNNER_TEMP/review-snapshot/commit.txt"
       - uses: actions/upload-artifact@v4
         with:
