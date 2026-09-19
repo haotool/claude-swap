@@ -1,0 +1,29 @@
+name: Review source snapshot
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.13'
+      - name: Archive tracked sources and locked portable dependencies
+        run: |
+          mkdir -p "$RUNNER_TEMP/review-snapshot/wheels"
+          git archive --format=zip HEAD -o "$RUNNER_TEMP/review-snapshot/source.zip"
+          uv export --locked --format requirements-txt --no-hashes --no-emit-project > "$RUNNER_TEMP/review-snapshot/requirements.txt"
+          uv venv --seed "$RUNNER_TEMP/exporter"
+          "$RUNNER_TEMP/exporter/bin/python" -m pip download --only-binary=:all: -r "$RUNNER_TEMP/review-snapshot/requirements.txt" -d "$RUNNER_TEMP/review-snapshot/wheels"
+          "$RUNNER_TEMP/exporter/bin/python" -m pip download --only-binary=:all: ruff -d "$RUNNER_TEMP/review-snapshot/wheels"
+          git rev-parse HEAD > "$RUNNER_TEMP/review-snapshot/commit.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: review-source-snapshot
+          path: ${{ runner.temp }}/review-snapshot
+          retention-days: 7
