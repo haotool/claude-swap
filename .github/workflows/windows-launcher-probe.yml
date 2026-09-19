@@ -7,7 +7,7 @@ permissions:
 jobs:
   launcher-probe:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -18,7 +18,7 @@ jobs:
         run: |
           uv venv --seed "$env:RUNNER_TEMP/probe-host"
           & "$env:RUNNER_TEMP/probe-host/Scripts/python.exe" -m pip install pipx
-      - name: Measure launchers, configuration and child teardown
+      - name: Measure direct pythonw across tool reinstalls
         shell: pwsh
         run: |
           @'
@@ -30,24 +30,20 @@ jobs:
           ps = str(P(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
           ns = 'http://schemas.microsoft.com/windows/2004/02/mit/task'
           ET.register_namespace('', ns)
-          rows = []
-          receipts = []
+          rows, receipts = [], []
           def data(x):
               return base64.b64encode(json.dumps(x, ensure_ascii=False).encode()).decode()
           def enc(x):
               return base64.b64encode(x.encode('utf-16-le')).decode()
-          def literal(x):
-              return "'" + x.replace("'", "''") + "'"
           def run(args, **kw):
               r = subprocess.run(args, capture_output=True, text=True, encoding='utf-8', timeout=180, creationflags=subprocess.CREATE_NO_WINDOW, **kw)
-              if r.returncode:
-                  raise RuntimeError((r.stderr or r.stdout)[-4000:])
+              if r.returncode: raise RuntimeError((r.stderr or r.stdout)[-3000:])
               return r.stdout
           def shell(body, payload=None):
               script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); try { $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json; " + body + " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
               return run([ps, '-NoProfile', '-NonInteractive', '-EncodedCommand', enc(script)], input=data(payload or {}))
           sid = shell('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value').strip()
-          find = "function Find-Task { $t=@(Get-ScheduledTask -TaskPath '\\*' -ErrorAction Stop | Where-Object { $_.TaskPath -eq '\\' -and $_.TaskName -eq $p.name }); if($t.Count -gt 1){throw 'ambiguous'}; if($t.Count){return $t[0]}; return $null }; function Assert-Owner($t) { $u=[string]$t.Principal.UserId; if($u -notmatch '^S-1-'){ $u=[Security.Principal.NTAccount]::new($u).Translate([Security.Principal.SecurityIdentifier]).Value }; if($t.Description -ne $p.marker -or $u -ne $p.sid){throw ('foreign task: principal='+$t.Principal.UserId)} }; "
+          find = "function Find-Task { $t=@(Get-ScheduledTask -TaskPath '\\*' -ErrorAction Stop | Where-Object { $_.TaskPath -eq '\\' -and $_.TaskName -eq $p.name }); if($t.Count -gt 1){throw 'ambiguous'}; if($t.Count){return $t[0]}; return $null }; function Assert-Owner($t) { $u=[string]$t.Principal.UserId; if($u -notmatch '^S-1-'){ $u=[Security.Principal.NTAccount]::new($u).Translate([Security.Principal.SecurityIdentifier]).Value }; if($t.Description -ne $p.marker -or $u -ne $p.sid){throw 'foreign task'} }; "
           def remove(req):
               shell(find + "$t=Find-Task; if($null -eq $t){return}; Assert-Owner $t; Disable-ScheduledTask -InputObject $t | Out-Null; $sw=[Diagnostics.Stopwatch]::StartNew(); do { $t=Find-Task; if($null -eq $t){return}; Assert-Owner $t; if($t.State -eq 'Running'){Stop-ScheduledTask -InputObject $t}; if($t.State -in @('Ready','Disabled')){break}; if($sw.Elapsed.TotalSeconds -gt 5){throw 'stop timeout'}; Start-Sleep -Milliseconds 100 } while($true); Unregister-ScheduledTask -InputObject $t -Confirm:$false; $sw.Restart(); while($null -ne (Find-Task)){if($sw.Elapsed.TotalSeconds -gt 5){throw 'removal timeout'}; Start-Sleep -Milliseconds 100}", req)
           source = '''import base64, ctypes, json, os, sys, time
@@ -55,7 +51,7 @@ jobs:
           BUILD = BUILD_VALUE
           def main():
               if sys.argv[1:] == ['--describe']:
-                  print(json.dumps({'python':sys.executable,'pythonw':str(Path(sys.executable).with_name('pythonw.exe')),'build':BUILD})); return 0
+                  print(json.dumps({'pythonw':str(Path(sys.executable).with_name('pythonw.exe')),'build':BUILD})); return 0
               p=json.loads(base64.b64decode(sys.argv[1]))
               if p['config'] is None: os.environ.pop('CLAUDE_CONFIG_DIR',None)
               else: os.environ['CLAUDE_CONFIG_DIR']=p['config']
@@ -71,7 +67,7 @@ jobs:
           '''
           def wheel(folder, build):
               name='cswap_launcher_probe'; version='0.0.'+str(build); dist=name+'-'+version+'.dist-info'
-              files={name+'.py':source.replace('BUILD_VALUE',str(build)).encode(), dist+'/METADATA':('Metadata-Version: 2.1\nName: '+name+'\nVersion: '+version+'\n').encode(), dist+'/WHEEL':b'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n', dist+'/entry_points.txt':b'[console_scripts]\ncswap-launcher-probe = cswap_launcher_probe:main\n[gui_scripts]\ncswap-launcher-probe-quiet = cswap_launcher_probe:main\n'}
+              files={name+'.py':source.replace('BUILD_VALUE',str(build)).encode(), dist+'/METADATA':('Metadata-Version: 2.1\nName: '+name+'\nVersion: '+version+'\n').encode(), dist+'/WHEEL':b'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n', dist+'/entry_points.txt':b'[console_scripts]\ncswap-launcher-probe = cswap_launcher_probe:main\n'}
               out=io.StringIO(); writer=csv.writer(out,lineterminator='\n')
               for n,b in files.items(): writer.writerow([n,'sha256='+base64.urlsafe_b64encode(hashlib.sha256(b).digest()).rstrip(b'=').decode(),len(b)])
               writer.writerow([dist+'/RECORD','','']); files[dist+'/RECORD']=out.getvalue().encode()
@@ -79,7 +75,7 @@ jobs:
               with zipfile.ZipFile(path,'w') as z:
                   for n,b in files.items(): z.writestr(n,b)
               return path
-          def definition(req, command, args):
+          def definition(req, command, arg):
               r=ET.Element('{'+ns+'}Task',version='1.3')
               def add(p,n,t=None):
                   c=ET.SubElement(p,'{'+ns+'}'+n); c.text=t; return c
@@ -87,7 +83,7 @@ jobs:
               pr=add(add(r,'Principals'),'Principal'); pr.set('id','Owner'); add(pr,'UserId',sid); add(pr,'LogonType','InteractiveToken'); add(pr,'RunLevel','LeastPrivilege')
               s=add(r,'Settings')
               for n,v in [('MultipleInstancesPolicy','IgnoreNew'),('ExecutionTimeLimit','PT2M'),('DisallowStartIfOnBatteries','false'),('StopIfGoingOnBatteries','false')]: add(s,n,v)
-              a=add(r,'Actions'); a.set('Context','Owner'); e=add(a,'Exec'); add(e,'Command',command); add(e,'Arguments',subprocess.list2cmdline(args))
+              a=add(r,'Actions'); a.set('Context','Owner'); e=add(a,'Exec'); add(e,'Command',command); add(e,'Arguments',subprocess.list2cmdline(['-m','cswap_launcher_probe',arg]))
               return ET.tostring(r,encoding='unicode')
           try:
               for manager in ['venv','uv','pipx']:
@@ -106,43 +102,36 @@ jobs:
                           run([sys.executable,'-m','pipx','install','--force','--python',sys.executable,str(wh)],env=env); bin=folder/'bin'
                       description=json.loads(run([str(bin/'cswap-launcher-probe.exe'),'--describe'],env=env))
                       if initial is None: initial=description
-                      for kind in ['pythonw','hidden-powershell','gui-script']:
-                          for config in [None,str(folder/"profile 空白 o'brien & test")]:
-                              nonce=uuid.uuid4().hex; report=folder/(nonce+'.json'); payload={'nonce':nonce,'report':str(report),'config':config}; arg=data(payload)
-                              if kind=='pythonw': command,args=initial['pythonw'],['-m','cswap_launcher_probe',arg]
-                              elif kind=='gui-script': command,args=str(bin/'cswap-launcher-probe-quiet.exe'),[arg]
-                              else: command,args=ps,['-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',enc('& '+literal(str(bin/'cswap-launcher-probe.exe'))+' '+literal(arg)+'; exit $LASTEXITCODE')]
-                              req={'name':'cswap-launcher-probe-'+nonce,'marker':'cswap-probe:'+nonce,'sid':sid}; receipts.append(req); req['xml']=definition(req,command,args)
-                              row={'manager':manager,'build':build,'kind':kind,'custom':config is not None}; observed=None
-                              try:
-                                  shell(find+"if($null -ne (Find-Task)){throw 'already exists'}; Register-ScheduledTask -TaskName $p.name -TaskPath '\\' -Xml $p.xml -ErrorAction Stop | Out-Null; Start-ScheduledTask -TaskName $p.name -TaskPath '\\' -ErrorAction Stop",req)
-                                  deadline=time.monotonic()+30
-                                  while not report.exists():
-                                      if time.monotonic()>deadline: raise RuntimeError('no report')
-                                      time.sleep(.2)
-                                  observed=json.loads(report.read_text()); assert observed['nonce']==nonce and observed['build']==build and observed['config']==config, observed
-                                  state=shell(find+'$t=Find-Task; Assert-Owner $t; [string]$t.State',req).strip(); assert state=='Running',state
-                                  row.update(ok=True,observation=observed)
-                              except Exception as exc: row.update(ok=False,error=str(exc))
-                              finally:
-                                  try:
-                                      remove(req)
-                                      if observed:
-                                          deadline=time.monotonic()+5
-                                          while shell("@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$p.pid) -ErrorAction Stop).Count",{'pid':observed['pid']}).strip()!='0':
-                                              if time.monotonic()>deadline: raise RuntimeError('child survived removal')
-                                              time.sleep(.1)
-                                      row['cleanup']='verified'
-                                  except Exception as exc: row.update(ok=False,cleanup=str(exc))
-                              rows.append(row); print(json.dumps(row),flush=True)
-                              if row.get('cleanup')!='verified': raise RuntimeError('cleanup failed; refusing to accumulate tasks')
+                      for config in [None,str(folder/"profile 空白 o'brien & test")]:
+                          nonce=uuid.uuid4().hex; report=folder/(nonce+'.json'); payload={'nonce':nonce,'report':str(report),'config':config}
+                          req={'name':'cswap-launcher-probe-'+nonce,'marker':'cswap-probe:'+nonce,'sid':sid}; receipts.append(req); req['xml']=definition(req,initial['pythonw'],data(payload))
+                          row={'manager':manager,'build':build,'kind':'pythonw','custom':config is not None}; observed=None
+                          try:
+                              shell(find+"if($null -ne (Find-Task)){throw 'already exists'}; Register-ScheduledTask -TaskName $p.name -TaskPath '\\' -Xml $p.xml -ErrorAction Stop | Out-Null; Start-ScheduledTask -TaskName $p.name -TaskPath '\\' -ErrorAction Stop",req)
+                              deadline=time.monotonic()+30
+                              while not report.exists():
+                                  if time.monotonic()>deadline: raise RuntimeError('no report')
+                                  time.sleep(.2)
+                              observed=json.loads(report.read_text()); assert observed['nonce']==nonce and observed['build']==build and observed['config']==config, observed
+                              state=shell(find+'$t=Find-Task; Assert-Owner $t; [string]$t.State',req).strip(); assert state=='Running',state
+                              assert not observed['console'] and not observed['visible']
+                              row.update(ok=True,observation=observed)
+                          except Exception as exc: row.update(ok=False,error=str(exc))
+                          finally:
+                              remove(req)
+                              if observed:
+                                  deadline=time.monotonic()+5
+                                  while shell("@(Get-CimInstance Win32_Process -Filter ('ProcessId = '+[int]$p.pid) -ErrorAction Stop).Count",{'pid':observed['pid']}).strip()!='0':
+                                      if time.monotonic()>deadline: raise RuntimeError('child survived removal')
+                                      time.sleep(.1)
+                              row['cleanup']='verified'; rows.append(row); print(json.dumps(row),flush=True)
           finally:
               for req in receipts:
                   try: remove(req)
                   except Exception as exc: print('CLEANUP FAILURE',req['name'],str(exc),flush=True)
-              result={'rows':rows,'windows':sys.getwindowsversion()[:], 'manual_flash_check':'NOT_PERFORMED'}
+              result={'rows':rows,'windows':sys.getwindowsversion()[:], 'manual_flash_check':'NOT_PERFORMED','rejected':'PowerShell wrapper: child survived task removal in run 2'}
               (P(os.environ['RUNNER_TEMP'])/'launcher-results.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
-          if len(rows)!=36: raise RuntimeError('matrix incomplete')
+          assert len(rows)==12 and all(r['ok'] for r in rows), 'matrix failed'
           '@ | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/launcher_probe.py"
           & "$env:RUNNER_TEMP/probe-host/Scripts/python.exe" "$env:RUNNER_TEMP/launcher_probe.py"
           exit $LASTEXITCODE
