@@ -1,0 +1,90 @@
+name: Merged PR review evidence
+on:
+  push:
+    branches: [review/merged-pr-audit-20260920]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Collect public upstream review evidence without modifying a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import concurrent.futures, json, os, pathlib, statistics, subprocess, urllib.request
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'review-evidence'
+          root.mkdir()
+          upstream = 'https://api.github.com/repos/realiti4/claude-swap'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'User-Agent': 'claude-swap-review-audit'}
+          def request(url, accept=None):
+              h = dict(headers)
+              if accept: h['Accept'] = accept
+              with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=60) as response:
+                  raw = response.read()
+                  link = response.headers.get('Link', '')
+              return raw, link
+          def get(url):
+              return json.loads(request(url)[0])
+          def pages(url):
+              rows = []
+              while url:
+                  raw, link = request(url)
+                  value = json.loads(raw)
+                  if not isinstance(value, list): raise ValueError('Expected paginated list: ' + url)
+                  rows.extend(value)
+                  url = next((part.split(';')[0].strip()[1:-1] for part in link.split(',') if 'rel="next"' in part), None)
+              return rows
+          inventory = pages(upstream + '/pulls?state=all&per_page=100&sort=created&direction=asc')
+          (root / 'inventory.json').write_text(json.dumps(inventory, ensure_ascii=False), encoding='utf-8')
+          merged = [p for p in inventory if p['merged_at']]
+          folder = root / 'merged'
+          folder.mkdir()
+          def collect(p):
+              n = p['number']
+              base = upstream + '/pulls/' + str(n)
+              detail = get(base)
+              files = pages(base + '/files?per_page=100')
+              conversation = pages(upstream + '/issues/' + str(n) + '/comments?per_page=100')
+              reviews = pages(base + '/reviews?per_page=100')
+              inline = pages(base + '/comments?per_page=100')
+              checks = get(upstream + '/commits/' + detail['head']['sha'] + '/check-runs?per_page=100')
+              diff = request(base, 'application/vnd.github.diff')[0].decode('utf-8')
+              (folder / (str(n) + '.diff')).write_text(diff, encoding='utf-8')
+              (folder / (str(n) + '.json')).write_text(json.dumps({'pr': detail, 'files': files, 'conversation': conversation, 'reviews': reviews, 'inline': inline, 'checks': checks}, ensure_ascii=False), encoding='utf-8')
+              def category(f):
+                  path = f['filename']
+                  if path.startswith('tests/'): return 'test'
+                  if path.startswith('.github/workflows/'): return 'ci'
+                  if path.startswith('src/'): return 'source'
+                  return 'other'
+              changes = {k: sum(f['changes'] for f in files if category(f) == k) for k in ('test', 'ci', 'source', 'other')}
+              maintainer = [{'body': c.get('body'), 'url': c.get('html_url'), 'kind': kind} for kind, rows in [('conversation', conversation), ('review', reviews), ('inline', inline)] for c in rows if c.get('user', {}).get('login') == 'realiti4' and c.get('body')]
+              return {'number': n, 'title': detail['title'], 'merged_at': detail['merged_at'], 'commits': detail['commits'], 'files': detail['changed_files'], 'additions': detail['additions'], 'deletions': detail['deletions'], 'changes': detail['additions'] + detail['deletions'], 'categories': changes, 'maintainer': maintainer, 'checks': [{'name': c['name'], 'status': c['status'], 'conclusion': c['conclusion']} for c in checks['check_runs']], 'checks_total': checks['total_count'], 'files_with_missing_patch': [f['filename'] for f in files if 'patch' not in f]}
+          summaries = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+              for item in pool.map(collect, merged):
+                  summaries.append(item)
+          (root / 'merged-summary.json').write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding='utf-8')
+          (root / 'upstream-main.json').write_text(json.dumps(get(upstream + '/git/ref/heads/main')), encoding='utf-8')
+          selected = '9037828d92e9c3822e628b9b40f541ce867486a1'
+          base = '9aa6d0292736173e70d4c5d8e2026210fe39a9ee'
+          for sha, name in [(selected, 'source'), (base, 'baseline')]:
+              subprocess.run(['git', 'fetch', '--depth=1', 'origin', sha], check=True)
+              subprocess.run(['git', 'archive', '--format=zip', sha, '-o', str(root / (name + '.zip'))], check=True)
+          stats = {'total_prs': len(inventory), 'open_prs': sum(p['state'] == 'open' for p in inventory), 'merged_prs': len(summaries), 'median_changes': statistics.median(p['changes'] for p in summaries), 'over_1000_lines': sum(p['changes'] >= 1000 for p in summaries), 'source_sha': selected, 'base_sha': base}
+          (root / 'stats.json').write_text(json.dumps(stats, indent=2), encoding='utf-8')
+          print(json.dumps(stats))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: merged-pr-review-evidence
+          path: ${{ runner.temp }}/review-evidence
+          retention-days: 7
+          if-no-files-found: error
