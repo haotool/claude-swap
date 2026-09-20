@@ -1,0 +1,60 @@
+name: Prepare secure-storage boundary blobs
+on:
+  push:
+    branches: [review/secure-storage-boundary-20260920]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fd6abeca4977bd8be5a5dbd928510b138665a388
+          persist-credentials: false
+      - name: Prepare two exact reviewed changes without moving a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.request
+          changes = {
+              'src/claude_swap/task_scheduler.py': (
+                  'ad6cf06344238307e87d32799de93620fc126127',
+                  '737949b6e527633283b40d8d34528d1368a8e6de',
+                  [
+                      ('    if os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"):', '    if "CLAUDE_SECURESTORAGE_CONFIG_DIR" in os.environ:'),
+                      ('    # The upstream consume/switch paths still use the default secure store.\n    # Do not drop a shell-local override and bypass their protective refusal.', '    # The upstream consume/switch paths do not mirror secure-storage overrides.\n    # Even a defined empty value differs from unset when choosing a store.'),
+                  ]),
+              'tests/test_task_scheduler.py': (
+                  '7f97a228872f63b0648aacd79605d02c61ebbe69',
+                  '86309154bc848817d5216da3d251ca30f0bb2a60',
+                  [
+                      ('def test_redirected_secure_storage_refuses_before_any_manager_call(monkeypatch):', '@pytest.mark.parametrize("override", ["", "redirected store"])\ndef test_redirected_secure_storage_refuses_before_any_manager_call(override, monkeypatch):'),
+                      ('monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "redirected store")', 'monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", override)'),
+                  ]),
+          }
+          def blob_sha(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          for name, (before, after, edits) in changes.items():
+              source = pathlib.Path(name).read_bytes()
+              assert blob_sha(source) == before
+              text = source.decode()
+              for old, new in edits:
+                  assert text.count(old) == 1
+                  text = text.replace(old, new)
+              # Match the locally formatted function signature exactly.
+              if name.startswith('tests/'):
+                  text = text.replace('def test_redirected_secure_storage_refuses_before_any_manager_call(override, monkeypatch):', 'def test_redirected_secure_storage_refuses_before_any_manager_call(\n    override, monkeypatch\n):')
+              data = text.encode()
+              assert blob_sha(data) == after, (name, blob_sha(data), after)
+              payload = json.dumps({'content': base64.b64encode(data).decode(), 'encoding':'base64'}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/haotool/claude-swap/git/blobs', data=payload, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json','Content-Type':'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+              assert result['sha'] == after
+              print('PREPARED_BLOB '+json.dumps({'path': name,'sha': after}))
+          PY
