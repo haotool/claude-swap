@@ -1,0 +1,53 @@
+name: Verify PR12 source transport
+on:
+  push:
+    branches: [review/prepare-pr12-20260920]
+    paths: [.github/workflows/verify-pr12-review.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact patch and prepare immutable blobs only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, re, subprocess, urllib.request, zlib
+          text = pathlib.Path('.github/workflows/prepare-pr12-review.yml').read_text()
+          encoded = re.search(r"encoded = '''(.*?)'''", text, re.S).group(1)
+          # Correct a transport transcription, never relax the exact byte check.
+          assert encoded.count('RKEXMM317') == 1
+          encoded = encoded.replace('RKEXMM317', 'RKEXM317')
+          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'd7eeff6010ec08864b3d4851acf383d9ad9d53346f8d59874f8eb7b1a7fcede5'
+          subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
+          subprocess.run(['git', 'apply', '-'], input=patch, check=True)
+          expected = {
+              'README.md': 'dec3eec2ee06227cb2fb1a08de9ad14cf7100720',
+              'src/claude_swap/cli.py': '4b3c4c314b66662eb29294e90f970e8f1bbc4550',
+              'src/claude_swap/task_scheduler.py': 'ad6cf06344238307e87d32799de93620fc126127',
+              'tests/test_auto_service.py': '4dcf0336473d3108ebe3297b49420b27ec7ebdd7',
+              'tests/test_auto_service_cli.py': '4ddcc8192b88d482889f55c3b3850e203edec83e',
+              'tests/test_task_scheduler.py': '7f97a228872f63b0648aacd79605d02c61ebbe69',
+              'tests/windows_task_scheduler_check.py': '7f93e7500b7a5d00eb445696b6655f31ff75158f',
+          }
+          assert set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()) == set(expected)
+          for path, sha in expected.items():
+              content = pathlib.Path(path).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+              assert actual == sha, (path, actual, sha)
+              payload = json.dumps({'content': base64.b64encode(content).decode(), 'encoding': 'base64'}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/haotool/claude-swap/git/blobs', data=payload, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              assert blob['sha'] == sha
+              print('PREPARED_BLOB ' + json.dumps({'path': path, 'sha': sha, 'bytes': len(content)}))
+          PY
