@@ -116,6 +116,36 @@ Defaults like the threshold and cooldown are configurable with `cswap config set
 
 </details>
 
+#### Background automatic switching on Windows
+
+Autoswitch settings take effect only while an auto engine is running. To keep
+the existing loop running without an open terminal on Windows:
+
+```bash
+cswap auto --install-service
+cswap auto --service-status
+cswap auto --uninstall-service
+```
+
+This opts the current Windows user into a Task Scheduler job: start now and
+at logon, with a five-minute trigger that retries after the action exits.
+It uses the interactive login token at least privilege and stores no password.
+It does not run after logout, wake a sleeping computer, or recover a hung
+process. `IgnoreNew` prevents overlapping instances of this task, not a second
+manually started `cswap auto`, TUI, or menu-bar engine.
+
+Installation records the current `CLAUDE_CONFIG_DIR` choice (including unset)
+and home directory. Set engine options through `cswap config`; service flags
+cannot be combined with foreground auto options. Reinstall to select another
+profile or Python installation. Installation refuses `CLAUDE_SECURESTORAGE_CONFIG_DIR`
+until the engine supports that redirected store. The task points to that installation's
+`pythonw.exe`; do not delete the environment while using the service.
+
+Status reports the scheduler's state, not credential health or a successful
+switch. It prints the existing `claude-swap.log` and the bounded
+`auto-service.log` that captures the background CLI output. Uninstall removes
+the task and stops its action; diagnostic logs and account data are retained.
+
 ### Run multiple accounts at the same time (session mode)
 
 Launch Claude Code as a specific account in the current terminal only — every other terminal and the VS Code extension stay on your default account, so two accounts can work in parallel.

@@ -80,3 +80,43 @@ jobs:
         # that holds under either ordering.
         timeout-minutes: 15
         run: uv run pytest -o faulthandler_timeout=600
+
+
+  windows-task-scheduler:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Install the wheel into a path containing spaces
+        shell: pwsh
+        run: |
+          uv build --wheel --out-dir "$env:RUNNER_TEMP/cswap-wheel"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          uv venv "$env:RUNNER_TEMP/cswap path with spaces"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $wheel = Get-ChildItem "$env:RUNNER_TEMP/cswap-wheel/*.whl" | Select-Object -First 1
+          uv pip install --python "$env:RUNNER_TEMP/cswap path with spaces/Scripts/python.exe" $wheel.FullName
+          exit $LASTEXITCODE
+      - name: Exercise native lifecycle and recovery serially
+        shell: pwsh
+        run: |
+          uv run python tests/windows_task_scheduler_check.py --folder "$env:RUNNER_TEMP/cswap-native-$env:GITHUB_RUN_ID" --python "$env:RUNNER_TEMP/cswap path with spaces/Scripts/python.exe" --recovery
+          exit $LASTEXITCODE
+      - name: Verify cleanup even after a failed check
+        if: always()
+        shell: pwsh
+        run: |
+          $folder = "$env:RUNNER_TEMP/cswap-native-$env:GITHUB_RUN_ID"
+          if (Test-Path "$folder/receipt.json") {
+            & .venv/Scripts/python.exe tests/windows_task_scheduler_check.py --folder $folder --cleanup
+            exit $LASTEXITCODE
+          }
