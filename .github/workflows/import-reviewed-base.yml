@@ -1,0 +1,28 @@
+name: Import reviewed upstream base
+on:
+  push:
+    branches: [research/merged-pr-review-20260920]
+    paths: [.github/workflows/import-reviewed-base.yml]
+permissions:
+  contents: read
+jobs:
+  import:
+    if: github.repository == 'haotool/claude-swap'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Import exact upstream history without moving main or the feature branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch https://github.com/realiti4/claude-swap.git main:refs/remotes/upstream/main
+          test "$(git rev-parse upstream/main)" = 9aa6d0292736173e70d4c5d8e2026210fe39a9ee
+          git merge-base --is-ancestor 7187ce83b444c6af7b61ec8ee092623566a2d8fa upstream/main
+          gh auth setup-git
+          git push origin 9aa6d0292736173e70d4c5d8e2026210fe39a9ee:refs/heads/review/upstream-base-20260920
