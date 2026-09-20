@@ -573,6 +573,29 @@ Examples:
         sys.exit(130)
 
 
+def _auto_service(args) -> int:
+    """Route the Windows service flags without constructing a switcher."""
+    from claude_swap import task_scheduler
+
+    if args.uninstall_service:
+        result = task_scheduler.uninstall()
+        print("Auto service removed." if result["removed"] else "Auto service was not installed.")
+        print(dimmed("Diagnostic logs and account data are retained."))
+        return 0
+
+    result = task_scheduler.install() if args.install_service else task_scheduler.status()
+    if not result["installed"]:
+        print("Auto service is not installed.")
+        print(dimmed("Install it with: cswap auto --install-service"))
+        return 0
+    verb = "installed" if args.install_service else "state"
+    print(f"Auto service {verb}: {result['state']} (Task Scheduler).")
+    print(f"  task:   {result['task_name']}")
+    print(f"  log:    {result['log']}")
+    print(f"  output: {result['output_log']}")
+    return 0
+
+
 def _auto_command(argv: list[str]) -> None:
     """Handle `cswap auto [--once] [--json] [...]`.
 
@@ -682,7 +705,31 @@ Defaults live in settings.json in the backup root; flags override them.
         action="store_true",
         help="Enable debug logging",
     )
+    service = parser.add_mutually_exclusive_group()
+    service.add_argument(
+        "--install-service", action="store_true",
+        help="Install and start the per-user Windows background task",
+    )
+    service.add_argument(
+        "--service-status", action="store_true",
+        help="Report the Windows background task's scheduler state",
+    )
+    service.add_argument(
+        "--uninstall-service", action="store_true",
+        help="Stop and remove the Windows background task (retain logs)",
+    )
     args = parser.parse_args(argv)
+    if args.install_service or args.service_status or args.uninstall_service:
+        # Reject even explicitly supplied default values. Management does
+        # not persist runtime flags; the loop reads settings.json instead.
+        if len(argv) != 1:
+            parser.error("service operations cannot be combined with auto runtime options")
+        try:
+            sys.exit(_auto_service(args))
+        except ClaudeSwitchError as exc:
+            error(f"Error: {exc}")
+            sys.exit(1)
+        return  # tests can replace sys.exit; never fall through to auto
 
     from claude_swap.autoswitch import AutoSwitchEngine, AutoSwitchEvent
     from claude_swap.printer import accent, yellowed
