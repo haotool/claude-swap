@@ -1,0 +1,58 @@
+name: Prepare reviewed JSON transport
+on:
+  push:
+    branches: [research/merged-pr-review-20260920]
+    paths: [.github/workflows/prepare-json-transport.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.repository == 'haotool/claude-swap'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: aa2c206dbc6f517842a81a5d874d2dc66b6fb55f
+          persist-credentials: false
+      - name: Prepare exact reviewed blobs only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.request
+          edits = {
+              'src/claude_swap/task_scheduler.py': (
+                  '7d1436ebbbac791727cf9079090221d5bf2086bd',
+                  [
+                      ('        "try { $p = [Text.Encoding]::UTF8.GetString("\n        "[Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json; "',
+                       '        "try { $p = [Console]::In.ReadToEnd() | ConvertFrom-Json; "'),
+                      ('input=_encoded(payload or {}),',
+                       '# Data is not PowerShell source; ASCII JSON survives the Windows\n            # console code page without an extra Base64 transport layer.\n            input=json.dumps(payload or {}, ensure_ascii=True),'),
+                  ]),
+              'tests/test_task_scheduler.py': (
+                  '85d7f35cf592c9c75e4626c60c91710bcd916435',
+                  [('    assert json.loads(base64.b64decode(run.call_args.kwargs["input"])) == payload',
+                    '    data = run.call_args.kwargs["input"]\n    assert data.isascii()\n    assert json.loads(data) == payload')]),
+          }
+          for path, (expected, replacements) in edits.items():
+              content = pathlib.Path(path).read_text()
+              for old, new in replacements:
+                  assert content.count(old) == 1, path
+                  content = content.replace(old, new)
+              data = content.encode()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert actual == expected, (path, actual, expected)
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/haotool/claude-swap/git/blobs',
+                  data=json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'},
+                  method='POST',
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+              assert result['sha'] == expected
+              print(json.dumps({'path': path, 'sha': expected, 'bytes': len(data)}))
+          PY
